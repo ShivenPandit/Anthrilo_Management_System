@@ -153,3 +153,67 @@ def get_summary_report(db: Session = Depends(get_db)):
         "fast_moving_count": service.fast_moving_inventory_report(90)["fast_moving_items_count"],
         "production_plans": service.production_plan_report()["summary"]
     }
+
+
+# ==================== YARN REPORTS ====================
+
+@router.get("/yarn/purchase-raise")
+def get_purchase_raise_report(
+    min_stock_threshold: float = Query(100.0, description="Minimum stock threshold"),
+    days_forecast: int = Query(30, description="Days to forecast demand"),
+    db: Session = Depends(get_db)
+):
+    """Generate purchase raise report for yarn based on stock levels"""
+    service = ReportsService(db)
+    return service.purchase_raise_for_yarn_report(min_stock_threshold, days_forecast)
+
+
+# ==================== BUNDLE SKU REPORTS ====================
+
+@router.get("/sales/bundle-sku")
+def get_bundle_sku_sales_report(
+    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db)
+):
+    """Get sales report for bundle/combo SKUs"""
+    service = ReportsService(db)
+    return service.bundle_sku_sales_report(start_date, end_date)
+
+
+# ==================== DISCOUNT REPORTS ====================
+
+@router.get("/discounts/general")
+def get_discount_report_general(
+    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db)
+):
+    """Get general discount report across all sales"""
+    service = ReportsService(db)
+    return service.discount_report_general(start_date, end_date)
+
+
+@router.get("/discounts/by-panel")
+def get_discount_report_by_panel(
+    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db)
+):
+    """Get discount report grouped by sales panel"""
+    service = ReportsService(db)
+    return service.discount_report_by_panel(start_date, end_date)
+
+
+# ==================== SETTLEMENT REPORTS ====================
+
+@router.get("/settlements/panel-settlement")
+def get_settlement_report(
+    panel_id: Optional[int] = Query(None, description="Filter by specific panel ID"),
+    start_date: Optional[date] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[date] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db)
+):
+    """Get settlement report for panels showing amounts due/payable"""
+    service = ReportsService(db)
+    return service.settlement_report(panel_id, start_date, end_date)

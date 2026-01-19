@@ -118,14 +118,8 @@ npm test
 │   ├── public/
 │   └── package.json
 └── README.md
+
 ```
-
-## Documentation
-
-- [Quick Start Guide](QUICKSTART.md) - Get up and running quickly
-- [Manual Setup Guide](MANUAL_SETUP.md) - Detailed installation and configuration
-- [Implementation Status](IMPLEMENTATION_STATUS.md) - Current development progress
-- [Phase 1 Complete](PHASE_1_COMPLETE.md) - Reports & Analytics implementation
 
 ## License
 
