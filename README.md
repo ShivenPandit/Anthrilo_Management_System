@@ -150,20 +150,6 @@ npm test
 
 ```
 
-## Current Status
-
-| Module | Completion |
-|--------|------------|
-| Raw Material & Processing | 95% |
-| Garment & Sales | 100% ✅ |
-| Financial & Marketing | 95% |
-| **Reports & Analytics** | **100%** ✅ |
-| Database Layer | 100% ✅ |
-| API Layer | 100% ✅ |
-| **Frontend UI** | **95%** ✅ |
-| **Dark Mode** | **100%** ✅ |
-| **Overall** | **95%** ✅ |
-
 ## License
 
 Proprietary - Anthrilo Management System
