@@ -117,8 +117,6 @@ npm test
 │   │   └── types/            # TypeScript types
 │   ├── public/
 │   └── package.json
-├── QUICKSTART.md             # Quick setup guide
-├── MANUAL_SETUP.md           # Detailed setup instructions
 └── README.md
 ```
 
