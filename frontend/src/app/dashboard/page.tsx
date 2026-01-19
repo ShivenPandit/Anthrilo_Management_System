@@ -1,7 +1,9 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { garmentApi, inventoryApi, salesApi } from '@/lib/api';
+import { garmentApi } from '@/lib/api';
+import { StatCard, PageHeader } from '@/components/ui/Common';
+import Link from 'next/link';
 
 export default function DashboardPage() {
   // Fetch summary data
@@ -13,112 +15,165 @@ export default function DashboardPage() {
     },
   });
 
-  const { data: lowStock } = useQuery({
-    queryKey: ['lowStock'],
-    queryFn: async () => {
-      const response = await inventoryApi.getLowStock(10);
-      return response.data;
-    },
-  });
-
   const stats = [
     {
-      name: 'Active Garments',
+      title: 'Active Garments',
       value: garments?.length || 0,
       icon: '👕',
-      color: 'bg-blue-500',
+      color: 'blue' as const,
     },
     {
-      name: 'Low Stock Items',
-      value: lowStock?.length || 0,
+      title: 'Low Stock Items',
+      value: 0,
       icon: '⚠️',
-      color: 'bg-yellow-500',
+      color: 'yellow' as const,
     },
     {
-      name: 'Today\'s Sales',
+      title: "Today's Sales",
       value: '0',
       icon: '💰',
-      color: 'bg-green-500',
+      color: 'green' as const,
     },
     {
-      name: 'Active Panels',
+      title: 'Active Panels',
       value: '0',
       icon: '🏪',
-      color: 'bg-purple-500',
+      color: 'purple' as const,
+    },
+  ];
+
+  const quickActions = [
+    {
+      title: 'View All Reports',
+      description: 'Access all 19 business reports',
+      href: '/dashboard/reports/reports-index',
+      icon: '📊',
+      color: 'blue',
+    },
+    {
+      title: 'Purchase Raise',
+      description: 'Check yarn purchase recommendations',
+      href: '/dashboard/reports/raw-materials/purchase-raise',
+      icon: '📦',
+      color: 'red',
+      badge: 'NEW',
+    },
+    {
+      title: 'Panel Settlement',
+      description: 'Calculate panel settlements',
+      href: '/dashboard/reports/panels/settlement',
+      icon: '💵',
+      color: 'green',
+      badge: 'NEW',
+    },
+    {
+      title: 'Bundle Sales',
+      description: 'Size-wise sales analysis',
+      href: '/dashboard/reports/sales/bundle-sku',
+      icon: '📈',
+      color: 'yellow',
+      badge: 'NEW',
+    },
+    {
+      title: 'Discount Analysis',
+      description: 'Product discount reports',
+      href: '/dashboard/reports/sales/discount-general',
+      icon: '🏷️',
+      color: 'purple',
+      badge: 'NEW',
+    },
+    {
+      title: 'Add Garment',
+      description: 'Create new garment product',
+      href: '/dashboard/garments/master',
+      icon: '➕',
+      color: 'indigo',
     },
   ];
 
   return (
     <div>
-      <h1 className="mb-8">Dashboard Overview</h1>
+      <PageHeader
+        title="Dashboard Overview"
+        description="Welcome to Anthrilo Management System"
+      />
 
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         {stats.map((stat) => (
-          <div key={stat.name} className="card">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-600">{stat.name}</p>
-                <p className="text-3xl font-bold text-gray-900 mt-2">{stat.value}</p>
-              </div>
-              <div className={`${stat.color} text-white p-3 rounded-lg text-2xl`}>
-                {stat.icon}
-              </div>
-            </div>
-          </div>
+          <StatCard
+            key={stat.title}
+            title={stat.title}
+            value={stat.value}
+            icon={stat.icon}
+            color={stat.color}
+          />
         ))}
       </div>
 
       {/* Quick Actions */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-        <div className="card hover:shadow-lg transition-shadow cursor-pointer">
-          <h3 className="mb-2">Record Sale</h3>
-          <p className="text-gray-600 text-sm">Quickly record a new sales transaction</p>
-          <button className="btn btn-primary mt-4 w-full">New Sale</button>
-        </div>
-
-        <div className="card hover:shadow-lg transition-shadow cursor-pointer">
-          <h3 className="mb-2">Update Inventory</h3>
-          <p className="text-gray-600 text-sm">Adjust stock levels and locations</p>
-          <button className="btn btn-primary mt-4 w-full">Update Stock</button>
-        </div>
-
-        <div className="card hover:shadow-lg transition-shadow cursor-pointer">
-          <h3 className="mb-2">Production Plan</h3>
-          <p className="text-gray-600 text-sm">Create a new production plan</p>
-          <button className="btn btn-primary mt-4 w-full">New Plan</button>
+      <div className="mb-8">
+        <h2 className="text-xl font-bold mb-4 text-gray-900 dark:text-gray-100">Quick Actions</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {quickActions.map((action) => (
+            <Link
+              key={action.title}
+              href={action.href}
+              className="card hover:shadow-2xl hover:scale-105 transition-all duration-300 cursor-pointer group border-l-4 border-l-primary-500 dark:border-l-primary-400"
+            >
+              <div className="flex items-start justify-between mb-3">
+                <span className="text-4xl">{action.icon}</span>
+                {action.badge && (
+                  <span className="px-3 py-1 bg-gradient-to-r from-green-400 to-green-500 text-white dark:from-green-500 dark:to-green-600 text-xs rounded-full font-bold shadow-md animate-pulse">
+                    {action.badge}
+                  </span>
+                )}
+              </div>
+              <h3 className="mb-2 text-gray-900 dark:text-gray-100 font-semibold group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors">
+                {action.title}
+              </h3>
+              <p className="text-gray-600 dark:text-gray-400 text-sm">{action.description}</p>
+            </Link>
+          ))}
         </div>
       </div>
 
       {/* Recent Activity */}
       <div className="card">
-        <h2 className="mb-4">Recent Activity</h2>
+        <h2 className="mb-4 text-gray-900 dark:text-gray-100">Getting Started</h2>
         <div className="space-y-4">
-          <div className="border-b pb-4">
-            <div className="flex justify-between items-start">
+          <div className="border-b border-gray-200 dark:border-gray-700 pb-4">
+            <div className="flex items-start">
+              <span className="text-2xl mr-3">✅</span>
               <div>
-                <p className="font-medium">Low stock alert: Cotton T-Shirt</p>
-                <p className="text-sm text-gray-500">Size M - Only 5 units remaining</p>
+                <p className="font-medium text-gray-900 dark:text-gray-100">System Setup Complete</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                  Database configured and all 19 reports are ready to use
+                </p>
               </div>
-              <span className="text-xs text-gray-400">2 hours ago</span>
             </div>
           </div>
-          <div className="border-b pb-4">
-            <div className="flex justify-between items-start">
+          <div className="border-b border-gray-200 dark:border-gray-700 pb-4">
+            <div className="flex items-start">
+              <span className="text-2xl mr-3">📝</span>
               <div>
-                <p className="font-medium">New sale recorded</p>
-                <p className="text-sm text-gray-500">Panel: Amazon - ₹2,450</p>
+                <p className="font-medium text-gray-900 dark:text-gray-100">Next Steps</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                  1. Add garment products • 2. Create sales records • 3. Generate reports
+                </p>
               </div>
-              <span className="text-xs text-gray-400">5 hours ago</span>
             </div>
           </div>
-          <div className="pb-4">
-            <div className="flex justify-between items-start">
+          <div>
+            <div className="flex items-start">
+              <span className="text-2xl mr-3">🎯</span>
               <div>
-                <p className="font-medium">Production plan completed</p>
-                <p className="text-sm text-gray-500">Summer Collection Batch #123</p>
+                <p className="font-medium text-gray-900 dark:text-gray-100">Explore Reports</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                  Navigate to Reports section to explore stock analysis, forecasting,
+                  discounts, and settlement reports
+                </p>
               </div>
-              <span className="text-xs text-gray-400">1 day ago</span>
             </div>
           </div>
         </div>

@@ -3,9 +3,14 @@
 import { useQuery } from '@tanstack/react-query';
 import { garmentApi } from '@/lib/api';
 import { useState } from 'react';
+import { GarmentForm } from '@/components/forms/GarmentForm';
+import { DataTable, Column } from '@/components/ui/DataTable';
+import { PageHeader } from '@/components/ui/Common';
 
 export default function GarmentMasterPage() {
   const [search, setSearch] = useState('');
+  const [showForm, setShowForm] = useState(false);
+  const [selectedGarment, setSelectedGarment] = useState(null);
 
   const { data: garments, isLoading } = useQuery({
     queryKey: ['garments'],
@@ -15,110 +20,96 @@ export default function GarmentMasterPage() {
     },
   });
 
-  const filteredGarments = garments?.filter((g) =>
-    g.name.toLowerCase().includes(search.toLowerCase()) ||
-    g.style_sku.toLowerCase().includes(search.toLowerCase())
+  const filteredGarments = garments?.filter((g: any) =>
+    g.name?.toLowerCase().includes(search.toLowerCase()) ||
+    g.sku?.toLowerCase().includes(search.toLowerCase())
   );
+
+  const columns: Column<any>[] = [
+    { key: 'sku', header: 'SKU', width: '15%' },
+    { key: 'name', header: 'Name', width: '20%' },
+    { key: 'category', header: 'Category', width: '12%' },
+    { key: 'size', header: 'Size', width: '8%' },
+    {
+      key: 'mrp',
+      header: 'MRP',
+      render: (value) => <span className="text-gray-900 dark:text-gray-100">₹{value?.toFixed(2)}</span>,
+    },
+    {
+      key: 'selling_price',
+      header: 'Selling Price',
+      render: (value) => <span className="text-gray-900 dark:text-gray-100">₹{value?.toFixed(2)}</span>,
+    },
+    {
+      key: 'is_active',
+      header: 'Status',
+      render: (value) => (
+        <span
+          className={`px-3 py-1 rounded-full text-xs font-medium ${
+            value
+              ? 'bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200'
+              : 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200'
+          }`}
+        >
+          {value ? 'Active' : 'Inactive'}
+        </span>
+      ),
+    },
+  ];
 
   return (
     <div>
-      <div className="flex justify-between items-center mb-6">
-        <h1>Garment Master Data</h1>
-        <button className="btn btn-primary">+ Add Garment</button>
-      </div>
+      <PageHeader
+        title="Garment Master Data"
+        description="Manage all garment products"
+        action={{
+          label: showForm ? 'Cancel' : '+ Add Garment',
+          onClick: () => {
+            setShowForm(!showForm);
+            setSelectedGarment(null);
+          },
+        }}
+      />
 
-      {/* Search Bar */}
-      <div className="mb-6">
+      {showForm && (
+        <div className="card mb-6">
+          <h2 className="mb-4 text-gray-900 dark:text-gray-100">{selectedGarment ? 'Edit' : 'Create'} Garment</h2>
+          <GarmentForm
+            initialData={selectedGarment}
+            onSuccess={() => {
+              setShowForm(false);
+              setSelectedGarment(null);
+            }}
+            onCancel={() => {
+              setShowForm(false);
+              setSelectedGarment(null);
+            }}
+          />
+        </div>
+      )}
+
+      <div className="card mb-4">
         <input
           type="text"
           placeholder="Search by name or SKU..."
-          className="input max-w-md"
+          className="input"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
       </div>
 
-      {/* Garments Table */}
-      <div className="card overflow-hidden">
-        {isLoading ? (
-          <div className="text-center py-8">Loading...</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    SKU
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Name
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Category
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Sizes
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    MRP
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Actions
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {filteredGarments?.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} className="px-6 py-8 text-center text-gray-500">
-                      No garments found. Create your first garment to get started.
-                    </td>
-                  </tr>
-                ) : (
-                  filteredGarments?.map((garment) => (
-                    <tr key={garment.id} className="hover:bg-gray-50">
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                        {garment.style_sku}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {garment.name}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {garment.category}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {garment.sizes.join(', ')}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        ₹{garment.mrp}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span
-                          className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                            garment.is_active
-                              ? 'bg-green-100 text-green-800'
-                              : 'bg-red-100 text-red-800'
-                          }`}
-                        >
-                          {garment.is_active ? 'Active' : 'Inactive'}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        <button className="text-primary-600 hover:text-primary-900 mr-3">
-                          Edit
-                        </button>
-                        <button className="text-red-600 hover:text-red-900">Delete</button>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        )}
+      <div className="card">
+        <h2 className="mb-4 text-gray-900 dark:text-gray-100">Garment List</h2>
+        <DataTable
+          data={filteredGarments || []}
+          columns={columns}
+          isLoading={isLoading}
+          emptyMessage="No garments found. Create your first garment to get started."
+          onRowClick={(row) => {
+            setSelectedGarment(row);
+            setShowForm(true);
+          }}
+        />
       </div>
     </div>
   );

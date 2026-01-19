@@ -47,56 +47,56 @@ export default function SalesReportsPage() {
 
   return (
     <div>
-      <h1 className="mb-6">Sales Reports</h1>
+      <h1 className="mb-6 text-gray-900 dark:text-gray-100">Sales Reports</h1>
 
       {/* Report Type Selector */}
       <div className="card mb-6">
-        <h3 className="mb-4">Select Report Type</h3>
+        <h3 className="mb-4 text-gray-900 dark:text-gray-100">Select Report Type</h3>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <button
             onClick={() => setReportType('daily')}
             className={`p-4 border-2 rounded-lg transition-all ${
               reportType === 'daily'
-                ? 'border-primary-600 bg-primary-50'
-                : 'border-gray-200 hover:border-primary-300'
+                ? 'border-primary-600 bg-primary-50 dark:bg-primary-900/20 dark:border-primary-400'
+                : 'border-gray-200 dark:border-gray-700 hover:border-primary-300 dark:hover:border-primary-600'
             }`}
           >
             <div className="text-2xl mb-2">📅</div>
-            <div className="font-semibold">Daily Sales</div>
-            <div className="text-sm text-gray-500">Single day report</div>
+            <div className="font-semibold text-gray-900 dark:text-gray-100">Daily Sales</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">Single day report</div>
           </button>
 
           <button
             onClick={() => setReportType('panel')}
             className={`p-4 border-2 rounded-lg transition-all ${
               reportType === 'panel'
-                ? 'border-primary-600 bg-primary-50'
-                : 'border-gray-200 hover:border-primary-300'
+                ? 'border-primary-600 bg-primary-50 dark:bg-primary-900/20 dark:border-primary-400'
+                : 'border-gray-200 dark:border-gray-700 hover:border-primary-300 dark:hover:border-primary-600'
             }`}
           >
             <div className="text-2xl mb-2">🏪</div>
-            <div className="font-semibold">Panel-Wise</div>
-            <div className="text-sm text-gray-500">By sales channel</div>
+            <div className="font-semibold text-gray-900 dark:text-gray-100">Panel-Wise</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">By sales channel</div>
           </button>
 
           <button
             onClick={() => setReportType('inactive')}
             className={`p-4 border-2 rounded-lg transition-all ${
               reportType === 'inactive'
-                ? 'border-primary-600 bg-primary-50'
-                : 'border-gray-200 hover:border-primary-300'
+                ? 'border-primary-600 bg-primary-50 dark:bg-primary-900/20 dark:border-primary-400'
+                : 'border-gray-200 dark:border-gray-700 hover:border-primary-300 dark:hover:border-primary-600'
             }`}
           >
             <div className="text-2xl mb-2">⚠️</div>
-            <div className="font-semibold">Inactive Panels</div>
-            <div className="text-sm text-gray-500">No recent activity</div>
+            <div className="font-semibold text-gray-900 dark:text-gray-100">Inactive Panels</div>
+            <div className="text-sm text-gray-500 dark:text-gray-400">No recent activity</div>
           </button>
         </div>
 
         {/* Filters */}
         {reportType === 'daily' && (
           <div className="mt-4">
-            <label className="block text-sm font-medium mb-2">Report Date</label>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Report Date</label>
             <input
               type="date"
               value={reportDate}
@@ -109,7 +109,7 @@ export default function SalesReportsPage() {
         {reportType === 'panel' && (
           <div className="mt-4 grid grid-cols-2 gap-4 max-w-md">
             <div>
-              <label className="block text-sm font-medium mb-2">Start Date</label>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Start Date</label>
               <input
                 type="date"
                 value={startDate}
@@ -118,7 +118,7 @@ export default function SalesReportsPage() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium mb-2">End Date</label>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">End Date</label>
               <input
                 type="date"
                 value={endDate}
@@ -132,86 +132,88 @@ export default function SalesReportsPage() {
 
       {/* Report Display */}
       {isLoading ? (
-        <div className="card text-center py-12">Loading...</div>
+        <div className="card text-center py-12">
+          <div className="text-gray-600 dark:text-gray-400">Loading...</div>
+        </div>
       ) : currentReport ? (
         <div className="space-y-6">
           {/* Summary for Daily Report */}
           {reportType === 'daily' && currentReport.summary && (
             <>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-                <div className="card">
-                  <div className="text-sm text-gray-600 mb-1">Net Sales</div>
-                  <div className="text-3xl font-bold text-green-600">
+                <div className="card hover:shadow-xl transition-shadow">
+                  <div className="text-sm text-gray-600 dark:text-gray-400 mb-1">Net Sales</div>
+                  <div className="text-3xl font-bold text-green-600 dark:text-green-400">
                     ₹{currentReport.summary.net_sales_value.toFixed(2)}
                   </div>
                 </div>
-                <div className="card">
-                  <div className="text-sm text-gray-600 mb-1">Transactions</div>
-                  <div className="text-3xl font-bold text-primary-600">
+                <div className="card hover:shadow-xl transition-shadow">
+                  <div className="text-sm text-gray-600 dark:text-gray-400 mb-1">Transactions</div>
+                  <div className="text-3xl font-bold text-primary-600 dark:text-primary-400">
                     {currentReport.summary.total_transactions}
                   </div>
                 </div>
-                <div className="card">
-                  <div className="text-sm text-gray-600 mb-1">Units Sold</div>
-                  <div className="text-3xl font-bold text-primary-600">
+                <div className="card hover:shadow-xl transition-shadow">
+                  <div className="text-sm text-gray-600 dark:text-gray-400 mb-1">Units Sold</div>
+                  <div className="text-3xl font-bold text-primary-600 dark:text-primary-400">
                     {currentReport.summary.net_units}
                   </div>
                 </div>
-                <div className="card">
-                  <div className="text-sm text-gray-600 mb-1">Returns</div>
-                  <div className="text-3xl font-bold text-red-600">
+                <div className="card hover:shadow-xl transition-shadow">
+                  <div className="text-sm text-gray-600 dark:text-gray-400 mb-1">Returns</div>
+                  <div className="text-3xl font-bold text-red-600 dark:text-red-400">
                     {currentReport.summary.total_returns}
                   </div>
                 </div>
               </div>
 
               <div className="card">
-                <h3 className="mb-4">Transactions</h3>
+                <h3 className="mb-4 text-gray-900 dark:text-gray-100">Transactions</h3>
                 <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-200">
-                    <thead className="bg-gray-50">
+                  <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead className="bg-gray-50 dark:bg-gray-800">
                       <tr>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 dark:text-gray-400 uppercase">
                           Invoice
                         </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                           Size
                         </th>
-                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
+                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                           Qty
                         </th>
-                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
+                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                           Price
                         </th>
-                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
+                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                           Discount %
                         </th>
-                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
+                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                           Total
                         </th>
-                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">
+                        <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                           Type
                         </th>
                       </tr>
                     </thead>
-                    <tbody className="bg-white divide-y divide-gray-200">
+                    <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                       {currentReport.transactions.map((txn: any) => (
-                        <tr key={txn.id} className="hover:bg-gray-50">
-                          <td className="px-4 py-3 text-sm">{txn.invoice_number || '-'}</td>
-                          <td className="px-4 py-3 text-sm">{txn.size}</td>
-                          <td className="px-4 py-3 text-sm text-right">{txn.quantity}</td>
-                          <td className="px-4 py-3 text-sm text-right">₹{txn.unit_price}</td>
-                          <td className="px-4 py-3 text-sm text-right">{txn.discount_percentage}%</td>
-                          <td className="px-4 py-3 text-sm text-right font-medium">
+                        <tr key={txn.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
+                          <td className="px-4 py-3 text-sm text-gray-900 dark:text-gray-100">{txn.invoice_number || '-'}</td>
+                          <td className="px-4 py-3 text-sm text-gray-900 dark:text-gray-100">{txn.size}</td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900 dark:text-gray-100">{txn.quantity}</td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900 dark:text-gray-100">₹{txn.unit_price}</td>
+                          <td className="px-4 py-3 text-sm text-right text-gray-900 dark:text-gray-100">{txn.discount_percentage}%</td>
+                          <td className="px-4 py-3 text-sm text-right font-medium text-gray-900 dark:text-gray-100">
                             ₹{txn.total_amount}
                           </td>
                           <td className="px-4 py-3 text-sm text-center">
                             {txn.is_return ? (
-                              <span className="px-2 py-1 text-xs bg-red-100 text-red-800 rounded">
+                              <span className="px-3 py-1 text-xs bg-red-100 dark:bg-red-900 text-red-800 dark:text-red-200 rounded-full font-medium">
                                 Return
                               </span>
                             ) : (
-                              <span className="px-2 py-1 text-xs bg-green-100 text-green-800 rounded">
+                              <span className="px-3 py-1 text-xs bg-green-100 dark:bg-green-900 text-green-800 dark:text-green-200 rounded-full font-medium">
                                 Sale
                               </span>
                             )}
@@ -228,48 +230,48 @@ export default function SalesReportsPage() {
           {/* Panel-wise Report */}
           {reportType === 'panel' && currentReport.panels && (
             <div className="card">
-              <h3 className="mb-4">Panel Performance</h3>
+              <h3 className="mb-4 text-gray-900 dark:text-gray-100">Panel Performance</h3>
               <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
+                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                  <thead className="bg-gray-50 dark:bg-gray-800">
                     <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                         Panel Name
                       </th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                         Type
                       </th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                         Transactions
                       </th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                         Units Sold
                       </th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                         Gross Sales
                       </th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                         Returns
                       </th>
-                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                         Net Sales
                       </th>
                     </tr>
                   </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
+                  <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                     {Object.entries(currentReport.panels).map(([panelId, data]: [string, any]) => (
-                      <tr key={panelId} className="hover:bg-gray-50">
-                        <td className="px-4 py-3 text-sm font-medium">{data.panel_name}</td>
-                        <td className="px-4 py-3 text-sm">{data.panel_type}</td>
-                        <td className="px-4 py-3 text-sm text-right">{data.total_transactions}</td>
-                        <td className="px-4 py-3 text-sm text-right">{data.total_units_sold}</td>
-                        <td className="px-4 py-3 text-sm text-right">
+                      <tr key={panelId} className="hover:bg-gray-50 dark:hover:bg-gray-800">
+                        <td className="px-4 py-3 text-sm font-medium text-gray-900 dark:text-gray-100">{data.panel_name}</td>
+                        <td className="px-4 py-3 text-sm text-gray-900 dark:text-gray-100">{data.panel_type}</td>
+                        <td className="px-4 py-3 text-sm text-right text-gray-900 dark:text-gray-100">{data.total_transactions}</td>
+                        <td className="px-4 py-3 text-sm text-right text-gray-900 dark:text-gray-100">{data.total_units_sold}</td>
+                        <td className="px-4 py-3 text-sm text-right text-gray-900 dark:text-gray-100">
                           ₹{data.gross_sales_value.toFixed(2)}
                         </td>
-                        <td className="px-4 py-3 text-sm text-right text-red-600">
+                        <td className="px-4 py-3 text-sm text-right text-red-600 dark:text-red-400">
                           ₹{data.returns_value.toFixed(2)}
                         </td>
-                        <td className="px-4 py-3 text-sm text-right font-medium text-green-600">
+                        <td className="px-4 py-3 text-sm text-right font-medium text-green-600 dark:text-green-400">
                           ₹{data.net_sales_value.toFixed(2)}
                         </td>
                       </tr>
@@ -283,35 +285,35 @@ export default function SalesReportsPage() {
           {/* Inactive Panels */}
           {reportType === 'inactive' && currentReport.inactive_panels && (
             <div className="card">
-              <h3 className="mb-4">Inactive Panels ({currentReport.inactive_panels_count})</h3>
+              <h3 className="mb-4 text-gray-900 dark:text-gray-100">Inactive Panels ({currentReport.inactive_panels_count})</h3>
               {currentReport.inactive_panels.length > 0 ? (
                 <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-200">
-                    <thead className="bg-gray-50">
+                  <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead className="bg-gray-50 dark:bg-gray-800">
                       <tr>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                           Panel Name
                         </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                           Type
                         </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                           Last Sale
                         </th>
-                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
+                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">
                           Days Inactive
                         </th>
                       </tr>
                     </thead>
-                    <tbody className="bg-white divide-y divide-gray-200">
+                    <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                       {currentReport.inactive_panels.map((panel: any) => (
-                        <tr key={panel.id} className="hover:bg-gray-50">
-                          <td className="px-4 py-3 text-sm font-medium">{panel.panel_name}</td>
-                          <td className="px-4 py-3 text-sm">{panel.panel_type}</td>
-                          <td className="px-4 py-3 text-sm">
+                        <tr key={panel.id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
+                          <td className="px-4 py-3 text-sm font-medium text-gray-900 dark:text-gray-100">{panel.panel_name}</td>
+                          <td className="px-4 py-3 text-sm text-gray-900 dark:text-gray-100">{panel.panel_type}</td>
+                          <td className="px-4 py-3 text-sm text-gray-900 dark:text-gray-100">
                             {panel.last_sale_date || 'Never'}
                           </td>
-                          <td className="px-4 py-3 text-sm text-right text-red-600">
+                          <td className="px-4 py-3 text-sm text-right text-red-600 dark:text-red-400">
                             {panel.days_since_last_sale || 'N/A'}
                           </td>
                         </tr>
@@ -320,7 +322,7 @@ export default function SalesReportsPage() {
                   </table>
                 </div>
               ) : (
-                <div className="text-center py-8 text-green-600">
+                <div className="text-center py-8 text-green-600 dark:text-green-400 font-semibold">
                   ✓ All panels are active!
                 </div>
               )}
@@ -328,7 +330,7 @@ export default function SalesReportsPage() {
           )}
         </div>
       ) : (
-        <div className="card text-center py-12 text-gray-500">
+        <div className="card text-center py-12 text-gray-500 dark:text-gray-400">
           Select report parameters
         </div>
       )}

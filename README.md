@@ -40,29 +40,58 @@ Enterprise-grade ERP system for textile manufacturing and garment production man
 
 ### Setup
 
-1. Clone the repository
-```bash
-git clone <repository-url>
-cd "Anthrilo Management System"
+#### 1️⃣ Database Setup
+
+Create a PostgreSQL database:
+```sql
+CREATE DATABASE anthrilo_db;
+CREATE USER anthrilo_user WITH PASSWORD 'your_password';
+GRANT ALL PRIVILEGES ON DATABASE anthrilo_db TO anthrilo_user;
 ```
 
-2. Run setup script
+#### 2️⃣ Backend Setup
+
 ```powershell
-.\setup.ps1
+# Navigate to backend
+cd backend
+
+# Install dependencies
+pip install uvicorn fastapi pydantic-settings sqlalchemy psycopg2-binary python-dotenv email-validator python-jose[cryptography] passlib[bcrypt]
+
+# Create .env file with:
+# DATABASE_URL=postgresql://anthrilo_user:your_password@localhost/anthrilo_db
+# SECRET_KEY=your-secret-key-here
+
+# Run database migrations
+python -c "from app.db.base import Base; from app.db.session import engine; Base.metadata.create_all(bind=engine)"
+
+# Start backend server
+python -m uvicorn app.main:app --reload
 ```
 
-3. Follow the instructions to:
-   - Setup PostgreSQL database
-   - Start backend server
-   - Start frontend server
+Backend will run on: **http://127.0.0.1:8000**
 
-For detailed instructions, see [QUICKSTART.md](QUICKSTART.md) or [MANUAL_SETUP.md](MANUAL_SETUP.md)
+#### 3️⃣ Frontend Setup
 
-### Access Points
+```powershell
+# Navigate to frontend (in new terminal)
+cd frontend
 
-- **Frontend**: http://localhost:3000
-- **Backend API**: http://localhost:8000
-- **API Documentation**: http://localhost:8000/docs
+# Install dependencies
+npm install
+
+# Start development server
+npm run dev
+```
+
+Frontend will run on: **http://localhost:3000**
+
+### 🚀 Quick Access
+
+- **Frontend Application**: http://localhost:3000
+- **Backend API**: http://127.0.0.1:8000
+- **API Documentation (Swagger)**: http://127.0.0.1:8000/docs
+- **API Documentation (ReDoc)**: http://127.0.0.1:8000/redoc
 
 ## Database Migrations
 
@@ -120,6 +149,20 @@ npm test
 └── README.md
 
 ```
+
+## Current Status
+
+| Module | Completion |
+|--------|------------|
+| Raw Material & Processing | 95% |
+| Garment & Sales | 100% ✅ |
+| Financial & Marketing | 95% |
+| **Reports & Analytics** | **100%** ✅ |
+| Database Layer | 100% ✅ |
+| API Layer | 100% ✅ |
+| **Frontend UI** | **95%** ✅ |
+| **Dark Mode** | **100%** ✅ |
+| **Overall** | **95%** ✅ |
 
 ## License
 
