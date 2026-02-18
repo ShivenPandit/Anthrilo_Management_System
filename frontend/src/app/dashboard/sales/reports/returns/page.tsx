@@ -198,7 +198,7 @@ export default function DailyReturnReportPage() {
                     {data.search_results && (
                         <div className="card bg-gray-50 dark:bg-gray-800/50">
                             <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">🔍 API Debug Information</h3>
-                            
+
                             <div className="space-y-3">
                                 <div>
                                     <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">Phase 1: Search Results</p>
@@ -247,7 +247,7 @@ export default function DailyReturnReportPage() {
                                         <p className="font-semibold mb-1">📊 RTO Analysis:</p>
                                         <p>• Found {data.search_results.RTO} RTOs in search (Phase 1)</p>
                                         <p>• But {data.debug_info?.total_failed_rto || data.search_results.RTO} failed to get detailed data (Phase 2)</p>
-                                        <p>• This is likely because Unicommerce's return/get API doesn't return complete data for RTO-type returns.</p>
+                                        <p>• This is likely because Unicommerce&apos;s return/get API doesn&apos;t return complete data for RTO-type returns.</p>
                                     </div>
                                 )}
                             </div>

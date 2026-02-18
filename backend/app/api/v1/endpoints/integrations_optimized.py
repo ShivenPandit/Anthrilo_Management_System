@@ -41,12 +41,14 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
-        logger.info(f"WebSocket connected. Total: {len(self.active_connections)}")
+        logger.info(
+            f"WebSocket connected. Total: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-        logger.info(f"WebSocket disconnected. Total: {len(self.active_connections)}")
+        logger.info(
+            f"WebSocket disconnected. Total: {len(self.active_connections)}")
 
     async def broadcast(self, message: dict):
         """Send data to all connected clients."""
@@ -963,7 +965,8 @@ async def get_daily_return_report(
                         logger.info(
                             f"Return search {rtype}: found {len(return_orders)} returns (createdFrom/To)")
                         if return_orders:
-                            logger.info(f"Return search {rtype}: sample codes = {[r.get('code') for r in return_orders[:3]]}")
+                            logger.info(
+                                f"Return search {rtype}: sample codes = {[r.get('code') for r in return_orders[:3]]}")
                         found_returns = return_orders
                     else:
                         errors = data.get("errors", [])
@@ -998,7 +1001,8 @@ async def get_daily_return_report(
                             logger.info(
                                 f"Return search {rtype}: fallback found {len(found_returns)} returns (updatedFrom/To)")
                             if found_returns:
-                                logger.info(f"Return search {rtype}: fallback sample codes = {[r.get('code') for r in found_returns[:3]]}")
+                                logger.info(
+                                    f"Return search {rtype}: fallback sample codes = {[r.get('code') for r in found_returns[:3]]}")
                     except Exception as e:
                         logger.error(
                             f"Return search {rtype} fallback error: {e}")
@@ -1050,7 +1054,7 @@ async def get_daily_return_report(
         async with httpx.AsyncClient(timeout=timeout) as client:
             for entry in all_return_codes:
                 get_url = f"{base_url}/oms/return/get"
-                
+
                 # RTOs use shipmentCode, CIRs use reversePickupCode
                 if entry["type"] == "RTO":
                     get_payload = {
@@ -1062,7 +1066,7 @@ async def get_daily_return_report(
                         "reversePickupCode": entry["code"],
                         "shipmentCode": None,
                     }
-                
+
                 try:
                     resp = await client.post(get_url, json=get_payload, headers=headers)
                     if resp.status_code == 401:
@@ -1117,7 +1121,8 @@ async def get_daily_return_report(
                             failed_cir_codes.append(entry["code"])
 
                 except Exception as e:
-                    logger.error(f"Return get {entry['code']} ({entry['type']}) error: {e}")
+                    logger.error(
+                        f"Return get {entry['code']} ({entry['type']}) error: {e}")
                     if entry["type"] == "RTO":
                         failed_rto_codes.append(entry["code"])
                     else:
@@ -1125,9 +1130,11 @@ async def get_daily_return_report(
 
         # Log summary of failures
         if failed_rto_codes:
-            logger.warning(f"Failed to get details for {len(failed_rto_codes)} RTO returns: {failed_rto_codes[:5]}")
+            logger.warning(
+                f"Failed to get details for {len(failed_rto_codes)} RTO returns: {failed_rto_codes[:5]}")
         if failed_cir_codes:
-            logger.warning(f"Failed to get details for {len(failed_cir_codes)} CIR returns: {failed_cir_codes[:5]}")
+            logger.warning(
+                f"Failed to get details for {len(failed_cir_codes)} CIR returns: {failed_cir_codes[:5]}")
 
         # =====================================================================
         # Phase 3: Fetch sale order details for channel + pricing
@@ -1314,10 +1321,17 @@ async def get_best_skus_monthly(
     month: int = Query(None, description="Month (1-12), defaults to current"),
     year: int = Query(None, description="Year, defaults to current"),
     limit: int = Query(20, description="Number of top SKUs"),
+    force_refresh: bool = Query(
+        False, description="Bypass cache and re-fetch"),
+    b2c_only: bool = Query(
+        False, description="Exclude unpriced wholesale/B2B orders (sellingPrice=0 AND maxRetailPrice=0)"),
 ):
     """
     Get best performing SKUs for a given month.
     Uses Redis cache: current month=1hr TTL, historical=24hr TTL.
+    Revenue uses sellingPrice; falls back to maxRetailPrice (AMAZON_FLEX etc.).
+    Wholesale/B2B SHOPIFY bulk orders have genuinely-zero prices in Unicommerce
+    (invoicing is handled externally). Use b2c_only=true to exclude them.
     """
     try:
         service = get_unicommerce_service()
@@ -1325,13 +1339,19 @@ async def get_best_skus_monthly(
         m = month or now.month
         y = year or now.year
 
-        # Check Redis cache first
-        cache_key = f"uc:best_skus:{y}:{m}:{limit}"
-        cached = CacheService.get(cache_key)
-        if cached:
-            logger.info(f"BEST SKUs {y}-{m:02d}: Redis cache hit")
-            cached["_cached"] = True
-            return cached
+        # Check Redis cache first (skip if force_refresh)
+        cache_suffix = "b2c" if b2c_only else "all"
+        cache_key = f"uc:best_skus:{y}:{m}:{limit}:{cache_suffix}"
+        if not force_refresh:
+            cached = CacheService.get(cache_key)
+            if cached:
+                logger.info(f"BEST SKUs {y}-{m:02d}: Redis cache hit")
+                cached["_cached"] = True
+                return cached
+        else:
+            CacheService.delete(cache_key)
+            logger.info(
+                f"BEST SKUs {y}-{m:02d}: Force refresh - cache cleared")
 
         logger.info(f"BEST SKUs {y}-{m:02d}: Cache miss, fetching from API...")
 
@@ -1363,15 +1383,34 @@ async def get_best_skus_monthly(
             for item in order.get("saleOrderItems", []):
                 sku = item.get("itemSku", "UNKNOWN")
                 qty = item.get("quantity", 1) or 1
-                price = float(item.get("sellingPrice", 0) or 0)
+                # Use sellingPrice; fall back to maxRetailPrice (e.g. AMAZON_FLEX)
+                selling_price = float(item.get("sellingPrice", 0) or 0)
+                mrp = float(item.get("maxRetailPrice", 0) or 0)
+                price = selling_price if selling_price > 0 else mrp
+                price_estimated = (selling_price == 0 and mrp > 0)
+                # Unpriced: both sellingPrice and MRP are 0 (wholesale B2B orders
+                # where invoicing is handled externally, e.g. SHOPIFY B2B bulk)
+                is_unpriced = (selling_price == 0 and mrp == 0)
+
+                # If b2c_only mode, skip unpriced wholesale items entirely
+                if b2c_only and is_unpriced:
+                    continue
+
                 if sku not in sku_map:
                     sku_map[sku] = {
                         "sku": sku, "name": item.get("itemName", ""),
-                        "quantity": 0, "revenue": 0.0, "order_count": 0, "channels": {},
+                        "quantity": 0, "revenue": 0.0, "order_count": 0,
+                        "channels": {}, "estimated": False,
+                        "_unpriced_qty": 0,  # temporary: items with ₹0 prices
                     }
                 sku_map[sku]["quantity"] += qty
                 sku_map[sku]["revenue"] += price * qty
                 sku_map[sku]["order_count"] += 1
+                if is_unpriced:
+                    sku_map[sku]["_unpriced_qty"] += qty
+                if price_estimated:
+                    # Flag MRP-estimated revenue
+                    sku_map[sku]["estimated"] = True
                 if channel not in sku_map[sku]["channels"]:
                     sku_map[sku]["channels"][channel] = 0
                 sku_map[sku]["channels"][channel] += qty
@@ -1380,10 +1419,14 @@ async def get_best_skus_monthly(
             s["revenue"] = round(s["revenue"], 2)
             s["avg_price"] = round(
                 s["revenue"] / s["quantity"], 2) if s["quantity"] > 0 else 0
+            # Mark as unpriced if ALL units came from wholesale (₹0 items)
+            s["unpriced"] = (s["_unpriced_qty"] >= s["quantity"])
+            del s["_unpriced_qty"]  # Remove temp field
 
         top_skus = sorted(sku_map.values(),
                           key=lambda x: x["quantity"], reverse=True)[:limit]
 
+        unpriced_count = sum(1 for s in top_skus if s.get("unpriced"))
         result = {
             "success": True,
             "month": m, "year": y,
@@ -1391,6 +1434,8 @@ async def get_best_skus_monthly(
             "total_skus": len(sku_map),
             "total_orders": len(raw_orders),
             "skus": top_skus,
+            "b2c_only": b2c_only,
+            "unpriced_in_top": unpriced_count,
         }
 
         # Cache: current month 1hr, historical 24hr
@@ -1540,7 +1585,8 @@ async def get_cod_vs_prepaid(
         is_current = (y == now.year and m == now.month)
         ttl = CacheService.TTL_VERY_LONG if is_current else 86400
         CacheService.set(cache_key, result, ttl)
-        logger.info(f"COD vs Prepaid: cached result for {y}-{m:02d} (TTL={ttl}s)")
+        logger.info(
+            f"COD vs Prepaid: cached result for {y}-{m:02d} (TTL={ttl}s)")
 
         return result
 

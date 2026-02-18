@@ -517,10 +517,16 @@ class UnicommerceServiceProduction:
             quantity = item.get("quantity", 1) or 1  # Handle null/0 quantity
             total_quantity += quantity
 
+            # Use sellingPrice if available; fall back to maxRetailPrice
+            # Some channels (e.g. AMAZON_FLEX) report sellingPrice=0 but MRP is known
+            selling_price = item.get("sellingPrice") or 0
+            mrp = float(item.get("maxRetailPrice") or 0)
+
             essential_items.append({
                 "itemSku": item.get("itemSku"),
                 "itemName": item.get("itemName"),
-                "sellingPrice": item.get("sellingPrice", 0),
+                "sellingPrice": selling_price,
+                "maxRetailPrice": mrp,
                 "quantity": quantity,
                 "discount": item.get("discount", 0),
                 "taxAmount": item.get("totalIntegratedGst", 0) +
