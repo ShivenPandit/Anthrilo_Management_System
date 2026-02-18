@@ -87,8 +87,13 @@ export default function BestSkusPage() {
             },
         },
         {
+<<<<<<< HEAD
             key: 'order_count', header: 'Items', width: '7%',
             render: (value: number) => <span className="font-medium">{(value || 0).toLocaleString('en-IN')}</span>,
+=======
+            key: 'order_count', header: 'Orders', width: '10%',
+            render: (value: number) => <span className="font-medium">{value || 0}</span>,
+>>>>>>> 1531b3a (feat: Enhance inventory management with dedicated snapshot API, improve stock analysis, and update startup script for backend)
         },
         {
             key: 'avg_price', header: 'Avg Price', width: '11%',
