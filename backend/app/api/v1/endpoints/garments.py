@@ -5,6 +5,8 @@ from app.db.session import get_db
 from app.db.models import Garment
 from app.schemas.garment import Garment as GarmentSchema, GarmentCreate, GarmentUpdate
 from app.services.cache_service import CacheService
+from app.services.websocket_manager import broadcast_inventory_update
+from datetime import datetime
 
 router = APIRouter()
 
@@ -52,8 +54,9 @@ def list_garments(
         query = query.filter(Garment.is_active == is_active)
     garments = query.offset(skip).limit(limit).all()
 
-    # Cache the result
-    CacheService.set(cache_key, garments, CacheService.TTL_LONG)
+    # Cache the result (serialize ORM objects before caching)
+    result = [GarmentSchema.from_orm(g).model_dump(mode='json') for g in garments]
+    CacheService.set(cache_key, result, CacheService.TTL_LONG)
 
     return garments
 
@@ -71,8 +74,12 @@ def get_garment(garment_id: int, db: Session = Depends(get_db)):
     if not garment:
         raise HTTPException(status_code=404, detail="Garment not found")
 
-    # Cache the result
-    CacheService.set_garment_cache(garment, garment_id, CacheService.TTL_LONG)
+    # Cache the result (serialize ORM object before caching)
+    CacheService.set_garment_cache(
+        GarmentSchema.from_orm(garment).model_dump(mode='json'),
+        garment_id,
+        CacheService.TTL_LONG
+    )
 
     return garment
 
@@ -87,7 +94,7 @@ def get_garment_by_sku(style_sku: str, db: Session = Depends(get_db)):
 
 
 @router.put("/{garment_id}", response_model=GarmentSchema)
-def update_garment(garment_id: int, garment_update: GarmentUpdate, db: Session = Depends(get_db)):
+async def update_garment(garment_id: int, garment_update: GarmentUpdate, db: Session = Depends(get_db)):
     """Update a garment."""
     db_garment = db.query(Garment).filter(Garment.id == garment_id).first()
     if not db_garment:
@@ -99,11 +106,22 @@ def update_garment(garment_id: int, garment_update: GarmentUpdate, db: Session =
 
     db.commit()
     db.refresh(db_garment)
+
+    # Invalidate cache
+    CacheService.invalidate_garment_cache()
+
+    # Broadcast update
+    await broadcast_inventory_update({
+        "action": "garment_updated",
+        "garment_id": garment_id,
+        "timestamp": datetime.now().isoformat()
+    })
+
     return db_garment
 
 
 @router.delete("/{garment_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_garment(garment_id: int, db: Session = Depends(get_db)):
+async def delete_garment(garment_id: int, db: Session = Depends(get_db)):
     """Delete a garment."""
     db_garment = db.query(Garment).filter(Garment.id == garment_id).first()
     if not db_garment:
@@ -111,4 +129,15 @@ def delete_garment(garment_id: int, db: Session = Depends(get_db)):
 
     db.delete(db_garment)
     db.commit()
+
+    # Invalidate cache
+    CacheService.invalidate_garment_cache()
+
+    # Broadcast update
+    await broadcast_inventory_update({
+        "action": "garment_deleted",
+        "garment_id": garment_id,
+        "timestamp": datetime.now().isoformat()
+    })
+
     return None

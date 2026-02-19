@@ -260,7 +260,7 @@ export function ChannelBreakdownPanel({
 
     const channelColors = {
         default: 'bg-blue-500',
-        amazone: 'bg-orange-500',
+        amazon: 'bg-orange-500',
         flipkart: 'bg-yellow-500',
         myntra: 'bg-pink-500',
         ajio: 'bg-purple-500',

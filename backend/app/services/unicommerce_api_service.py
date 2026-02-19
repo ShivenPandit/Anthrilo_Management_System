@@ -197,13 +197,24 @@ class UnicommerceAPIService:
         headers = await self._get_headers(facility_code)
 
         async with httpx.AsyncClient(timeout=self.timeout, limits=self.limits) as client:
-            response = await client.get(url, params=params, headers=headers)
-            if response.status_code == 401:
-                await self.token_manager.get_valid_token()
-                headers = await self._get_headers(facility_code)
+            try:
                 response = await client.get(url, params=params, headers=headers)
-            response.raise_for_status()
-            return response
+                if response.status_code == 401:
+                    self.token_manager.invalidate_token()
+                    await self.token_manager.get_valid_token()
+                    headers = await self._get_headers(facility_code)
+                    response = await client.get(url, params=params, headers=headers)
+                response.raise_for_status()
+                return response
+            except httpx.TimeoutException:
+                logger.error(f"Timeout for GET {endpoint}")
+                raise
+            except httpx.HTTPStatusError as e:
+                logger.error(f"HTTP {e.response.status_code} for GET {endpoint}")
+                raise
+            except Exception as e:
+                logger.error(f"Error calling GET {endpoint}: {e}", exc_info=True)
+                raise
 
 
 # =========================================================================

@@ -58,8 +58,9 @@ def list_fabrics(
     total = query.count()
     fabrics = query.offset(skip).limit(page_size).all()
     
+    items = [FabricSchema.from_orm(f) for f in fabrics]
     result = {
-        "items": [FabricSchema.from_orm(f) for f in fabrics],
+        "items": [item.model_dump(mode='json') for item in items],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -86,8 +87,8 @@ def get_fabric(fabric_id: int, db: Session = Depends(get_db)):
     
     result = FabricSchema.from_orm(fabric)
     
-    # Cache result
-    CacheService.set_fabric_cache(result, fabric_id)
+    # Cache result (serialize before caching)
+    CacheService.set_fabric_cache(result.model_dump(mode='json'), fabric_id)
     
     return result
 

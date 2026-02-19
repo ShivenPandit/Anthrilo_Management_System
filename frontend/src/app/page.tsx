@@ -76,14 +76,14 @@ export default function Home() {
           <h2 className="text-3xl font-bold text-center text-slate-900 dark:text-white mb-12">Why Anthrilo?</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {[
-              { title: 'Real-time Unicommerce Sync', desc: 'Live catalog, orders, and revenue data from 11+ sales channels synced automatically.', color: 'primary' },
-              { title: '61,000+ Products Tracked', desc: 'Full catalog search, inventory monitoring, and stock analysis in real-time.', color: 'emerald' },
-              { title: 'Actionable Analytics', desc: 'Channel-wise revenue, SKU sales breakdown, discount analysis, and profitability reports.', color: 'violet' },
-              { title: 'Modern & Fast', desc: 'Built with Next.js 14, React Query caching, and a responsive glass-morphism UI.', color: 'amber' },
+              { title: 'Real-time Unicommerce Sync', desc: 'Live catalog, orders, and revenue data from 11+ sales channels synced automatically.', bgClass: 'bg-primary-100 dark:bg-primary-900/30', textClass: 'text-primary-600 dark:text-primary-400' },
+              { title: '61,000+ Products Tracked', desc: 'Full catalog search, inventory monitoring, and stock analysis in real-time.', bgClass: 'bg-emerald-100 dark:bg-emerald-900/30', textClass: 'text-emerald-600 dark:text-emerald-400' },
+              { title: 'Actionable Analytics', desc: 'Channel-wise revenue, SKU sales breakdown, discount analysis, and profitability reports.', bgClass: 'bg-violet-100 dark:bg-violet-900/30', textClass: 'text-violet-600 dark:text-violet-400' },
+              { title: 'Modern & Fast', desc: 'Built with Next.js 14, React Query caching, and a responsive glass-morphism UI.', bgClass: 'bg-amber-100 dark:bg-amber-900/30', textClass: 'text-amber-600 dark:text-amber-400' },
             ].map((f) => (
               <div key={f.title} className="flex items-start gap-4 p-6 rounded-2xl bg-white/60 dark:bg-slate-800/60 backdrop-blur-sm border border-white/40 dark:border-slate-700/40">
-                <div className={`w-10 h-10 rounded-xl bg-${f.color}-100 dark:bg-${f.color}-900/30 flex items-center justify-center flex-shrink-0`}>
-                  <svg className={`w-5 h-5 text-${f.color}-600 dark:text-${f.color}-400`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                <div className={`w-10 h-10 rounded-xl ${f.bgClass} flex items-center justify-center flex-shrink-0`}>
+                  <svg className={`w-5 h-5 ${f.textClass}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
                 </div>
                 <div>
                   <h4 className="font-bold text-slate-900 dark:text-white mb-1">{f.title}</h4>
@@ -97,13 +97,13 @@ export default function Home() {
         {/* Stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 py-12">
           {[
-            { num: '61K+', label: 'Products', color: 'primary' },
-            { num: '11+', label: 'Sales Channels', color: 'emerald' },
-            { num: '19+', label: 'Reports', color: 'violet' },
-            { num: '24/7', label: 'Real-time', color: 'amber' },
+            { num: '61K+', label: 'Products', textClass: 'text-primary-600 dark:text-primary-400' },
+            { num: '11+', label: 'Sales Channels', textClass: 'text-emerald-600 dark:text-emerald-400' },
+            { num: '19+', label: 'Reports', textClass: 'text-violet-600 dark:text-violet-400' },
+            { num: '24/7', label: 'Real-time', textClass: 'text-amber-600 dark:text-amber-400' },
           ].map((s) => (
             <div key={s.label} className="text-center p-6 rounded-2xl bg-white/60 dark:bg-slate-800/60 backdrop-blur-sm border border-white/40 dark:border-slate-700/40">
-              <div className={`text-3xl font-extrabold text-${s.color}-600 dark:text-${s.color}-400 mb-1`}>{s.num}</div>
+              <div className={`text-3xl font-extrabold ${s.textClass} mb-1`}>{s.num}</div>
               <div className="text-slate-600 dark:text-slate-400 text-sm font-medium">{s.label}</div>
             </div>
           ))}
@@ -136,7 +136,7 @@ export default function Home() {
             </div>
           </div>
           <div className="border-t border-slate-800 pt-8">
-            <p className="text-center text-slate-600 text-sm">© 2025 Anthrilo Management System. All rights reserved.</p>
+            <p className="text-center text-slate-600 text-sm">&copy; 2026 Anthrilo Management System. All rights reserved.</p>
           </div>
         </div>
       </footer>

@@ -52,8 +52,9 @@ def list_yarns(
     total = db.query(Yarn).count()
     yarns = db.query(Yarn).offset(skip).limit(page_size).all()
     
+    items = [YarnSchema.from_orm(y) for y in yarns]
     result = {
-        "items": [YarnSchema.from_orm(y) for y in yarns],
+        "items": [item.model_dump(mode='json') for item in items],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -80,8 +81,8 @@ def get_yarn(yarn_id: int, db: Session = Depends(get_db)):
     
     result = YarnSchema.from_orm(yarn)
     
-    # Cache result
-    CacheService.set_yarn_cache(result, yarn_id)
+    # Cache result (serialize before caching)
+    CacheService.set_yarn_cache(result.model_dump(mode='json'), yarn_id)
     
     return result
 

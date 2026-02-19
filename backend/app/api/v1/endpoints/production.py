@@ -8,6 +8,7 @@ from app.db.session import get_db
 from app.db.models import ProductionPlan, ProductionActivity, Garment
 from app.services.cache_service import CacheService
 from app.services.websocket_manager import broadcast_production_update
+from app.schemas.pagination import PaginatedResponse
 
 router = APIRouter()
 
@@ -64,32 +65,33 @@ async def create_production_plan(plan: ProductionPlanCreate, db: Session = Depen
     return db_plan
 
 
-@router.get("/plans", response_model=List[ProductionPlanSchema])
+@router.get("/plans", response_model=PaginatedResponse[ProductionPlanSchema])
 def list_production_plans(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=100, description="Items per page"),
-    status: str = Query(None, description="Filter by status"),
+    plan_status: str = Query(None, description="Filter by status"),
     db: Session = Depends(get_db)
 ):
     """List all production plans with pagination and Redis caching."""
     skip = (page - 1) * page_size
     
     # Check cache
-    cache_key = f"production:plans:list:{page}:{page_size}:{status}"
+    cache_key = f"production:plans:list:{page}:{page_size}:{plan_status}"
     cached = CacheService.get(cache_key)
     if cached:
-        return cached
+        return PaginatedResponse[ProductionPlanSchema](**cached)
     
     # Build query
     query = db.query(ProductionPlan)
-    if status:
-        query = query.filter(ProductionPlan.status == status)
+    if plan_status:
+        query = query.filter(ProductionPlan.status == plan_status)
     
     total = query.count()
     plans = query.order_by(ProductionPlan.target_date.desc()).offset(skip).limit(page_size).all()
     
+    items = [ProductionPlanSchema.from_orm(p) for p in plans]
     result = {
-        "items": [ProductionPlanSchema.from_orm(p) for p in plans],
+        "items": [item.model_dump(mode='json') for item in items],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -99,7 +101,7 @@ def list_production_plans(
     # Cache result
     CacheService.set(cache_key, result, CacheService.TTL_MEDIUM)
     
-    return result
+    return PaginatedResponse[ProductionPlanSchema](**result)
 
 
 @router.get("/plans/{plan_id}", response_model=ProductionPlanSchema)
@@ -117,7 +119,7 @@ def get_production_plan(plan_id: int, db: Session = Depends(get_db)):
     
     result = ProductionPlanSchema.from_orm(plan)
     
-    # Cache result
-    CacheService.set(cache_key, result, CacheService.TTL_MEDIUM)
+    # Cache result (serialize before caching)
+    CacheService.set(cache_key, result.model_dump(mode='json'), CacheService.TTL_MEDIUM)
     
     return result

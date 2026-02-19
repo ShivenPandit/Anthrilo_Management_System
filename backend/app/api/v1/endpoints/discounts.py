@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from app.db.session import get_db
 from app.db.models import Discount
 from app.services.cache_service import CacheService
+from app.schemas.pagination import PaginatedResponse
 
 router = APIRouter()
 
@@ -51,7 +52,7 @@ def create_discount(discount: DiscountCreate, db: Session = Depends(get_db)):
     return db_discount
 
 
-@router.get("/", response_model=List[DiscountSchema])
+@router.get("/", response_model=PaginatedResponse[DiscountSchema])
 def list_discounts(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=100, description="Items per page"),
@@ -65,7 +66,7 @@ def list_discounts(
     cache_key = f"discounts:list:{page}:{page_size}:{is_active}"
     cached = CacheService.get(cache_key)
     if cached:
-        return cached
+        return PaginatedResponse[DiscountSchema](**cached)
     
     # Build query
     query = db.query(Discount)
@@ -75,8 +76,9 @@ def list_discounts(
     total = query.count()
     discounts = query.offset(skip).limit(page_size).all()
     
+    items = [DiscountSchema.from_orm(d) for d in discounts]
     result = {
-        "items": [DiscountSchema.from_orm(d) for d in discounts],
+        "items": [item.model_dump(mode='json') for item in items],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -86,7 +88,7 @@ def list_discounts(
     # Cache result
     CacheService.set(cache_key, result, CacheService.TTL_MEDIUM)
     
-    return result
+    return PaginatedResponse[DiscountSchema](**result)
 
 
 @router.get("/{discount_id}", response_model=DiscountSchema)
@@ -104,7 +106,7 @@ def get_discount(discount_id: int, db: Session = Depends(get_db)):
     
     result = DiscountSchema.from_orm(discount)
     
-    # Cache result
-    CacheService.set(cache_key, result, CacheService.TTL_LONG)
+    # Cache result (serialize before caching)
+    CacheService.set(cache_key, result.model_dump(mode='json'), CacheService.TTL_LONG)
     
     return result

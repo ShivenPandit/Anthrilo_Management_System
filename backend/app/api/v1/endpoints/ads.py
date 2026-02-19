@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from app.db.session import get_db
 from app.db.models import PaidAd, Panel
 from app.services.cache_service import CacheService
+from app.schemas.pagination import PaginatedResponse
 
 router = APIRouter()
 
@@ -54,7 +55,7 @@ def create_paid_ad(ad: PaidAdCreate, db: Session = Depends(get_db)):
     return db_ad
 
 
-@router.get("/", response_model=List[PaidAdSchema])
+@router.get("/", response_model=PaginatedResponse[PaidAdSchema])
 def list_paid_ads(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=100, description="Items per page"),
@@ -70,7 +71,7 @@ def list_paid_ads(
     cache_key = f"ads:list:{page}:{page_size}:{start_date}:{end_date}:{panel_id}"
     cached = CacheService.get(cache_key)
     if cached:
-        return cached
+        return PaginatedResponse[PaidAdSchema](**cached)
     
     # Build query
     query = db.query(PaidAd)
@@ -84,8 +85,9 @@ def list_paid_ads(
     total = query.count()
     ads = query.order_by(PaidAd.ad_date.desc()).offset(skip).limit(page_size).all()
     
+    items = [PaidAdSchema.from_orm(ad) for ad in ads]
     result = {
-        "items": [PaidAdSchema.from_orm(ad) for ad in ads],
+        "items": [item.model_dump(mode='json') for item in items],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -95,7 +97,7 @@ def list_paid_ads(
     # Cache result
     CacheService.set(cache_key, result, CacheService.TTL_MEDIUM)
     
-    return result
+    return PaginatedResponse[PaidAdSchema](**result)
 
 
 @router.get("/roi/{panel_id}")

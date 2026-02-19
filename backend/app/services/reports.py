@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from typing import List, Optional, Dict, Any
-from decimal import Decimal
+from collections import defaultdict
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_
 from app.db.models import (
@@ -83,7 +83,7 @@ class ReportsService:
                     max(1, (p.target_date - date.today()).days) for p in recent_plans
                 ) / len(recent_plans))
                 avg_daily = total_yarn_req / avg_days_to_target / \
-                    max(1, len(self.db.query(Yarn).count()))
+                    max(1, self.db.query(Yarn).count())
             else:
                 # Fallback: estimate from stock level (assume 1% daily consumption)
                 avg_daily = stock_qty * 0.01 if stock_qty > 0 else 0
@@ -620,11 +620,7 @@ class ReportsService:
         plans = query.all()
 
         # Group by status
-        status_summary = {
-            "PLANNED": [],
-            "IN_PROGRESS": [],
-            "COMPLETED": []
-        }
+        status_summary = defaultdict(list)
 
         for plan in plans:
             garment = self.db.query(Garment).filter(
@@ -743,9 +739,9 @@ class ReportsService:
         query = self.db.query(Sale).join(Garment)
 
         if start_date:
-            query = query.filter(Sale.sale_date >= start_date)
+            query = query.filter(Sale.transaction_date >= start_date)
         if end_date:
-            query = query.filter(Sale.sale_date <= end_date)
+            query = query.filter(Sale.transaction_date <= end_date)
 
         # Identify bundles - products with "BUNDLE", "COMBO", "SET" in category or name
         query = query.filter(
@@ -767,7 +763,7 @@ class ReportsService:
             if garment_id not in bundle_data:
                 bundle_data[garment_id] = {
                     "garment_id": garment_id,
-                    "sku": sale.garment.sku,
+                    "sku": sale.garment.style_sku,
                     "name": sale.garment.name,
                     "category": sale.garment.category,
                     "mrp": float(sale.garment.mrp or 0),
@@ -826,9 +822,9 @@ class ReportsService:
         query = self.db.query(Sale).join(Garment)
 
         if start_date:
-            query = query.filter(Sale.sale_date >= start_date)
+            query = query.filter(Sale.transaction_date >= start_date)
         if end_date:
-            query = query.filter(Sale.sale_date <= end_date)
+            query = query.filter(Sale.transaction_date <= end_date)
 
         sales = query.all()
 
@@ -874,8 +870,8 @@ class ReportsService:
             if not sale.is_return:  # Only include actual sales
                 sales_data.append({
                     "sale_id": sale.id,
-                    "sale_date": sale.sale_date.isoformat(),
-                    "sku": sale.garment.sku,
+                    "sale_date": sale.transaction_date.isoformat(),
+                    "sku": sale.garment.style_sku,
                     "garment_name": sale.garment.name,
                     "quantity": qty,
                     "mrp": round(mrp, 2),
@@ -918,9 +914,9 @@ class ReportsService:
         query = self.db.query(Sale).join(Garment).join(Panel)
 
         if start_date:
-            query = query.filter(Sale.sale_date >= start_date)
+            query = query.filter(Sale.transaction_date >= start_date)
         if end_date:
-            query = query.filter(Sale.sale_date <= end_date)
+            query = query.filter(Sale.transaction_date <= end_date)
 
         sales = query.all()
 
@@ -1002,9 +998,9 @@ class ReportsService:
         if panel_id:
             query = query.filter(Sale.panel_id == panel_id)
         if start_date:
-            query = query.filter(Sale.sale_date >= start_date)
+            query = query.filter(Sale.transaction_date >= start_date)
         if end_date:
-            query = query.filter(Sale.sale_date <= end_date)
+            query = query.filter(Sale.transaction_date <= end_date)
 
         sales = query.all()
 

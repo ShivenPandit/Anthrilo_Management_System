@@ -62,8 +62,8 @@ def list_inventory(skip: int = 0, limit: int = 100, db: Session = Depends(get_db
     inventory = db.query(Inventory).offset(skip).limit(limit).all()
     result = [InventorySchema.from_orm(item) for item in inventory]
 
-    # Cache the result
-    CacheService.set(cache_key, result, CacheService.TTL_SHORT)
+    # Cache the result (serialize before caching)
+    CacheService.set(cache_key, [item.model_dump(mode='json') for item in result], CacheService.TTL_SHORT)
 
     return result
 

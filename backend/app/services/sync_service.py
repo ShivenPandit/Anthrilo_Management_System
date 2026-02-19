@@ -173,12 +173,12 @@ class SyncService:
 
                     # Batch commit every 100 orders
                     if synced_count % 100 == 0:
-                        db.commit()
                         sync_status.total_synced = synced_count
                         sync_status.last_synced_code = calc["order_code"]
                         db.commit()
 
                 except Exception as e:
+                    db.rollback()
                     upsert_errors.append(
                         f"{order.get('code', 'UNKNOWN')}: {str(e)}"
                     )

@@ -6,6 +6,7 @@ from decimal import Decimal
 from pydantic import BaseModel
 from app.db.session import get_db
 from app.db.models import Sale, Garment, Panel
+from app.schemas.pagination import PaginatedResponse
 from app.services.sales_service import invalidate_daily_sales_cache
 from app.services.cache_service import CacheService
 from app.services.websocket_manager import broadcast_sales_update
@@ -92,10 +93,11 @@ async def create_sale(sale: SaleCreate, db: Session = Depends(get_db)):
         "timestamp": datetime.now().isoformat()
     })
 
-    return db_sale
+    # Use from_orm to ensure sku and sale_date fields are properly mapped
+    return SaleSchema.from_orm(db_sale)
 
 
-@router.get("/", response_model=List[SaleSchema])
+@router.get("/", response_model=PaginatedResponse[SaleSchema])
 def list_sales(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(50, ge=1, le=100, description="Items per page"),
@@ -125,8 +127,9 @@ def list_sales(
     total = query.count()
     sales = query.order_by(Sale.transaction_date.desc()).offset(skip).limit(page_size).all()
     
+    items = [SaleSchema.from_orm(sale) for sale in sales]
     result = {
-        "items": [SaleSchema.from_orm(sale) for sale in sales],
+        "items": [item.model_dump(mode='json') for item in items],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -136,7 +139,7 @@ def list_sales(
     # Cache result
     CacheService.set(cache_key, result, CacheService.TTL_SHORT)
     
-    return result
+    return PaginatedResponse[SaleSchema](**result)
 
 
 @router.get("/daily/{transaction_date}", response_model=List[SaleSchema])
@@ -153,7 +156,7 @@ def get_daily_sales(transaction_date: date, db: Session = Depends(get_db)):
     
     result = [SaleSchema.from_orm(sale) for sale in sales]
     
-    # Cache result
-    CacheService.set(cache_key, result, CacheService.TTL_MEDIUM)
+    # Cache result (serialize before caching)
+    CacheService.set(cache_key, [item.model_dump(mode='json') for item in result], CacheService.TTL_MEDIUM)
     
     return result

@@ -150,7 +150,7 @@ class CacheService:
     @staticmethod
     def invalidate_monthly_cache(year: int = None, month: int = None):
         """Invalidate monthly report caches."""
-        if year and month:
+        if year is not None and month is not None:
             CacheService.delete_pattern(f"uc:best_skus:{year}:{month}:*")
             CacheService.delete_pattern(f"uc:cod_prepaid:{year}:{month}")
         else:
