@@ -1452,6 +1452,154 @@ async def get_best_skus_monthly(
 
 
 # =============================================================================
+# SKU VELOCITY - Fast & Slow Movers (Monthly)
+# =============================================================================
+
+@router.get("/unicommerce/sku-velocity")
+async def get_sku_velocity(
+    month: int = Query(None, description="Month (1-12), defaults to current"),
+    year: int = Query(None, description="Year, defaults to current"),
+    limit: int = Query(
+        25, description="Number of SKUs per category (fast/slow)"),
+    min_qty: int = Query(
+        1, description="Minimum qty sold to be considered 'slow mover' (excludes zero-sale SKUs)"),
+    b2c_only: bool = Query(
+        False, description="Exclude wholesale/B2B unpriced orders"),
+    force_refresh: bool = Query(
+        False, description="Bypass cache and re-fetch"),
+):
+    """
+    Get fast-moving and slow-moving SKUs for a given month.
+    - Fast movers: top N SKUs by quantity sold.
+    - Slow movers: bottom N SKUs by quantity sold (with at least min_qty sales).
+    Uses Redis cache: current month 1hr TTL, historical 24hr TTL.
+    """
+    try:
+        service = get_unicommerce_service()
+        now = datetime.now(IST)
+        m = month or now.month
+        y = year or now.year
+
+        cache_suffix = "b2c" if b2c_only else "all"
+        cache_key = f"uc:sku_velocity:{y}:{m}:{limit}:{min_qty}:{cache_suffix}"
+
+        if not force_refresh:
+            cached = CacheService.get(cache_key)
+            if cached:
+                logger.info(f"SKU VELOCITY {y}-{m:02d}: Redis cache hit")
+                cached["_cached"] = True
+                return cached
+        else:
+            CacheService.delete(cache_key)
+            logger.info(
+                f"SKU VELOCITY {y}-{m:02d}: Force refresh - cache cleared")
+
+        logger.info(
+            f"SKU VELOCITY {y}-{m:02d}: Cache miss, fetching from API...")
+
+        from_dt = datetime(y, m, 1, 0, 0, 0, tzinfo=timezone.utc)
+        if m == 12:
+            to_dt = datetime(y + 1, 1, 1, 0, 0, 0,
+                             tzinfo=timezone.utc) - timedelta(seconds=1)
+        else:
+            to_dt = datetime(y, m + 1, 1, 0, 0, 0,
+                             tzinfo=timezone.utc) - timedelta(seconds=1)
+
+        if to_dt > now.replace(tzinfo=timezone.utc):
+            to_dt = now.replace(tzinfo=timezone.utc)
+
+        fetch_result = await service.fetch_all_orders_with_revenue(from_dt, to_dt)
+        if not fetch_result.get("successful", False):
+            return {"success": False, "error": "Failed to fetch orders"}
+
+        raw_orders = fetch_result.get("orders", [])
+
+        # Aggregate by SKU (same logic as best-skus-monthly)
+        sku_map = {}
+        for order in raw_orders:
+            status = order.get("status", "")
+            if status in service.EXCLUDED_STATUSES:
+                continue
+            channel = order.get("channel", "UNKNOWN")
+            for item in order.get("saleOrderItems", []):
+                sku = item.get("itemSku", "UNKNOWN")
+                qty = item.get("quantity", 1) or 1
+                selling_price = float(item.get("sellingPrice", 0) or 0)
+                mrp = float(item.get("maxRetailPrice", 0) or 0)
+                price = selling_price if selling_price > 0 else mrp
+                price_estimated = (selling_price == 0 and mrp > 0)
+                is_unpriced = (selling_price == 0 and mrp == 0)
+
+                if b2c_only and is_unpriced:
+                    continue
+
+                if sku not in sku_map:
+                    sku_map[sku] = {
+                        "sku": sku,
+                        "name": item.get("itemName", ""),
+                        "quantity": 0,
+                        "revenue": 0.0,
+                        "order_count": 0,
+                        "channels": {},
+                        "estimated": False,
+                        "unpriced": False,
+                        "_unpriced_qty": 0,
+                    }
+                sku_map[sku]["quantity"] += qty
+                sku_map[sku]["revenue"] += price * qty
+                sku_map[sku]["order_count"] += 1
+                if is_unpriced:
+                    sku_map[sku]["_unpriced_qty"] += qty
+                if price_estimated:
+                    sku_map[sku]["estimated"] = True
+                if channel not in sku_map[sku]["channels"]:
+                    sku_map[sku]["channels"][channel] = 0
+                sku_map[sku]["channels"][channel] += qty
+
+        for s in sku_map.values():
+            s["revenue"] = round(s["revenue"], 2)
+            s["avg_price"] = round(
+                s["revenue"] / s["quantity"], 2) if s["quantity"] > 0 else 0
+            s["unpriced"] = (s["_unpriced_qty"] >= s["quantity"])
+            del s["_unpriced_qty"]
+
+        all_skus = list(sku_map.values())
+
+        # Fast movers: top N by quantity (descending)
+        fast_movers = sorted(
+            all_skus, key=lambda x: x["quantity"], reverse=True)[:limit]
+
+        # Slow movers: bottom N with at least min_qty (ascending, exclude zero sellers)
+        qualified = [s for s in all_skus if s["quantity"] >= min_qty]
+        slow_movers = sorted(qualified, key=lambda x: x["quantity"])[:limit]
+
+        result = {
+            "success": True,
+            "month": m,
+            "year": y,
+            "period": f"{y}-{m:02d}",
+            "total_skus": len(all_skus),
+            "total_orders": len(raw_orders),
+            "b2c_only": b2c_only,
+            "fast_movers": fast_movers,
+            "slow_movers": slow_movers,
+            "fast_count": len(fast_movers),
+            "slow_count": len(slow_movers),
+        }
+
+        is_current = (y == now.year and m == now.month)
+        ttl = CacheService.TTL_VERY_LONG if is_current else 86400
+        CacheService.set(cache_key, result, ttl)
+        logger.info(f"SKU VELOCITY {y}-{m:02d}: Cached (TTL={ttl}s)")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in sku-velocity: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+# =============================================================================
 # COD vs PREPAID (Monthly)
 # =============================================================================
 

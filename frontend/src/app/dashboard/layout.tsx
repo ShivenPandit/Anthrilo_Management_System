@@ -31,6 +31,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         { name: 'Inventory', href: '/dashboard/garments/inventory' },
         { name: 'Orders', href: '/dashboard/garments/production' },
         { name: 'Best SKUs', href: '/dashboard/garments/best-skus' },
+        { name: 'SKU Velocity', href: '/dashboard/garments/sku-velocity' },
       ],
     },
     {
