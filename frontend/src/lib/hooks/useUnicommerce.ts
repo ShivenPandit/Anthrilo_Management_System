@@ -4,6 +4,14 @@ import { unicommerceApi } from '@/lib/api';
 export interface SalesData {
     success: boolean;
     period: string;
+    data_source?: string;
+    fallback_used?: boolean;
+    last_synced_at?: string | null;
+    data_health?: {
+        coverage?: string;
+        normalized_rows?: number;
+        raw_rows?: number;
+    };
     summary: {
         total_orders: number;
         valid_orders: number;

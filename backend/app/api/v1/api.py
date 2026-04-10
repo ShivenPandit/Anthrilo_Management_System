@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from app.api.v1.endpoints import auth, yarns, fabrics, processes, garments, inventory, sales, panels, production, discounts, ads, reports
 from app.api.v1.endpoints import integrations
+from app.api.v1.endpoints import unicommerce_data
 # Manufacturing Module
 from app.api.v1.endpoints import (
     suppliers, purchase_orders, gate_entry, mrns,
@@ -80,6 +81,10 @@ api_router.include_router(
 # External Integrations (Sales Dashboard)
 api_router.include_router(
     integrations.router, prefix="/integrations", tags=["External Integrations"])
+
+# DB-first Unicommerce analytics data
+api_router.include_router(
+    unicommerce_data.router, prefix="/unicommerce-data", tags=["Unicommerce Data (DB-First)"])
 
 # Unicommerce API Integrations (All 101 endpoints)
 

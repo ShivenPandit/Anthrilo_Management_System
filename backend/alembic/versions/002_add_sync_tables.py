@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 # revision identifiers
 revision = '002_add_sync_tables'
-down_revision = '001_initial_schema'
+down_revision = '001'
 branch_labels = None
 depends_on = None
 

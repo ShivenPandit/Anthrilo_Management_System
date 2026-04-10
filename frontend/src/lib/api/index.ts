@@ -66,31 +66,37 @@ export const productionApi = {
 // Unicommerce integration API
 export const unicommerceApi = {
   // Summary endpoints (dashboard cards)
-  getToday: () => apiClient.get('/integrations/unicommerce/today'),
-  getYesterday: () => apiClient.get('/integrations/unicommerce/yesterday'),
-  getLast7Days: () => apiClient.get('/integrations/unicommerce/last-7-days'),
-  getLast30Days: () => apiClient.get('/integrations/unicommerce/last-30-days'),
-  getLast24Hours: () => apiClient.get('/integrations/unicommerce/today'), // Alias
+  getToday: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'today' } }),
+  getYesterday: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'yesterday' } }),
+  getLast7Days: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'last_7_days' } }),
+  getLast30Days: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'last_30_days' } }),
+  getLast24Hours: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'today' } }), // Alias
+
+  // Canonical DB-first endpoints
+  getDbSales: (params?: { period?: string; from_date?: string; to_date?: string }) =>
+    apiClient.get('/unicommerce-data/sales', { params }),
+  getDbInventory: (params?: { skus?: string; warehouse?: string }) =>
+    apiClient.get('/unicommerce-data/inventory', { params }),
 
   // Paginated order lists (12 per page by default)
   getTodayOrders: (page: number = 1, pageSize: number = 12) =>
-    apiClient.get('/integrations/unicommerce/orders/today', { params: { page, page_size: pageSize } }),
+    apiClient.get('/unicommerce-data/orders', { params: { period: 'today', page, page_size: pageSize } }),
   getYesterdayOrders: (page: number = 1, pageSize: number = 12) =>
-    apiClient.get('/integrations/unicommerce/orders/yesterday', { params: { page, page_size: pageSize } }),
+    apiClient.get('/unicommerce-data/orders', { params: { period: 'yesterday', page, page_size: pageSize } }),
   getLast7DaysOrders: (page: number = 1, pageSize: number = 12) =>
-    apiClient.get('/integrations/unicommerce/orders/last-7-days', { params: { page, page_size: pageSize } }),
+    apiClient.get('/unicommerce-data/orders', { params: { period: 'last_7_days', page, page_size: pageSize } }),
   getLast30DaysOrders: (page: number = 1, pageSize: number = 12) =>
-    apiClient.get('/integrations/unicommerce/orders/last-30-days', { params: { page, page_size: pageSize } }),
+    apiClient.get('/unicommerce-data/orders', { params: { period: 'last_30_days', page, page_size: pageSize } }),
   getCustomOrders: (params: { from_date: string; to_date: string; page?: number; page_size?: number }) =>
-    apiClient.get('/integrations/unicommerce/orders/custom', { params }),
+    apiClient.get('/unicommerce-data/orders', { params: { period: 'custom', ...params } }),
 
   // Sales reports
   getSalesReport: (params?: { from_date?: string; to_date?: string; period?: string }) =>
-    apiClient.get('/integrations/unicommerce/sales-report', { params }),
+    apiClient.get('/unicommerce-data/sales', { params }),
 
   // Daily sales breakdown by channel (single date or range)
   getDailySalesReport: (params: { date?: string; from_date?: string; to_date?: string }) =>
-    apiClient.get('/integrations/unicommerce/daily-sales-report', { params }),
+    apiClient.get('/unicommerce-data/daily-sales-report', { params }),
 
   // Returns report — channel + SKU breakdown
   getReturnReport: (params: {
@@ -99,7 +105,7 @@ export const unicommerceApi = {
     to_date?: string;
     period?: 'daily' | 'weekly' | 'monthly' | 'custom';
     return_type?: string;
-  }) => apiClient.get('/integrations/unicommerce/return-report', { params }),
+  }) => apiClient.get('/unicommerce-data/return-report', { params }),
 
   // Cancellation report — channel + SKU + item-level breakdown
   getCancellationReport: (params: {
@@ -107,15 +113,15 @@ export const unicommerceApi = {
     from_date?: string;
     to_date?: string;
     period?: 'daily' | 'weekly' | 'monthly' | 'custom';
-  }) => apiClient.get('/integrations/unicommerce/cancellation-report', { params }),
+  }) => apiClient.get('/unicommerce-data/cancellation-report', { params }),
 
   // Best performing SKUs for a given month
   getBestSkusMonthly: (params?: { month?: number; year?: number; limit?: number; force_refresh?: boolean; b2c_only?: boolean }) =>
-    apiClient.get('/integrations/unicommerce/best-skus-monthly', { params }),
+    apiClient.get('/unicommerce-data/best-skus-monthly', { params }),
 
   // SKU velocity — fast & slow movers for a given month
   getSkuVelocity: (params?: { month?: number; year?: number; limit?: number; min_qty?: number; b2c_only?: boolean; force_refresh?: boolean }) =>
-    apiClient.get('/integrations/unicommerce/sku-velocity', { params }),
+    apiClient.get('/unicommerce-data/sku-velocity', { params }),
 
   // COD vs prepaid breakdown
   getCodVsPrepaid: (params?: {
@@ -126,29 +132,49 @@ export const unicommerceApi = {
     month?: number;
     year?: number;
   }) =>
-    apiClient.get('/integrations/unicommerce/cod-vs-prepaid', { params }),
+    apiClient.get('/unicommerce-data/cod-vs-prepaid', { params }),
 
   // Channel revenue split
   getChannelRevenue: (period: string = 'last_30_days') =>
-    apiClient.get('/integrations/unicommerce/channel-revenue', { params: { period } }),
+    apiClient.get('/unicommerce-data/channel-revenue', { params: { period } }),
 
   // Sales Activity Report
   getSalesActivity: (params: { from_date: string; to_date: string }) =>
-    apiClient.get('/integrations/unicommerce/sales-activity', { params }),
+    apiClient.get('/unicommerce-data/sales-activity', { params }),
+
+  // SKU sales breakdown
+  getSalesBySku: (params: { period: string; from_date?: string; to_date?: string }) =>
+    apiClient.get('/unicommerce-data/sales-by-sku', { params }),
+
+  // Fabric sales report
+  getFabricSales: (params: { month?: number; year?: number; from_date?: string; to_date?: string; force_refresh?: boolean }) =>
+    apiClient.get('/unicommerce-data/fabric-sales', { params }),
+
+  // Bundle SKU catalog
+  getBundleSkus: (params?: { force_refresh?: boolean }) =>
+    apiClient.get('/unicommerce-data/bundle-skus', { params }),
+
+  // Bundle sales analysis
+  getBundleSalesAnalysis: (params?: {
+    period?: string;
+    from_date?: string;
+    to_date?: string;
+    force_refresh?: boolean;
+  }) => apiClient.get('/unicommerce-data/bundle-sales-analysis', { params }),
 
   // Revenue validation
-  validateRevenue: () => apiClient.get('/integrations/unicommerce/validate'),
+  validateRevenue: () => apiClient.get('/unicommerce-data/validate'),
 
   // Cache helpers
-  clearCache: () => apiClient.post('/integrations/unicommerce/clear-cache'),
-  getCacheStats: () => apiClient.get('/integrations/unicommerce/cache-stats'),
-  checkCacheStatus: () => apiClient.get('/integrations/unicommerce/cache-check'),
+  clearCache: () => apiClient.post('/unicommerce-data/clear-cache'),
+  getCacheStats: () => apiClient.get('/unicommerce-data/cache-stats'),
+  checkCacheStatus: () => apiClient.get('/unicommerce-data/cache-check'),
 
   // Legacy endpoints (kept for backward compat)
   searchOrders: (params: { from_date: string; to_date: string; display_start?: number; display_length?: number }) =>
-    apiClient.get('/integrations/unicommerce/search-orders', { params }),
+    apiClient.get('/unicommerce-data/search-orders', { params }),
   getOrderItems: (orderCode: string) =>
-    apiClient.get(`/integrations/unicommerce/order-items/${orderCode}`),
+    apiClient.get(`/unicommerce-data/order-items/${orderCode}`),
 };
 
 // Procurement

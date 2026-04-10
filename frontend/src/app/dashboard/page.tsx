@@ -103,6 +103,29 @@ export default function DashboardPage() {
   const yesterdayItems = yesterdayData?.summary?.total_items || 0;
   const isLoading = loadingToday && !todayData;
 
+  const dataHealthBadge = useMemo(() => {
+    if (!todayData) {
+      return { label: 'Unknown', dotClass: 'bg-slate-400' };
+    }
+
+    if (todayData.fallback_used) {
+      return { label: 'Using fallback', dotClass: 'bg-amber-500 animate-pulse' };
+    }
+
+    const lastSyncedAt = todayData.last_synced_at;
+    if (lastSyncedAt) {
+      const parsed = new Date(lastSyncedAt);
+      if (!Number.isNaN(parsed.getTime())) {
+        const lagMinutes = (Date.now() - parsed.getTime()) / 60000;
+        if (lagMinutes > 120) {
+          return { label: 'Sync lag', dotClass: 'bg-rose-500 animate-pulse' };
+        }
+      }
+    }
+
+    return { label: 'Healthy', dotClass: 'bg-emerald-500' };
+  }, [todayData]);
+
   // Growth calculations
   const orderGrowth = yesterdayOrders > 0 ? ((todayOrders - yesterdayOrders) / yesterdayOrders) * 100 : 0;
   const revenueGrowth = yesterdayRevenue > 0 ? ((todayRevenue - yesterdayRevenue) / yesterdayRevenue) * 100 : 0;
@@ -282,6 +305,12 @@ export default function DashboardPage() {
               <span className={`w-1.5 h-1.5 rounded-full ${wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
               <span className="text-xs font-medium text-slate-600 dark:text-slate-400">
                 {wsConnected ? 'Live' : 'Offline'}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800">
+              <span className={`w-1.5 h-1.5 rounded-full ${dataHealthBadge.dotClass}`} />
+              <span className="text-xs font-medium text-slate-600 dark:text-slate-400">
+                {dataHealthBadge.label}
               </span>
             </div>
             {updatedAt > 0 && (

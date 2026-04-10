@@ -12,7 +12,9 @@ from app.db.session import Base
 from app.core.config import settings
 
 # Import all models here to ensure they're registered with Base.metadata
-# from app.db.models import ...
+from app.db import models as _models  # noqa: F401
+from app.db import sync_models as _sync_models  # noqa: F401
+from app.db import export_models as _export_models  # noqa: F401
 
 config = context.config
 

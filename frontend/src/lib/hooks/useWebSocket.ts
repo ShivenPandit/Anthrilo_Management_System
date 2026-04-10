@@ -123,6 +123,13 @@ export function useWebSocket() {
                         queryClient.setQueryData(['unicommerce-today'], msg.data)
                         setLastUpdate(new Date())
                     }
+                    if (msg.type === 'sync_completed') {
+                        queryClient.invalidateQueries({ queryKey: ['unicommerce-today'] })
+                        queryClient.invalidateQueries({ queryKey: ['unicommerce-yesterday'] })
+                        queryClient.invalidateQueries({ queryKey: ['unicommerce-last-7-days'] })
+                        queryClient.invalidateQueries({ queryKey: ['unicommerce-channels'] })
+                        setLastUpdate(new Date())
+                    }
                     if (msg.type === 'new_order' && msg.data) {
                         setNewOrderNotification(msg.data)
                         setLastUpdate(new Date())

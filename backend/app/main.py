@@ -4,6 +4,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from app.core.config import settings
 from app.api.v1.api import api_router
 from app.core.redis import redis_client
+from app.services.unicommerce_sync_orchestrator import get_unicommerce_sync_orchestrator
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +29,21 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    if settings.UNICOMMERCE_SYNC_ENABLE_SCHEDULER:
+        orchestrator = get_unicommerce_sync_orchestrator()
+        started = orchestrator.start_scheduler()
+        if started:
+            logger.info("Unicommerce incremental sync scheduler enabled")
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    orchestrator = get_unicommerce_sync_orchestrator()
+    await orchestrator.stop_scheduler()
 
 
 @app.get("/")
