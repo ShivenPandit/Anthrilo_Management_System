@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ucCatalog } from '@/features/sales';
+import { ucCatalog } from '@/features/sales/api';
 
 const PAGE_SIZE = 25;
 
@@ -294,7 +294,7 @@ export default function GarmentMasterPage() {
           <div className="flex items-center gap-2 text-xs text-slate-400">
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 font-medium">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              Live
+              Synced
             </span>
           </div>
         </div>

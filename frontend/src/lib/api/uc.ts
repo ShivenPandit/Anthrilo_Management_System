@@ -19,6 +19,7 @@ export const ucSales = {
     getDailySalesReport: unicommerceApi.getDailySalesReport,
     getReturnReport: unicommerceApi.getReturnReport,
     getCancellationReport: unicommerceApi.getCancellationReport,
+    getReportProgress: unicommerceApi.getReportProgress,
     getChannelRevenue: unicommerceApi.getChannelRevenue,
     validateRevenue: unicommerceApi.validateRevenue,
     getBestSkusMonthly: unicommerceApi.getBestSkusMonthly,
@@ -77,19 +78,19 @@ export const ucCatalog = {
             payload.keyword = params.keyword;
         }
 
-        return apiClient.post('/uc/catalog/item/search', payload);
+        return apiClient.post('/unicommerce-data/catalog-search', payload);
     },
 
     // Inventory totals (independent of pagination)
     getInventorySummary: () => {
-        return apiClient.get('/uc/catalog/inventory/summary');
+        return apiClient.get('/unicommerce-data/inventory-summary');
     },
 };
 
 // Inventory (used by the stock-analysis page)
 export const ucInventory = {
     getSummary: () =>
-        apiClient.get('/uc/catalog/inventory/summary').then((res) => {
+        apiClient.get('/unicommerce-data/inventory-summary').then((res) => {
             const d = res.data || {};
             return {
                 data: {
@@ -107,18 +108,25 @@ export const ucInventory = {
     getSnapshot: (params: { page: number; page_size: number; in_stock_only?: boolean; category?: string; enabled_only?: boolean }) => {
         const payload: any = {
             getInventorySnapshot: true,
+            stockFilter: params.in_stock_only ? 'in_stock' : 'all',
             searchOptions: {
                 displayStart: (params.page - 1) * params.page_size,
                 displayLength: params.page_size,
             },
         };
-        return apiClient.post('/uc/catalog/item/search', payload).then((res) => {
+        if (params.category) {
+            payload.categoryName = params.category;
+        }
+
+        return apiClient.post('/unicommerce-data/catalog-search', payload).then((res) => {
             const elements = res.data?.elements || [];
-            const totalRecords = res.data?.totalRecords || 0;
+            const totalRecords = res.data?.totalRecords || elements.length;
             const snapshots = elements.map((el: any) => {
                 const snap = el.inventorySnapshots?.[0] || {};
                 return {
                     itemTypeSKU: el.skuCode || '',
+                    skuCode: el.skuCode || '',
+                    name: el.name || el.itemTypeName || '',
                     categoryName: el.categoryName || '',
                     color: el.color || '',
                     size: el.size || '',
@@ -158,13 +166,15 @@ export const ucInventory = {
                 displayLength: params.page_size,
             },
         };
-        return apiClient.post('/uc/catalog/item/search', payload).then((res) => {
+        return apiClient.post('/unicommerce-data/catalog-search', payload).then((res) => {
             const elements = res.data?.elements || [];
-            const totalRecords = res.data?.totalRecords || 0;
+            const totalRecords = res.data?.totalRecords || elements.length;
             const snapshots = elements.map((el: any) => {
                 const snap = el.inventorySnapshots?.[0] || {};
                 return {
                     itemTypeSKU: el.skuCode || '',
+                    skuCode: el.skuCode || '',
+                    name: el.name || el.itemTypeName || '',
                     categoryName: el.categoryName || '',
                     color: el.color || '',
                     size: el.size || '',

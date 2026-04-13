@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ucSales } from '@/features/sales';
+import { ucSales } from '@/features/sales/api';
 import { DataTable, Column } from '@/components/ui/DataTable';
 import { PageHeader, ProgressLoader, ErrorPanel } from '@/components/ui/Common';
 import { motion } from 'framer-motion';

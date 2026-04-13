@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { ucCatalog, ucSales } from '@/features/sales';
+import { ucCatalog, ucSales } from '@/features/sales/api';
 import { PageHeader, StatCard, LoadingSpinner } from '@/components/ui/Common';
 import Link from 'next/link';
 

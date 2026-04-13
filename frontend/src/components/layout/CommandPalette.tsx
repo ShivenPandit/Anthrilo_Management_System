@@ -374,6 +374,30 @@ export const CommandPalette = memo(function CommandPalette({ open, onClose }: Co
     [recentIds],
   );
 
+  const prefetchRoute = useCallback(
+    (href: string) => {
+      try {
+        router.prefetch(href);
+      } catch {
+        // Ignore prefetch failures; route push still works.
+      }
+    },
+    [router],
+  );
+
+  useEffect(() => {
+    if (!open) return;
+
+    const targets = (recentItems.length ? recentItems : SEARCH_ITEMS).slice(0, 12);
+    const timeoutIds = targets.map((item, index) =>
+      window.setTimeout(() => prefetchRoute(item.href), index * 90),
+    );
+
+    return () => {
+      timeoutIds.forEach((id) => window.clearTimeout(id));
+    };
+  }, [open, prefetchRoute, recentItems]);
+
   const displayItems = query.trim() ? results : recentItems;
   const isShowingRecent = !query.trim();
 
@@ -392,10 +416,11 @@ export const CommandPalette = memo(function CommandPalette({ open, onClose }: Co
     (item: SearchItem) => {
       saveRecentId(item.id);
       setRecentIds(getRecentIds());
+      prefetchRoute(item.href);
       router.push(item.href);
       onClose();
     },
-    [router, onClose],
+    [onClose, prefetchRoute, router],
   );
 
   // Keyboard navigation
@@ -536,7 +561,11 @@ export const CommandPalette = memo(function CommandPalette({ open, onClose }: Co
                             key={item.id}
                             data-idx={idx}
                             onClick={() => navigate(item)}
-                            onMouseEnter={() => setCursor(idx)}
+                            onMouseEnter={() => {
+                              setCursor(idx);
+                              prefetchRoute(item.href);
+                            }}
+                            onFocus={() => prefetchRoute(item.href)}
                             className={`w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors ${isActive
                               ? 'bg-primary-50 dark:bg-primary-950/50'
                               : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'

@@ -1,8 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
-import { useEffect, useMemo, useState } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard,
@@ -158,6 +158,7 @@ export function Sidebar({
   onMobileClose,
 }: SidebarProps) {
   const pathname = usePathname();
+  const router = useRouter();
   const { user } = useAuth();
 
   useEffect(() => {
@@ -193,6 +194,62 @@ export function Sidebar({
       return allowedModules.has(moduleKey);
     });
   }, [allowedModules, user]);
+
+  const visibleRoutes = useMemo(() => {
+    const routes: string[] = [];
+
+    visibleNavigation.forEach((item) => {
+      if (item.href) {
+        routes.push(item.href);
+        return;
+      }
+      (item.children || []).forEach((child) => routes.push(child.href));
+    });
+
+    return Array.from(new Set(routes));
+  }, [visibleNavigation]);
+
+  const prefetchRoute = useCallback((href?: string) => {
+    if (!href) return;
+    try {
+      router.prefetch(href);
+    } catch {
+      // Ignore prefetch failures; navigation still works via push/link.
+    }
+  }, [router]);
+
+  useEffect(() => {
+    if (!visibleRoutes.length) return;
+
+    let cancelled = false;
+    const timeoutIds: number[] = [];
+    const win = window as any;
+
+    const startWarmup = () => {
+      visibleRoutes.slice(0, 14).forEach((href, index) => {
+        const id = window.setTimeout(() => {
+          if (!cancelled) prefetchRoute(href);
+        }, index * 130);
+        timeoutIds.push(id);
+      });
+    };
+
+    let idleId: number | undefined;
+    if (typeof win.requestIdleCallback === 'function') {
+      idleId = win.requestIdleCallback(startWarmup, { timeout: 1500 });
+    } else {
+      const id = window.setTimeout(startWarmup, 220);
+      timeoutIds.push(id);
+    }
+
+    return () => {
+      cancelled = true;
+      timeoutIds.forEach((id) => window.clearTimeout(id));
+      if (idleId !== undefined && typeof win.cancelIdleCallback === 'function') {
+        win.cancelIdleCallback(idleId);
+      }
+    };
+  }, [prefetchRoute, visibleRoutes]);
 
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(() => {
     // Auto-expand the group containing the current page
@@ -242,7 +299,13 @@ export function Sidebar({
       >
         {/* Logo */}
         <div className="h-14 2xl:h-16 flex items-center px-3.5 2xl:px-4 border-b border-slate-100 dark:border-slate-800/50">
-          <Link href="/dashboard" onClick={closeForMobile} className="flex items-center gap-3 overflow-hidden flex-1 min-w-0">
+          <Link
+            href="/dashboard"
+            onClick={closeForMobile}
+            onMouseEnter={() => prefetchRoute('/dashboard')}
+            onFocus={() => prefetchRoute('/dashboard')}
+            className="flex items-center gap-3 overflow-hidden flex-1 min-w-0"
+          >
             <div className="w-8 h-8 2xl:w-9 2xl:h-9 rounded-lg bg-primary-600 flex items-center justify-center flex-shrink-0">
               <span className="text-white font-bold text-sm 2xl:text-base">A</span>
             </div>
@@ -274,7 +337,10 @@ export function Sidebar({
                 <Link
                   key={item.name}
                   href={item.href}
+                  prefetch
                   onClick={closeForMobile}
+                  onMouseEnter={() => prefetchRoute(item.href)}
+                  onFocus={() => prefetchRoute(item.href)}
                   className={`sidebar-item 2xl:text-[15px] ${isActive(item.href) ? 'sidebar-active' : ''}`}
                   title={collapsed ? item.name : undefined}
                 >
@@ -319,7 +385,10 @@ export function Sidebar({
                           <Link
                             key={child.href}
                             href={child.href}
+                            prefetch
                             onClick={closeForMobile}
+                            onMouseEnter={() => prefetchRoute(child.href)}
+                            onFocus={() => prefetchRoute(child.href)}
                             className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-[13px] 2xl:text-sm transition-colors duration-150 ${isActive(child.href)
                               ? 'text-primary-600 dark:text-primary-400 bg-primary-50/80 dark:bg-primary-950/40 font-medium'
                               : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800/50'

@@ -27,6 +27,7 @@ services:
       - ENVIRONMENT=${ENVIRONMENT:-production}
       - DEBUG=${DEBUG:-False}
       - RUN_MIGRATIONS_ON_STARTUP=${RUN_MIGRATIONS_ON_STARTUP:-true}
+      - UNICOMMERCE_SYNC_ENABLE_SCHEDULER=false
     depends_on:
       redis:
         condition: service_healthy
@@ -37,6 +38,28 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    networks:
+      - anthrilo_net
+
+  sync_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: anthrilo_sync_worker
+    env_file:
+      - ./backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - DEBUG=${DEBUG:-False}
+      - UNICOMMERCE_SYNC_ENABLE_SCHEDULER=true
+    command: python -m app.workers.unicommerce_scheduler_worker
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
     networks:
       - anthrilo_net
 

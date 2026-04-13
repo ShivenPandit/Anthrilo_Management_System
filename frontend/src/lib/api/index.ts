@@ -66,14 +66,14 @@ export const productionApi = {
 // Unicommerce integration API
 export const unicommerceApi = {
   // Summary endpoints (dashboard cards)
-  getToday: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'today' } }),
-  getYesterday: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'yesterday' } }),
-  getLast7Days: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'last_7_days' } }),
-  getLast30Days: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'last_30_days' } }),
-  getLast24Hours: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'today' } }), // Alias
+  getToday: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'today', lightweight: true } }),
+  getYesterday: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'yesterday', lightweight: true } }),
+  getLast7Days: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'last_7_days', lightweight: true } }),
+  getLast30Days: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'last_30_days', lightweight: true } }),
+  getLast24Hours: () => apiClient.get('/unicommerce-data/sales', { params: { period: 'today', lightweight: true } }), // Alias
 
   // Canonical DB-first endpoints
-  getDbSales: (params?: { period?: string; from_date?: string; to_date?: string }) =>
+  getDbSales: (params?: { period?: string; from_date?: string; to_date?: string; lightweight?: boolean }) =>
     apiClient.get('/unicommerce-data/sales', { params }),
   getDbInventory: (params?: { skus?: string; warehouse?: string }) =>
     apiClient.get('/unicommerce-data/inventory', { params }),
@@ -95,7 +95,7 @@ export const unicommerceApi = {
     apiClient.get('/unicommerce-data/sales', { params }),
 
   // Daily sales breakdown by channel (single date or range)
-  getDailySalesReport: (params: { date?: string; from_date?: string; to_date?: string }) =>
+  getDailySalesReport: (params: { date?: string; from_date?: string; to_date?: string; progress_id?: string }) =>
     apiClient.get('/unicommerce-data/daily-sales-report', { params }),
 
   // Returns report — channel + SKU breakdown
@@ -105,6 +105,7 @@ export const unicommerceApi = {
     to_date?: string;
     period?: 'daily' | 'weekly' | 'monthly' | 'custom';
     return_type?: string;
+    progress_id?: string;
   }) => apiClient.get('/unicommerce-data/return-report', { params }),
 
   // Cancellation report — channel + SKU + item-level breakdown
@@ -113,7 +114,12 @@ export const unicommerceApi = {
     from_date?: string;
     to_date?: string;
     period?: 'daily' | 'weekly' | 'monthly' | 'custom';
+    progress_id?: string;
   }) => apiClient.get('/unicommerce-data/cancellation-report', { params }),
+
+  // Long-running report progress
+  getReportProgress: (progressId: string) =>
+    apiClient.get(`/unicommerce-data/report-progress/${progressId}`),
 
   // Best performing SKUs for a given month
   getBestSkusMonthly: (params?: { month?: number; year?: number; limit?: number; force_refresh?: boolean; b2c_only?: boolean }) =>

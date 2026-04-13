@@ -11,8 +11,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import sys
 from datetime import datetime, timezone
 from typing import List, Optional
+
+BACKEND_ROOT = os.path.dirname(os.path.dirname(__file__))
+if BACKEND_ROOT not in sys.path:
+    sys.path.insert(0, BACKEND_ROOT)
 
 from app.services.unicommerce_sync_orchestrator import get_unicommerce_sync_orchestrator
 

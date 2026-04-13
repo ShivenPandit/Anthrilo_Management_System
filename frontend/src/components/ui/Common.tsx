@@ -87,6 +87,8 @@ interface ProgressLoaderProps {
   loading: boolean;
   stages?: ProgressStage[];
   skeletonRows?: number;
+  progressPercent?: number;
+  progressLabel?: string;
 }
 
 const DEFAULT_STAGES: ProgressStage[] = [
@@ -98,16 +100,32 @@ const DEFAULT_STAGES: ProgressStage[] = [
   { at: 92, label: 'Finalizing…' },
 ];
 
-export function ProgressLoader({ loading, stages, skeletonRows = 5 }: ProgressLoaderProps) {
+export function ProgressLoader({
+  loading,
+  stages,
+  skeletonRows = 5,
+  progressPercent,
+  progressLabel,
+}: ProgressLoaderProps) {
   const [progress, setProgress] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stageList = stages ?? DEFAULT_STAGES;
+  const isControlled = typeof progressPercent === 'number';
 
   useEffect(() => {
     if (resetRef.current) {
       clearTimeout(resetRef.current);
       resetRef.current = null;
+    }
+
+    if (isControlled) {
+      const next = Math.max(0, Math.min(100, Number(progressPercent) || 0));
+      setProgress(next);
+      return () => {
+        if (timerRef.current) clearInterval(timerRef.current);
+        if (resetRef.current) clearTimeout(resetRef.current);
+      };
     }
 
     if (loading) {
@@ -130,11 +148,11 @@ export function ProgressLoader({ loading, stages, skeletonRows = 5 }: ProgressLo
       if (timerRef.current) clearInterval(timerRef.current);
       if (resetRef.current) clearTimeout(resetRef.current);
     };
-  }, [loading]);
+  }, [isControlled, loading, progressPercent]);
 
   if (!loading && progress === 0) return null;
 
-  const stageLabel = stageList.slice().reverse().find(s => progress >= s.at)?.label ?? '';
+  const stageLabel = progressLabel || stageList.slice().reverse().find(s => progress >= s.at)?.label || '';
 
   return (
     <motion.div

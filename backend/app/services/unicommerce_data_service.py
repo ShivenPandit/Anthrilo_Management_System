@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ from app.db.export_models import (
     SalesOrderRecord,
     SalesReturnRecord,
 )
+from app.db.models import ProductMaster
 from app.services.cache_service import CacheService
 from app.services.unicommerce import get_unicommerce_service
 
@@ -44,6 +45,19 @@ class UnicommerceDataService:
 
     def _get_db(self) -> Session:
         return SessionLocal()
+
+    @staticmethod
+    def _emit_progress(
+        progress_cb: Optional[Callable[[int, str], None]],
+        percent: int,
+        label: str,
+    ) -> None:
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(max(0, min(100, int(percent))), label)
+        except Exception:
+            pass
 
     @staticmethod
     def _safe_str(value: Any) -> str:
@@ -660,79 +674,156 @@ class UnicommerceDataService:
         period: str = "today",
         from_date: Optional[datetime] = None,
         to_date: Optional[datetime] = None,
+        include_legacy_orders: bool = True,
     ) -> Dict[str, Any]:
         start, end, resolved_period = self._resolve_range(period, from_date, to_date)
 
         db = self._get_db()
         try:
-            normalized_records = (
-                db.query(SalesOrderRecord)
-                .filter(
-                    or_(
-                        and_(
-                            SalesOrderRecord.order_date.isnot(None),
-                            SalesOrderRecord.order_date >= start,
-                            SalesOrderRecord.order_date <= end,
-                        ),
-                        and_(
-                            SalesOrderRecord.order_date.is_(None),
-                            SalesOrderRecord.created_at >= start,
-                            SalesOrderRecord.created_at <= end,
-                        ),
-                    )
-                )
-                .all()
+            date_filter = or_(
+                and_(
+                    SalesOrderRecord.order_date.isnot(None),
+                    SalesOrderRecord.order_date >= start,
+                    SalesOrderRecord.order_date <= end,
+                ),
+                and_(
+                    SalesOrderRecord.order_date.is_(None),
+                    SalesOrderRecord.created_at >= start,
+                    SalesOrderRecord.created_at <= end,
+                ),
             )
 
-            if normalized_records:
-                rows = [
-                    {
-                        "order_id": r.order_id,
-                        "status": r.status,
-                        "channel": r.channel,
-                        "qty": r.qty,
-                        "selling_price": float(r.selling_price or 0),
-                        "order_date": self._normalize_dt(r.order_date),
-                        "sku": r.sku,
-                        "product_name": r.product_name,
-                        "cod": self._safe_bool((r.raw_data or {}).get("COD") or (r.raw_data or {}).get("cod"), default=False),
-                    }
-                    for r in normalized_records
-                ]
-                detailed_orders = self._orders_from_line_rows(rows)
-                aggregation = self._aggregate_sales_rows(rows)
-                last_synced = max((r.updated_at for r in normalized_records if r.updated_at), default=None)
+            if include_legacy_orders:
+                normalized_records = (
+                    db.query(
+                        SalesOrderRecord.order_id,
+                        SalesOrderRecord.status,
+                        SalesOrderRecord.channel,
+                        SalesOrderRecord.qty,
+                        SalesOrderRecord.selling_price,
+                        SalesOrderRecord.order_date,
+                        SalesOrderRecord.created_at,
+                        SalesOrderRecord.sku,
+                        SalesOrderRecord.product_name,
+                        SalesOrderRecord.raw_data,
+                        SalesOrderRecord.updated_at,
+                    )
+                    .filter(date_filter)
+                    .all()
+                )
 
-                return {
-                    "success": True,
-                    "period": resolved_period,
-                    "from_date": start.isoformat(),
-                    "to_date": end.isoformat(),
-                    "data_source": "normalized_sales_orders",
-                    "fallback_used": False,
-                    "last_synced_at": last_synced.isoformat() if last_synced else None,
-                    "data_health": {
-                        "coverage": "normalized",
-                        "normalized_rows": len(normalized_records),
-                        "raw_rows": 0,
-                    },
-                    "fetch_info": {
-                        "total_available": aggregation["order_count"],
-                        "fetched_count": aggregation["order_count"],
-                        "failed_codes": 0,
-                        "phase1_time_seconds": 0,
-                        "phase2_time_seconds": 0,
-                        "total_time_seconds": 0,
-                        "retry_recovered": 0,
-                        "phase1_dedup": 0,
-                        "phase2_dedup": 0,
-                        "reconciliation_passed": True,
-                    },
-                    "summary": aggregation["summary"],
-                    "orders": aggregation["orders"],
-                    "_orders": self._legacy_orders_from_orders(detailed_orders),
-                    "revenue_method": "db_first_normalized",
-                }
+                if normalized_records:
+                    rows = [
+                        {
+                            "order_id": r.order_id,
+                            "status": r.status,
+                            "channel": r.channel,
+                            "qty": r.qty,
+                            "selling_price": float(r.selling_price or 0),
+                            "order_date": self._normalize_dt(r.order_date or r.created_at),
+                            "sku": r.sku,
+                            "product_name": r.product_name,
+                            "cod": self._safe_bool((r.raw_data or {}).get("COD") or (r.raw_data or {}).get("cod"), default=False),
+                        }
+                        for r in normalized_records
+                    ]
+                    legacy_orders: List[Dict[str, Any]] = []
+                    detailed_orders = self._orders_from_line_rows(rows)
+                    legacy_orders = self._legacy_orders_from_orders(detailed_orders)
+                    aggregation = self._aggregate_sales_rows(rows)
+                    last_synced = max((r.updated_at for r in normalized_records if r.updated_at), default=None)
+
+                    return {
+                        "success": True,
+                        "period": resolved_period,
+                        "from_date": start.isoformat(),
+                        "to_date": end.isoformat(),
+                        "data_source": "normalized_sales_orders",
+                        "fallback_used": False,
+                        "last_synced_at": last_synced.isoformat() if last_synced else None,
+                        "data_health": {
+                            "coverage": "normalized",
+                            "normalized_rows": len(normalized_records),
+                            "raw_rows": 0,
+                        },
+                        "fetch_info": {
+                            "total_available": aggregation["order_count"],
+                            "fetched_count": aggregation["order_count"],
+                            "failed_codes": 0,
+                            "phase1_time_seconds": 0,
+                            "phase2_time_seconds": 0,
+                            "total_time_seconds": 0,
+                            "retry_recovered": 0,
+                            "phase1_dedup": 0,
+                            "phase2_dedup": 0,
+                            "reconciliation_passed": True,
+                        },
+                        "summary": aggregation["summary"],
+                        "orders": aggregation["orders"],
+                        "_orders": legacy_orders,
+                        "revenue_method": "db_first_normalized",
+                    }
+            else:
+                lightweight_records = (
+                    db.query(
+                        SalesOrderRecord.order_id,
+                        SalesOrderRecord.status,
+                        SalesOrderRecord.channel,
+                        SalesOrderRecord.qty,
+                        SalesOrderRecord.selling_price,
+                        SalesOrderRecord.order_date,
+                        SalesOrderRecord.created_at,
+                        SalesOrderRecord.updated_at,
+                    )
+                    .filter(date_filter)
+                    .all()
+                )
+
+                if lightweight_records:
+                    rows = [
+                        {
+                            "order_id": r.order_id,
+                            "status": r.status,
+                            "channel": r.channel,
+                            "qty": r.qty,
+                            "selling_price": float(r.selling_price or 0),
+                            "order_date": self._normalize_dt(r.order_date or r.created_at),
+                        }
+                        for r in lightweight_records
+                    ]
+                    aggregation = self._aggregate_sales_rows(rows)
+                    last_synced = max((r.updated_at for r in lightweight_records if r.updated_at), default=None)
+
+                    return {
+                        "success": True,
+                        "period": resolved_period,
+                        "from_date": start.isoformat(),
+                        "to_date": end.isoformat(),
+                        "data_source": "normalized_sales_orders",
+                        "fallback_used": False,
+                        "last_synced_at": last_synced.isoformat() if last_synced else None,
+                        "data_health": {
+                            "coverage": "normalized",
+                            "normalized_rows": len(lightweight_records),
+                            "raw_rows": 0,
+                        },
+                        "fetch_info": {
+                            "total_available": aggregation["order_count"],
+                            "fetched_count": aggregation["order_count"],
+                            "failed_codes": 0,
+                            "phase1_time_seconds": 0,
+                            "phase2_time_seconds": 0,
+                            "total_time_seconds": 0,
+                            "retry_recovered": 0,
+                            "phase1_dedup": 0,
+                            "phase2_dedup": 0,
+                            "reconciliation_passed": True,
+                        },
+                        "summary": aggregation["summary"],
+                        "orders": aggregation["orders"],
+                        "_orders": [],
+                        "revenue_method": "db_first_normalized",
+                    }
 
             raw_rows, completed_at = self._raw_sales_rows_from_job(db, start, end)
             if not raw_rows:
@@ -784,7 +875,10 @@ class UnicommerceDataService:
                 }
 
             line_rows = self._raw_line_rows_from_sales_payloads(raw_rows, start, end)
-            detailed_orders = self._orders_from_line_rows(line_rows)
+            legacy_orders: List[Dict[str, Any]] = []
+            if include_legacy_orders:
+                detailed_orders = self._orders_from_line_rows(line_rows)
+                legacy_orders = self._legacy_orders_from_orders(detailed_orders)
             aggregation = self._aggregate_sales_rows(line_rows)
 
             return {
@@ -814,7 +908,7 @@ class UnicommerceDataService:
                 },
                 "summary": aggregation["summary"],
                 "orders": aggregation["orders"],
-                "_orders": self._legacy_orders_from_orders(detailed_orders),
+                "_orders": legacy_orders,
                 "revenue_method": "db_first_normalized",
             }
         finally:
@@ -990,7 +1084,7 @@ class UnicommerceDataService:
         if period_norm not in {"today", "yesterday", "last_7_days"}:
             period_norm = "last_7_days"
 
-        sales_result = self.get_sales_data(period=period_norm)
+        sales_result = self.get_sales_data(period=period_norm, include_legacy_orders=False)
         if not sales_result.get("success"):
             return sales_result
 
@@ -1074,8 +1168,10 @@ class UnicommerceDataService:
         date: Optional[str] = None,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        progress_cb: Optional[Callable[[int, str], None]] = None,
     ) -> Dict[str, Any]:
         try:
+            self._emit_progress(progress_cb, 5, "Validating date range…")
             is_range = bool(from_date and to_date)
             if not is_range and not date:
                 return {
@@ -1096,43 +1192,35 @@ class UnicommerceDataService:
                     second=59,
                     tzinfo=timezone.utc,
                 )
-                sales_result = self.get_sales_data(
-                    period="custom",
-                    from_date=from_dt,
-                    to_date=to_dt,
-                )
                 date_label = f"{from_date} to {to_date}"
             else:
                 report_date = datetime.strptime(str(date), "%Y-%m-%d").date()
-                today = datetime.now(timezone.utc).date()
-                yesterday = today - timedelta(days=1)
-
-                if report_date == today:
-                    sales_result = self.get_sales_data(period="today")
-                elif report_date == yesterday:
-                    sales_result = self.get_sales_data(period="yesterday")
-                else:
-                    from_dt = datetime.strptime(str(date), "%Y-%m-%d").replace(
-                        hour=0,
-                        minute=0,
-                        second=0,
-                        tzinfo=timezone.utc,
-                    )
-                    to_dt = datetime.strptime(str(date), "%Y-%m-%d").replace(
-                        hour=23,
-                        minute=59,
-                        second=59,
-                        tzinfo=timezone.utc,
-                    )
-                    sales_result = self.get_sales_data(
-                        period="custom",
-                        from_date=from_dt,
-                        to_date=to_dt,
-                    )
+                from_dt = datetime.strptime(str(date), "%Y-%m-%d").replace(
+                    hour=0,
+                    minute=0,
+                    second=0,
+                    tzinfo=timezone.utc,
+                )
+                to_dt = datetime.strptime(str(date), "%Y-%m-%d").replace(
+                    hour=23,
+                    minute=59,
+                    second=59,
+                    tzinfo=timezone.utc,
+                )
                 date_label = str(date)
+
+            self._emit_progress(progress_cb, 15, "Loading sales rows for selected range…")
+            sales_result = self.get_sales_data(
+                period="custom",
+                from_date=from_dt,
+                to_date=to_dt,
+                include_legacy_orders=False,
+            )
 
             if not sales_result.get("success"):
                 return sales_result
+
+            self._emit_progress(progress_cb, 35, "Building channel summary…")
 
             summary = dict(sales_result.get("summary") or {})
             channel_breakdown = dict(summary.get("channel_breakdown") or {})
@@ -1157,38 +1245,98 @@ class UnicommerceDataService:
             excluded_items = int(summary.get("total_items", 0) or 0) - total_quantity
 
             items_detail: List[Dict[str, Any]] = []
-            raw_orders = list(sales_result.get("_orders") or [])
             ist = timezone(timedelta(hours=5, minutes=30))
 
-            for order in raw_orders:
-                status = self._safe_str(order.get("status")).upper()
-                if status in self.EXCLUDED_STATUSES:
-                    continue
+            self._emit_progress(progress_cb, 55, "Preparing item-level sales details…")
 
-                channel = self._safe_str(order.get("channel")) or "UNKNOWN"
-                order_date = self._format_order_datetime_display(order.get("created"), ist)
+            if sales_result.get("data_source") == "normalized_sales_orders":
+                db = self._get_db()
+                try:
+                    item_rows = (
+                        db.query(
+                            SalesOrderRecord.sku,
+                            SalesOrderRecord.sale_order_item_code,
+                            SalesOrderRecord.product_name,
+                            SalesOrderRecord.channel,
+                            SalesOrderRecord.order_date,
+                            SalesOrderRecord.created_at,
+                            SalesOrderRecord.selling_price,
+                            SalesOrderRecord.status,
+                        )
+                        .filter(
+                            or_(
+                                and_(
+                                    SalesOrderRecord.order_date.isnot(None),
+                                    SalesOrderRecord.order_date >= from_dt,
+                                    SalesOrderRecord.order_date <= to_dt,
+                                ),
+                                and_(
+                                    SalesOrderRecord.order_date.is_(None),
+                                    SalesOrderRecord.created_at >= from_dt,
+                                    SalesOrderRecord.created_at <= to_dt,
+                                ),
+                            )
+                        )
+                        .all()
+                    )
+                finally:
+                    db.close()
 
-                for item in list(order.get("saleOrderItems") or []):
-                    selling_price = self._safe_float(item.get("sellingPrice"), default=0.0)
-                    items_detail.append(
-                        {
-                            "item_sku_code": self._safe_str(item.get("itemSku")),
-                            "sale_order_item_code": self._safe_str(item.get("code")),
-                            "item_type_name": self._safe_str(item.get("itemTypeName")),
-                            "size": self._safe_str(item.get("size")),
-                            "channel_name": channel,
-                            "order_date": order_date,
-                            "bundle_sku_code_number": self._safe_str(item.get("bundleSkuCodeNumber")),
-                            "selling_price": round(selling_price, 2),
-                        }
+                for row in item_rows:
+                    status = self._safe_str(row.status).upper()
+                    if status in self.EXCLUDED_STATUSES:
+                        continue
+
+                    order_dt = self._normalize_dt(row.order_date or row.created_at)
+                    order_date = (
+                        order_dt.astimezone(ist).strftime("%d/%m/%Y %H:%M:%S")
+                        if order_dt is not None
+                        else ""
                     )
 
-            items_detail.sort(
-                key=lambda x: (
-                    self._safe_str(x.get("channel_name")),
-                    self._safe_str(x.get("item_sku_code")),
+                    items_detail.append(
+                        {
+                            "item_sku_code": self._safe_str(row.sku),
+                            "sale_order_item_code": self._safe_str(row.sale_order_item_code),
+                            "item_type_name": self._safe_str(row.product_name),
+                            "size": "",
+                            "channel_name": self._safe_str(row.channel) or "UNKNOWN",
+                            "order_date": order_date,
+                            "bundle_sku_code_number": "",
+                            "selling_price": round(self._safe_float(row.selling_price, default=0.0), 2),
+                        }
+                    )
+            else:
+                legacy_sales_result = self.get_sales_data(
+                    period="custom",
+                    from_date=from_dt,
+                    to_date=to_dt,
+                    include_legacy_orders=True,
                 )
-            )
+                raw_orders = list(legacy_sales_result.get("_orders") or [])
+
+                for order in raw_orders:
+                    status = self._safe_str(order.get("status")).upper()
+                    if status in self.EXCLUDED_STATUSES:
+                        continue
+
+                    channel = self._safe_str(order.get("channel")) or "UNKNOWN"
+                    order_date = self._format_order_datetime_display(order.get("created"), ist)
+
+                    for item in list(order.get("saleOrderItems") or []):
+                        selling_price = self._safe_float(item.get("sellingPrice"), default=0.0)
+                        items_detail.append(
+                            {
+                                "item_sku_code": self._safe_str(item.get("itemSku")),
+                                "sale_order_item_code": self._safe_str(item.get("code")),
+                                "item_type_name": self._safe_str(item.get("itemTypeName")),
+                                "size": self._safe_str(item.get("size")),
+                                "channel_name": channel,
+                                "order_date": order_date,
+                                "bundle_sku_code_number": self._safe_str(item.get("bundleSkuCodeNumber")),
+                                "selling_price": round(selling_price, 2),
+                            }
+                        )
 
             unique_skus = sorted(
                 {
@@ -1199,7 +1347,9 @@ class UnicommerceDataService:
             )
             inventory_map: Dict[str, Dict[str, int]] = {}
 
-            if unique_skus:
+            max_inventory_skus = 1200
+            if unique_skus and len(unique_skus) <= max_inventory_skus:
+                self._emit_progress(progress_cb, 70, "Fetching inventory snapshot for SKUs…")
                 inventory_result = self.get_inventory_data(skus=unique_skus)
                 if inventory_result.get("success"):
                     for inventory_item in list(inventory_result.get("items") or []):
@@ -1210,6 +1360,8 @@ class UnicommerceDataService:
                             "good_inventory": int(inventory_item.get("available_qty", 0) or 0),
                             "virtual_inventory": int(inventory_item.get("reserved_qty", 0) or 0),
                         }
+            elif unique_skus:
+                self._emit_progress(progress_cb, 70, "Skipping inventory enrichment for large SKU set…")
 
             for item in items_detail:
                 sku = self._safe_str(item.get("item_sku_code"))
@@ -1219,22 +1371,16 @@ class UnicommerceDataService:
 
             comparison = None
             if not is_range and date:
+                self._emit_progress(progress_cb, 82, "Preparing comparison with previous day…")
                 comp_date = datetime.strptime(str(date), "%Y-%m-%d").date() - timedelta(days=1)
-                comp_today = datetime.now(timezone.utc).date()
-                comp_yesterday = comp_today - timedelta(days=1)
-
-                if comp_date == comp_today:
-                    comp_result = self.get_sales_data(period="today")
-                elif comp_date == comp_yesterday:
-                    comp_result = self.get_sales_data(period="yesterday")
-                else:
-                    comp_from = datetime.combine(comp_date, datetime.min.time()).replace(tzinfo=timezone.utc)
-                    comp_to = datetime.combine(comp_date, datetime.max.time()).replace(tzinfo=timezone.utc)
-                    comp_result = self.get_sales_data(
-                        period="custom",
-                        from_date=comp_from,
-                        to_date=comp_to,
-                    )
+                comp_from = datetime.combine(comp_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+                comp_to = datetime.combine(comp_date, datetime.max.time()).replace(tzinfo=timezone.utc)
+                comp_result = self.get_sales_data(
+                    period="custom",
+                    from_date=comp_from,
+                    to_date=comp_to,
+                    include_legacy_orders=False,
+                )
 
                 if comp_result.get("success"):
                     comp_breakdown = dict((comp_result.get("summary") or {}).get("channel_breakdown") or {})
@@ -1263,6 +1409,8 @@ class UnicommerceDataService:
                             "total_orders": comp_total_ord,
                         },
                     }
+
+            self._emit_progress(progress_cb, 96, "Finalizing report payload…")
 
             return {
                 "success": True,
@@ -1305,8 +1453,10 @@ class UnicommerceDataService:
         to_date: Optional[str] = None,
         period: str = "daily",
         return_type: str = "ALL",
+        progress_cb: Optional[Callable[[int, str], None]] = None,
     ) -> Dict[str, Any]:
         try:
+            self._emit_progress(progress_cb, 5, "Validating return report parameters…")
             period_norm = self._safe_str(period or "daily").lower()
             ist = timezone(timedelta(hours=5, minutes=30))
             today_ist = datetime.now(ist).date()
@@ -1349,6 +1499,7 @@ class UnicommerceDataService:
             from_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=ist).astimezone(timezone.utc)
             to_dt = datetime.combine(end_date, datetime.max.time().replace(microsecond=0)).replace(tzinfo=ist).astimezone(timezone.utc)
 
+            self._emit_progress(progress_cb, 20, "Fetching return items…")
             returns_data = self.get_returns_data(
                 from_date=from_dt,
                 to_date=to_dt,
@@ -1379,6 +1530,8 @@ class UnicommerceDataService:
             for item in all_items:
                 so_code = self._safe_str(item.get("saleOrderCode")) or "UNKNOWN"
                 order_groups[so_code].append(item)
+
+            self._emit_progress(progress_cb, 52, "Classifying RTO vs CIR and grouping by channel…")
 
             for so_code, items in order_groups.items():
                 if not items:
@@ -1457,6 +1610,8 @@ class UnicommerceDataService:
 
                 returns_list.append(return_entry)
 
+            self._emit_progress(progress_cb, 84, "Finalizing return summary metrics…")
+
             by_channel = sorted(channel_map.values(), key=lambda x: float(x.get("value") or 0.0), reverse=True)
             by_sku = sorted(sku_map.values(), key=lambda x: int(x.get("quantity") or 0), reverse=True)
 
@@ -1509,8 +1664,10 @@ class UnicommerceDataService:
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
         period: str = "daily",
+        progress_cb: Optional[Callable[[int, str], None]] = None,
     ) -> Dict[str, Any]:
         try:
+            self._emit_progress(progress_cb, 5, "Validating cancellation report parameters…")
             period_norm = self._safe_str(period or "daily").lower()
             ist = timezone(timedelta(hours=5, minutes=30))
             today_ist = datetime.now(ist).date()
@@ -1559,6 +1716,7 @@ class UnicommerceDataService:
             from_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=ist).astimezone(timezone.utc)
             to_dt = datetime.combine(end_date, datetime.max.time().replace(microsecond=0)).replace(tzinfo=ist).astimezone(timezone.utc)
 
+            self._emit_progress(progress_cb, 20, "Fetching sales rows for cancellation analysis…")
             sales_result = self.get_sales_data(
                 period="custom",
                 from_date=from_dt,
@@ -1589,6 +1747,8 @@ class UnicommerceDataService:
             total_cancelled_value = 0.0
             cod_orders = 0
             prepaid_orders = 0
+
+            self._emit_progress(progress_cb, 50, "Extracting cancelled orders and item details…")
 
             for order in raw_orders:
                 status = self._safe_str(order.get("status")).upper()
@@ -1703,6 +1863,8 @@ class UnicommerceDataService:
 
                 order_entry["total_value"] = round(float(order_entry.get("total_value") or 0.0), 2)
                 cancellations.append(order_entry)
+
+            self._emit_progress(progress_cb, 84, "Computing channel, SKU and trend summaries…")
 
             by_channel = sorted(channel_map.values(), key=lambda x: float(x.get("value") or 0.0), reverse=True)
             by_sku = sorted(sku_map.values(), key=lambda x: float(x.get("value") or 0.0), reverse=True)
@@ -2525,7 +2687,7 @@ class UnicommerceDataService:
             else:
                 CacheService.delete(cache_key)
 
-            result = await self.uc_service.get_bundle_sku_data()
+            result = self._build_bundle_catalog_from_db()
             if result.get("success"):
                 CacheService.set(cache_key, result, 14400)
                 logger.info(
@@ -2539,6 +2701,205 @@ class UnicommerceDataService:
                 "success": False,
                 "error": str(exc),
             }
+
+    def _is_fabric_payload(self, payload: Dict[str, Any]) -> bool:
+        category = self._safe_str(
+            self._pick(
+                payload,
+                "Category",
+                "category",
+                "Item Type Category",
+                "categoryName",
+                "Category Name",
+                "categoryCode",
+            )
+        ).upper()
+        return category == "FABRIC"
+
+    def _build_bundle_catalog_from_db(self) -> Dict[str, Any]:
+        empty_summary = {
+            "total_bundles": 0,
+            "enabled": 0,
+            "disabled": 0,
+            "avg_mrp": 0,
+            "avg_cost": 0,
+            "total_categories": 0,
+            "categories": {},
+        }
+
+        db = self._get_db()
+        try:
+            item_master_job = (
+                db.query(ExportJob)
+                .filter(
+                    ExportJob.export_type == "item_master",
+                    ExportJob.status == "completed",
+                )
+                .order_by(ExportJob.completed_at.desc(), ExportJob.id.desc())
+                .first()
+            )
+
+            if not item_master_job:
+                return {
+                    "success": True,
+                    "bundles": [],
+                    "summary": empty_summary,
+                    "data_source": "none",
+                    "fallback_used": False,
+                    "last_synced_at": None,
+                }
+
+            row_payloads = (
+                db.query(ExportRow.payload)
+                .filter(ExportRow.export_job_id == item_master_job.id)
+                .order_by(ExportRow.row_number.asc())
+                .all()
+            )
+
+            bundle_map: Dict[str, Dict[str, Any]] = {}
+
+            for wrapped_payload in row_payloads:
+                row = dict(wrapped_payload[0] or {})
+                row_type = self._safe_str(self._pick(row, "Type", "type")).upper()
+                if row_type != "BUNDLE":
+                    continue
+
+                sku_code = self._safe_str(
+                    self._pick(row, "Product Code", "SKU Code", "skuCode")
+                )
+                if not sku_code:
+                    continue
+
+                bundle = bundle_map.get(sku_code)
+                if bundle is None:
+                    bundle = {
+                        "skuCode": sku_code,
+                        "itemName": self._safe_str(
+                            self._pick(row, "Name", "Item Name", "itemName")
+                        )
+                        or sku_code,
+                        "category": self._safe_str(
+                            self._pick(row, "Category Name", "Category", "category")
+                        ),
+                        "categoryCode": self._safe_str(
+                            self._pick(row, "Category Code", "categoryCode")
+                        ),
+                        "costPrice": self._safe_float(
+                            self._pick(row, "Cost Price", "costPrice")
+                        ),
+                        "mrp": self._safe_float(self._pick(row, "MRP", "mrp")),
+                        "basePrice": self._safe_float(
+                            self._pick(row, "Base Price", "basePrice")
+                        ),
+                        "color": self._safe_str(self._pick(row, "Color", "color")),
+                        "size": self._safe_str(self._pick(row, "Size", "size")),
+                        "brand": self._safe_str(self._pick(row, "Brand", "brand")),
+                        "enabled": self._safe_bool(
+                            self._pick(row, "Enabled", "enabled"),
+                            default=True,
+                        ),
+                        "hsnCode": self._safe_str(self._pick(row, "HSN CODE", "hsnCode")),
+                        "weight": self._safe_str(
+                            self._pick(row, "Weight (gms)", "weight")
+                        ),
+                        "imageUrl": self._safe_str(
+                            self._pick(row, "Image Url", "imageUrl")
+                        ),
+                        "updated": self._safe_str(self._pick(row, "Updated", "updated")),
+                        "components": [],
+                    }
+                    bundle_map[sku_code] = bundle
+
+                component_sku = self._safe_str(
+                    self._pick(
+                        row,
+                        "Component Product Code",
+                        "componentSku",
+                        "Component SKU",
+                    )
+                )
+                if component_sku:
+                    bundle["components"].append(
+                        {
+                            "sku": component_sku,
+                            "quantity": self._safe_str(
+                                self._pick(
+                                    row,
+                                    "Component Quantity",
+                                    "componentQuantity",
+                                )
+                            )
+                            or "1",
+                            "price": self._safe_str(
+                                self._pick(
+                                    row,
+                                    "Component Price",
+                                    "componentPrice",
+                                )
+                            ),
+                        }
+                    )
+
+            bundles = sorted(
+                bundle_map.values(),
+                key=lambda item: self._safe_str(item.get("skuCode")),
+            )
+            for bundle in bundles:
+                bundle["componentCount"] = len(bundle.get("components") or [])
+
+            total_bundles = len(bundles)
+            enabled_count = sum(1 for bundle in bundles if bool(bundle.get("enabled")))
+            disabled_count = total_bundles - enabled_count
+
+            mrp_values = [
+                float(bundle.get("mrp") or 0.0)
+                for bundle in bundles
+                if float(bundle.get("mrp") or 0.0) > 0
+            ]
+            cost_values = [
+                float(bundle.get("costPrice") or 0.0)
+                for bundle in bundles
+                if float(bundle.get("costPrice") or 0.0) > 0
+            ]
+
+            category_counts: Dict[str, int] = {}
+            for bundle in bundles:
+                category_name = self._safe_str(bundle.get("category")) or "Unknown"
+                category_counts[category_name] = category_counts.get(category_name, 0) + 1
+
+            summary = {
+                "total_bundles": total_bundles,
+                "enabled": enabled_count,
+                "disabled": disabled_count,
+                "avg_mrp": round(sum(mrp_values) / len(mrp_values), 2) if mrp_values else 0,
+                "avg_cost": round(sum(cost_values) / len(cost_values), 2) if cost_values else 0,
+                "total_categories": len(category_counts),
+                "categories": dict(
+                    sorted(category_counts.items(), key=lambda item: item[1], reverse=True)
+                ),
+            }
+
+            return {
+                "success": True,
+                "bundles": bundles,
+                "summary": summary,
+                "export_job_id": int(item_master_job.id),
+                "archived_rows": int(item_master_job.total_csv_rows or 0),
+                "data_source": "archived_item_master_export_rows",
+                "fallback_used": False,
+                "last_synced_at": item_master_job.completed_at.isoformat()
+                if item_master_job.completed_at
+                else None,
+            }
+        finally:
+            db.close()
+
+    @staticmethod
+    def _order_date_key(raw_value: Any) -> str:
+        text = str(raw_value or "").strip()
+        if not text:
+            return ""
+        return text[:10]
 
     async def get_bundle_sales_analysis(
         self,
@@ -2590,6 +2951,10 @@ class UnicommerceDataService:
                     "error": "Invalid period. Use today|yesterday|last_7_days|last_30_days|custom",
                 }
 
+            now_utc = datetime.now(timezone.utc)
+            if dt_to > now_utc:
+                dt_to = now_utc
+
             cache_key = f"uc:bundle_analysis:{cache_suffix}"
             if not force_refresh:
                 cached = CacheService.get(cache_key)
@@ -2601,8 +2966,367 @@ class UnicommerceDataService:
             else:
                 CacheService.delete(cache_key)
 
-            result = await self.uc_service.get_bundle_sales_analysis(dt_from, dt_to)
-            result["period"] = period
+            bundle_catalog = await self.get_bundle_skus(force_refresh=False)
+            if not bundle_catalog.get("success"):
+                return {
+                    "success": False,
+                    "error": bundle_catalog.get("error", "Bundle catalogue unavailable"),
+                    "bundle_sales": [],
+                    "daily_trend": [],
+                    "category_breakdown": {},
+                    "channel_breakdown": {},
+                    "summary": {},
+                }
+
+            bundles = list(bundle_catalog.get("bundles") or [])
+            if not bundles:
+                result = {
+                    "success": True,
+                    "period": period,
+                    "from_date": dt_from.isoformat(),
+                    "to_date": dt_to.isoformat(),
+                    "bundle_sales": [],
+                    "daily_trend": [],
+                    "category_breakdown": {},
+                    "channel_breakdown": {},
+                    "summary": {
+                        "total_orders": 0,
+                        "orders_with_bundles": 0,
+                        "total_bundle_units": 0,
+                        "total_bundle_revenue": 0,
+                        "unique_bundles_sold": 0,
+                        "bundle_attach_rate": 0,
+                        "avg_revenue_per_bundle": 0,
+                        "analysis_time": 0,
+                    },
+                    "data_source": "db_first_empty_bundle_catalog",
+                    "fallback_used": False,
+                    "last_synced_at": bundle_catalog.get("last_synced_at"),
+                }
+                CacheService.set(cache_key, result, ttl)
+                return result
+
+            started_at = datetime.now(timezone.utc)
+
+            reverse_index: Dict[str, set[str]] = {}
+            component_map: Dict[str, Dict[str, int]] = {}
+            bundle_meta: Dict[str, Dict[str, Any]] = {}
+
+            for bundle in bundles:
+                if not self._safe_bool(bundle.get("enabled"), default=True):
+                    continue
+
+                bundle_sku = self._safe_str(bundle.get("skuCode"))
+                if not bundle_sku:
+                    continue
+
+                component_requirements: Dict[str, int] = {}
+                for component in list(bundle.get("components") or []):
+                    component_sku = self._safe_str(component.get("sku"))
+                    if not component_sku:
+                        continue
+                    required_qty = self._safe_int(component.get("quantity"), default=1)
+                    if required_qty <= 0:
+                        required_qty = 1
+                    component_requirements[component_sku] = required_qty
+
+                if not component_requirements:
+                    continue
+
+                component_map[bundle_sku] = component_requirements
+                bundle_meta[bundle_sku] = bundle
+                for component_sku in component_requirements.keys():
+                    reverse_index.setdefault(component_sku, set()).add(bundle_sku)
+
+            sales_result = self.get_sales_data(
+                period="custom",
+                from_date=dt_from,
+                to_date=dt_to,
+            )
+            if not sales_result.get("success"):
+                return {
+                    "success": False,
+                    "error": sales_result.get("error", "Failed to fetch sales data"),
+                    "bundle_sales": [],
+                    "daily_trend": [],
+                    "category_breakdown": {},
+                    "channel_breakdown": {},
+                    "summary": {},
+                }
+
+            raw_orders = list(sales_result.get("_orders") or [])
+
+            if not raw_orders:
+                elapsed = round(
+                    (datetime.now(timezone.utc) - started_at).total_seconds(),
+                    1,
+                )
+                result = {
+                    "success": True,
+                    "period": period,
+                    "from_date": dt_from.isoformat(),
+                    "to_date": dt_to.isoformat(),
+                    "bundle_sales": [],
+                    "daily_trend": [],
+                    "category_breakdown": {},
+                    "channel_breakdown": {},
+                    "summary": {
+                        "total_orders": 0,
+                        "orders_with_bundles": 0,
+                        "total_bundle_units": 0,
+                        "total_bundle_revenue": 0,
+                        "unique_bundles_sold": 0,
+                        "bundle_attach_rate": 0,
+                        "avg_revenue_per_bundle": 0,
+                        "analysis_time": elapsed,
+                    },
+                    "data_source": sales_result.get("data_source", "db_first"),
+                    "fallback_used": bool(sales_result.get("fallback_used")),
+                    "last_synced_at": sales_result.get("last_synced_at"),
+                }
+                CacheService.set(cache_key, result, ttl)
+                return result
+
+            bundle_sales_agg: Dict[str, Dict[str, Any]] = {}
+            daily_agg: Dict[str, Dict[str, Any]] = {}
+            channel_agg: Dict[str, Dict[str, Any]] = {}
+            orders_with_bundles = 0
+
+            for order in raw_orders:
+                status = self._safe_str(order.get("status")).upper()
+                if status in self.EXCLUDED_STATUSES:
+                    continue
+
+                items = list(order.get("saleOrderItems") or order.get("items") or [])
+                if not items:
+                    continue
+
+                channel = self._safe_str(order.get("channel")) or "UNKNOWN"
+                date_key = self._order_date_key(order.get("created") or order.get("displayOrderDateTime"))
+
+                sku_pool: Dict[str, int] = {}
+                sku_prices: Dict[str, float] = {}
+                for item in items:
+                    sku = self._safe_str(item.get("itemSku") or item.get("sku"))
+                    if not sku:
+                        continue
+
+                    qty = self._safe_int(item.get("quantity"), default=1)
+                    if qty <= 0:
+                        qty = 1
+                    sku_pool[sku] = sku_pool.get(sku, 0) + qty
+
+                    selling_price = self._safe_float(
+                        item.get("sellingPrice") or item.get("selling_price"),
+                        default=0.0,
+                    )
+                    if selling_price <= 0:
+                        selling_price = self._safe_float(item.get("maxRetailPrice"), default=0.0)
+                    if selling_price > 0:
+                        sku_prices[sku] = selling_price
+
+                if not sku_pool:
+                    continue
+
+                candidate_bundles: set[str] = set()
+                for component_sku in sku_pool.keys():
+                    candidate_bundles.update(reverse_index.get(component_sku, set()))
+
+                if not candidate_bundles:
+                    continue
+
+                sorted_candidates = sorted(
+                    candidate_bundles,
+                    key=lambda sku: len(component_map.get(sku, {})),
+                    reverse=True,
+                )
+
+                remaining_pool = dict(sku_pool)
+                matched_bundles: set[str] = set()
+                order_match_units = 0
+                order_match_revenue = 0.0
+
+                for bundle_sku in sorted_candidates:
+                    requirements = component_map.get(bundle_sku, {})
+                    if not requirements:
+                        continue
+
+                    while all(
+                        remaining_pool.get(component_sku, 0) >= required_qty
+                        for component_sku, required_qty in requirements.items()
+                    ):
+                        for component_sku, required_qty in requirements.items():
+                            remaining_pool[component_sku] = (
+                                remaining_pool.get(component_sku, 0) - required_qty
+                            )
+
+                        unit_revenue = 0.0
+                        for component_sku, required_qty in requirements.items():
+                            unit_revenue += sku_prices.get(component_sku, 0.0) * required_qty
+
+                        meta = bundle_meta.get(bundle_sku, {})
+                        agg = bundle_sales_agg.setdefault(
+                            bundle_sku,
+                            {
+                                "skuCode": bundle_sku,
+                                "itemName": self._safe_str(meta.get("itemName")) or bundle_sku,
+                                "category": self._safe_str(meta.get("category")),
+                                "mrp": self._safe_float(meta.get("mrp"), default=0.0),
+                                "componentCount": self._safe_int(
+                                    meta.get("componentCount"),
+                                    default=len(list(meta.get("components") or [])),
+                                ),
+                                "units_sold": 0,
+                                "revenue": 0.0,
+                                "order_count": 0,
+                                "channels": {},
+                            },
+                        )
+
+                        agg["units_sold"] += 1
+                        agg["revenue"] += unit_revenue
+                        agg["channels"][channel] = agg["channels"].get(channel, 0) + 1
+
+                        matched_bundles.add(bundle_sku)
+                        order_match_units += 1
+                        order_match_revenue += unit_revenue
+
+                if order_match_units <= 0:
+                    continue
+
+                orders_with_bundles += 1
+                for bundle_sku in matched_bundles:
+                    bundle_sales_agg[bundle_sku]["order_count"] += 1
+
+                if date_key:
+                    day_bucket = daily_agg.setdefault(
+                        date_key,
+                        {"units": 0, "orders": 0, "revenue": 0.0},
+                    )
+                    day_bucket["units"] += order_match_units
+                    day_bucket["orders"] += 1
+                    day_bucket["revenue"] += order_match_revenue
+
+                channel_bucket = channel_agg.setdefault(
+                    channel,
+                    {"units": 0, "orders": 0, "revenue": 0.0},
+                )
+                channel_bucket["units"] += order_match_units
+                channel_bucket["orders"] += 1
+                channel_bucket["revenue"] += order_match_revenue
+
+            top_bundles = sorted(
+                bundle_sales_agg.values(),
+                key=lambda item: int(item.get("units_sold") or 0),
+                reverse=True,
+            )
+
+            category_breakdown: Dict[str, Dict[str, Any]] = {}
+            for bundle in top_bundles:
+                category_name = self._safe_str(bundle.get("category")) or "Unknown"
+                bucket = category_breakdown.setdefault(
+                    category_name,
+                    {"units": 0, "revenue": 0.0, "bundle_count": 0},
+                )
+                bucket["units"] += int(bundle.get("units_sold") or 0)
+                bucket["revenue"] += float(bundle.get("revenue") or 0.0)
+                bucket["bundle_count"] += 1
+
+            for bucket in category_breakdown.values():
+                bucket["revenue"] = round(float(bucket.get("revenue") or 0.0), 2)
+
+            sorted_category_breakdown = dict(
+                sorted(
+                    category_breakdown.items(),
+                    key=lambda item: float((item[1] or {}).get("revenue", 0) or 0),
+                    reverse=True,
+                )
+            )
+
+            daily_trend = []
+            for date_key in sorted(daily_agg.keys()):
+                row = daily_agg[date_key]
+                daily_trend.append(
+                    {
+                        "date": date_key,
+                        "units": int(row.get("units") or 0),
+                        "orders": int(row.get("orders") or 0),
+                        "revenue": round(float(row.get("revenue") or 0.0), 2),
+                    }
+                )
+
+            channel_breakdown = {}
+            for channel_name, channel_data in sorted(
+                channel_agg.items(),
+                key=lambda item: float((item[1] or {}).get("revenue", 0) or 0),
+                reverse=True,
+            ):
+                channel_breakdown[channel_name] = {
+                    "units": int((channel_data or {}).get("units", 0) or 0),
+                    "orders": int((channel_data or {}).get("orders", 0) or 0),
+                    "revenue": round(float((channel_data or {}).get("revenue", 0.0) or 0.0), 2),
+                }
+
+            bundle_sales = []
+            for bundle in top_bundles:
+                units_sold = int(bundle.get("units_sold") or 0)
+                revenue = round(float(bundle.get("revenue") or 0.0), 2)
+                bundle_sales.append(
+                    {
+                        "skuCode": self._safe_str(bundle.get("skuCode")),
+                        "itemName": self._safe_str(bundle.get("itemName")),
+                        "category": self._safe_str(bundle.get("category")),
+                        "mrp": round(float(bundle.get("mrp") or 0.0), 2),
+                        "componentCount": int(bundle.get("componentCount") or 0),
+                        "units_sold": units_sold,
+                        "revenue": revenue,
+                        "order_count": int(bundle.get("order_count") or 0),
+                        "avg_selling_price": round(revenue / units_sold, 2) if units_sold > 0 else 0,
+                        "channels": dict(bundle.get("channels") or {}),
+                    }
+                )
+
+            total_bundle_units = sum(int(bundle.get("units_sold") or 0) for bundle in bundle_sales)
+            total_bundle_revenue = round(
+                sum(float(bundle.get("revenue") or 0.0) for bundle in bundle_sales),
+                2,
+            )
+
+            elapsed = round(
+                (datetime.now(timezone.utc) - started_at).total_seconds(),
+                1,
+            )
+
+            result = {
+                "success": True,
+                "period": period,
+                "from_date": dt_from.isoformat(),
+                "to_date": dt_to.isoformat(),
+                "bundle_sales": bundle_sales,
+                "daily_trend": daily_trend,
+                "category_breakdown": sorted_category_breakdown,
+                "channel_breakdown": channel_breakdown,
+                "summary": {
+                    "total_orders": len(raw_orders),
+                    "orders_with_bundles": orders_with_bundles,
+                    "total_bundle_units": total_bundle_units,
+                    "total_bundle_revenue": total_bundle_revenue,
+                    "unique_bundles_sold": len(bundle_sales),
+                    "bundle_attach_rate": round(
+                        (orders_with_bundles / len(raw_orders) * 100) if raw_orders else 0,
+                        1,
+                    ),
+                    "avg_revenue_per_bundle": round(
+                        (total_bundle_revenue / total_bundle_units) if total_bundle_units > 0 else 0,
+                        2,
+                    ),
+                    "analysis_time": elapsed,
+                },
+                "data_source": sales_result.get("data_source", "db_first"),
+                "fallback_used": bool(sales_result.get("fallback_used")),
+                "last_synced_at": sales_result.get("last_synced_at"),
+                "catalog_last_synced_at": bundle_catalog.get("last_synced_at"),
+            }
 
             if result.get("success"):
                 CacheService.set(cache_key, result, ttl)
@@ -2668,7 +3392,164 @@ class UnicommerceDataService:
             else:
                 CacheService.delete(cache_key)
 
-            result = await self.uc_service.get_fabric_sales_data(from_dt, to_dt, period_name)
+            db = self._get_db()
+            try:
+                normalized_records = (
+                    db.query(SalesOrderRecord)
+                    .filter(
+                        or_(
+                            and_(
+                                SalesOrderRecord.order_date.isnot(None),
+                                SalesOrderRecord.order_date >= from_dt,
+                                SalesOrderRecord.order_date <= to_dt,
+                            ),
+                            and_(
+                                SalesOrderRecord.order_date.is_(None),
+                                SalesOrderRecord.created_at >= from_dt,
+                                SalesOrderRecord.created_at <= to_dt,
+                            ),
+                        )
+                    )
+                    .all()
+                )
+
+                items_list: List[Dict[str, Any]] = []
+                order_codes: set[str] = set()
+                last_synced_at: Optional[str] = None
+
+                if normalized_records:
+                    last_synced = max(
+                        (record.updated_at for record in normalized_records if record.updated_at),
+                        default=None,
+                    )
+                    if last_synced:
+                        last_synced_at = last_synced.isoformat()
+
+                    for record in normalized_records:
+                        status = self._safe_str(record.status).upper()
+                        if status in self.EXCLUDED_STATUSES:
+                            continue
+
+                        raw = dict(record.raw_data or {})
+                        if not self._is_fabric_payload(raw):
+                            continue
+
+                        quantity = int(record.qty or 0)
+                        if quantity <= 0:
+                            quantity = self._safe_int(
+                                self._pick(raw, "Quantity", "Qty", "QTY", "quantity"),
+                                default=1,
+                            )
+                        if quantity <= 0:
+                            quantity = 1
+
+                        created_dt = self._normalize_dt(record.order_date or record.created_at)
+                        created_value = created_dt.isoformat() if created_dt else ""
+                        order_code = self._safe_str(record.order_id)
+                        if not order_code:
+                            continue
+
+                        order_codes.add(order_code)
+                        items_list.append(
+                            {
+                                "soiCode": self._safe_str(record.sale_order_item_code),
+                                "sku": self._safe_str(record.sku),
+                                "orderCode": order_code,
+                                "created": created_value,
+                                "quantity": quantity,
+                            }
+                        )
+
+                    data_source = "normalized_sales_orders"
+                    fallback_used = False
+                else:
+                    raw_rows, completed_at = self._raw_sales_rows_from_job(db, from_dt, to_dt)
+                    data_source = "raw_export_rows_fallback" if raw_rows else "none"
+                    fallback_used = bool(raw_rows)
+                    if completed_at is not None:
+                        last_synced_at = completed_at.isoformat()
+
+                    for raw in raw_rows:
+                        status = self._safe_str(
+                            self._pick(raw, "Sale Order Status", "status")
+                        ).upper()
+                        if status in self.EXCLUDED_STATUSES:
+                            continue
+
+                        if not self._is_fabric_payload(raw):
+                            continue
+
+                        created_dt = self._normalize_dt(
+                            self.uc_service._parse_datetime(
+                                self._pick(raw, "Created", "created")
+                            )
+                        )
+                        if created_dt and (created_dt < from_dt or created_dt > to_dt):
+                            continue
+
+                        order_code = self._safe_str(
+                            self._pick(raw, "Sale Order Code", "saleOrderCode", "code")
+                        )
+                        if not order_code:
+                            continue
+
+                        quantity = self._safe_int(
+                            self._pick(
+                                raw,
+                                "Quantity",
+                                "Qty",
+                                "QTY",
+                                "quantity",
+                                "Sale Order Item Quantity",
+                            ),
+                            default=1,
+                        )
+                        if quantity <= 0:
+                            quantity = 1
+
+                        order_codes.add(order_code)
+                        items_list.append(
+                            {
+                                "soiCode": self._safe_str(
+                                    self._pick(raw, "Sale Order Item Code", "soicode")
+                                ),
+                                "sku": self._safe_str(
+                                    self._pick(raw, "Item SKU Code", "skuCode", "itemSku")
+                                ),
+                                "orderCode": order_code,
+                                "created": created_dt.isoformat() if created_dt else "",
+                                "quantity": quantity,
+                            }
+                        )
+
+                items_list.sort(
+                    key=lambda row: (
+                        self._safe_str(row.get("created")),
+                        self._safe_str(row.get("orderCode")),
+                        self._safe_str(row.get("soiCode")),
+                    ),
+                    reverse=True,
+                )
+
+                total_items = sum(int(row.get("quantity") or 0) for row in items_list)
+
+                result = {
+                    "success": True,
+                    "period": period_name,
+                    "from_date": from_dt.isoformat(),
+                    "to_date": to_dt.isoformat(),
+                    "summary": {
+                        "total_orders": len(order_codes),
+                        "total_items": total_items,
+                    },
+                    "items": items_list,
+                    "total_items_count": len(items_list),
+                    "data_source": data_source,
+                    "fallback_used": fallback_used,
+                    "last_synced_at": last_synced_at,
+                }
+            finally:
+                db.close()
 
             if result.get("success"):
                 is_current = from_date is None and (
@@ -3104,6 +3985,516 @@ class UnicommerceDataService:
                     "total_blocked_qty": sum(i["blocked_qty"] for i in items),
                 },
                 "items": items,
+            }
+        finally:
+            db.close()
+
+    def _get_item_master_catalog_metadata_map(self) -> Dict[str, Dict[str, Any]]:
+        cache_key = "uc:item-master:catalog-metadata"
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, dict):
+            return cached
+
+        db = self._get_db()
+        try:
+            item_master_job = (
+                db.query(ExportJob)
+                .filter(
+                    ExportJob.export_type == "item_master",
+                    ExportJob.status == "completed",
+                )
+                .order_by(ExportJob.completed_at.desc(), ExportJob.id.desc())
+                .first()
+            )
+
+            if not item_master_job:
+                return {}
+
+            row_payloads = (
+                db.query(ExportRow.payload)
+                .filter(ExportRow.export_job_id == item_master_job.id)
+                .order_by(ExportRow.row_number.asc())
+                .all()
+            )
+
+            metadata: Dict[str, Dict[str, Any]] = {}
+            for wrapped_payload in row_payloads:
+                row = dict(wrapped_payload[0] or {})
+                sku_code = self._safe_str(
+                    self._pick(
+                        row,
+                        "Product Code",
+                        "SKU Code",
+                        "itemTypeSKU",
+                        "skuCode",
+                        "sku",
+                    )
+                )
+                if not sku_code:
+                    continue
+
+                existing = metadata.get(sku_code, {})
+
+                name = self._safe_str(existing.get("name")) or self._safe_str(
+                    self._pick(row, "Name", "Item Name", "itemName", "name")
+                )
+                category_name = self._safe_str(existing.get("categoryName")) or self._safe_str(
+                    self._pick(row, "Category Name", "Category", "categoryName", "category")
+                )
+                category_code = self._safe_str(existing.get("categoryCode")) or self._safe_str(
+                    self._pick(row, "Category Code", "categoryCode")
+                )
+                color = self._safe_str(existing.get("color")) or self._safe_str(self._pick(row, "Color", "color"))
+                size = self._safe_str(existing.get("size")) or self._safe_str(self._pick(row, "Size", "size"))
+                brand = self._safe_str(existing.get("brand")) or self._safe_str(self._pick(row, "Brand", "brand"))
+                hsn_code = self._safe_str(existing.get("hsnCode")) or self._safe_str(
+                    self._pick(row, "HSN CODE", "HSN Code", "hsnCode")
+                )
+                description = self._safe_str(existing.get("description")) or self._safe_str(
+                    self._pick(row, "Description", "description")
+                )
+
+                existing_price = existing.get("price")
+                row_price = self._safe_float(
+                    self._pick(row, "MRP", "mrp", "Base Price", "basePrice", "price"),
+                    default=0.0,
+                )
+                price = float(existing_price) if existing_price not in (None, "") else row_price
+
+                existing_cost = existing.get("costPrice")
+                row_cost = self._safe_float(self._pick(row, "Cost Price", "costPrice"), default=0.0)
+                cost_price = float(existing_cost) if existing_cost not in (None, "") else row_cost
+
+                existing_weight = existing.get("weight")
+                row_weight = self._safe_float(self._pick(row, "Weight (gms)", "weight"), default=0.0)
+                weight = float(existing_weight) if existing_weight not in (None, "") else row_weight
+
+                existing_enabled = existing.get("enabled")
+                if existing_enabled is None:
+                    enabled = self._safe_bool(self._pick(row, "Enabled", "enabled"), default=True)
+                else:
+                    enabled = bool(existing_enabled)
+
+                ean = self._safe_str(existing.get("ean")) or self._safe_str(
+                    self._pick(row, "EAN", "ean", "scanIdentifier", "UPC", "ISBN")
+                )
+                scan_identifier = self._safe_str(existing.get("scanIdentifier")) or self._safe_str(
+                    self._pick(row, "scanIdentifier", "UPC", "ISBN")
+                )
+
+                metadata[sku_code] = {
+                    "name": name,
+                    "categoryName": category_name,
+                    "categoryCode": category_code,
+                    "color": color,
+                    "size": size,
+                    "brand": brand,
+                    "hsnCode": hsn_code,
+                    "description": description,
+                    "price": round(price, 2),
+                    "costPrice": round(cost_price, 2),
+                    "weight": weight,
+                    "enabled": enabled,
+                    "ean": ean,
+                    "scanIdentifier": scan_identifier,
+                }
+
+            CacheService.set(cache_key, metadata, 6 * 60 * 60)
+            return metadata
+        finally:
+            db.close()
+
+    def _get_product_master_metadata_map(
+        self,
+        db: Session,
+        skus: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        clean_skus = [self._safe_str(sku) for sku in skus if self._safe_str(sku)]
+        if not clean_skus:
+            return {}
+
+        try:
+            rows = (
+                db.query(
+                    ProductMaster.sku,
+                    ProductMaster.name,
+                    ProductMaster.size,
+                    ProductMaster.type,
+                    ProductMaster.net_weight,
+                )
+                .filter(ProductMaster.sku.in_(clean_skus))
+                .all()
+            )
+        except Exception as exc:
+            logger.warning("Catalog metadata: product_master lookup skipped: %s", exc)
+            return {}
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            sku = self._safe_str(row.sku)
+            if not sku:
+                continue
+            result[sku] = {
+                "name": self._safe_str(row.name),
+                "size": self._safe_str(row.size),
+                "categoryName": self._safe_str(row.type),
+                "weight": self._safe_float(row.net_weight, default=0.0),
+            }
+        return result
+
+    def _get_sales_order_catalog_metadata_map(
+        self,
+        db: Session,
+        skus: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        clean_skus = [self._safe_str(sku) for sku in skus if self._safe_str(sku)]
+        if not clean_skus:
+            return {}
+
+        rows = (
+            db.query(
+                SalesOrderRecord.sku,
+                SalesOrderRecord.product_name,
+                SalesOrderRecord.raw_data,
+                SalesOrderRecord.updated_at,
+            )
+            .filter(SalesOrderRecord.sku.in_(clean_skus))
+            .order_by(SalesOrderRecord.updated_at.desc())
+            .all()
+        )
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            sku = self._safe_str(row.sku)
+            if not sku or sku in result:
+                continue
+
+            raw = dict(row.raw_data or {})
+            result[sku] = {
+                "name": self._safe_str(row.product_name)
+                or self._safe_str(self._pick(raw, "Item Details", "itemName", "itemTypeName", "Name")),
+                "categoryName": self._safe_str(
+                    self._pick(raw, "Category Name", "Category", "categoryName", "category")
+                ),
+                "categoryCode": self._safe_str(self._pick(raw, "Category Code", "categoryCode")),
+                "color": self._safe_str(self._pick(raw, "Color", "color")),
+                "size": self._safe_str(self._pick(raw, "Size", "size")),
+                "brand": self._safe_str(self._pick(raw, "Brand", "brand")),
+                "hsnCode": self._safe_str(self._pick(raw, "HSN CODE", "HSN Code", "hsnCode")),
+            }
+
+        return result
+
+    def _inventory_record_to_catalog_element(
+        self,
+        record: InventorySnapshotRecord,
+        item_master_meta: Optional[Dict[str, Any]] = None,
+        product_master_meta: Optional[Dict[str, Any]] = None,
+        sales_order_meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        raw = dict(record.raw_data or {})
+        item_master_meta = item_master_meta or {}
+        product_master_meta = product_master_meta or {}
+        sales_order_meta = sales_order_meta or {}
+
+        inventory = int(record.available_qty or 0)
+        reserved = int(record.reserved_qty or 0)
+        blocked = int(record.blocked_qty or 0)
+
+        category_name = self._safe_str(
+            self._pick(raw, "categoryName", "Category Name", "category")
+            or item_master_meta.get("categoryName")
+            or product_master_meta.get("categoryName")
+            or sales_order_meta.get("categoryName")
+        ) or "Uncategorized"
+
+        item_name = self._safe_str(
+            self._pick(raw, "itemTypeName", "itemName", "name")
+            or item_master_meta.get("name")
+            or product_master_meta.get("name")
+            or sales_order_meta.get("name")
+        ) or self._safe_str(record.sku)
+
+        price = self._safe_float(
+            self._pick(raw, "price", "mrp", "MRP", "costPrice", "Cost Price")
+            or item_master_meta.get("price"),
+            default=0.0,
+        )
+
+        cost_price = self._safe_float(
+            self._pick(raw, "costPrice", "Cost Price", "price", "mrp", "MRP")
+            or item_master_meta.get("costPrice"),
+            default=0.0,
+        )
+
+        return {
+            "skuCode": self._safe_str(record.sku),
+            "name": item_name,
+            "description": self._safe_str(self._pick(raw, "description", "Description") or item_master_meta.get("description")),
+            "categoryName": category_name,
+            "categoryCode": self._safe_str(
+                self._pick(raw, "categoryCode", "Category Code", "category")
+                or item_master_meta.get("categoryCode")
+                or sales_order_meta.get("categoryCode")
+            ) or category_name,
+            "color": self._safe_str(
+                self._pick(raw, "color", "Color")
+                or item_master_meta.get("color")
+                or sales_order_meta.get("color")
+            ) or "-",
+            "size": self._safe_str(
+                self._pick(raw, "size", "Size")
+                or item_master_meta.get("size")
+                or product_master_meta.get("size")
+                or sales_order_meta.get("size")
+            ) or "-",
+            "brand": self._safe_str(
+                self._pick(raw, "brand", "Brand")
+                or item_master_meta.get("brand")
+                or sales_order_meta.get("brand")
+            ) or "-",
+            "price": round(price, 2),
+            "costPrice": round(cost_price, 2),
+            "hsnCode": self._safe_str(
+                self._pick(raw, "hsnCode", "HSN Code")
+                or item_master_meta.get("hsnCode")
+                or sales_order_meta.get("hsnCode")
+            ) or "-",
+            "weight": self._safe_float(
+                self._pick(raw, "weight", "Weight")
+                or item_master_meta.get("weight")
+                or product_master_meta.get("weight"),
+                default=0.0,
+            ),
+            "enabled": self._safe_bool(
+                self._pick(raw, "enabled", "Enabled")
+                if self._pick(raw, "enabled", "Enabled") is not None
+                else item_master_meta.get("enabled"),
+                default=True,
+            ),
+            "ean": self._safe_str(self._pick(raw, "ean", "EAN") or item_master_meta.get("ean")) or "-",
+            "scanIdentifier": self._safe_str(
+                self._pick(raw, "scanIdentifier", "UPC", "ISBN")
+                or item_master_meta.get("scanIdentifier")
+            ),
+            "warehouse": self._safe_str(record.warehouse),
+            "inventorySnapshots": [
+                {
+                    "inventory": inventory,
+                    "goodInventory": inventory,
+                    "availableInventory": inventory,
+                    "virtualInventory": reserved,
+                    "openSale": reserved,
+                    "badInventory": blocked,
+                    "inventoryBlocked": blocked,
+                    "putawayPending": self._safe_int(self._pick(raw, "putawayPending", "Putaway Pending")),
+                }
+            ],
+        }
+
+    def get_inventory_catalog_search(
+        self,
+        keyword: Optional[str] = None,
+        display_start: int = 0,
+        display_length: int = 25,
+        warehouse: Optional[str] = None,
+        category: Optional[str] = None,
+        stock_filter: str = "all",
+        include_inventory_snapshot: bool = True,
+    ) -> Dict[str, Any]:
+        db = self._get_db()
+        try:
+            query = db.query(InventorySnapshotRecord)
+
+            warehouse_norm = self._safe_str(warehouse)
+            if warehouse_norm:
+                query = query.filter(InventorySnapshotRecord.warehouse == warehouse_norm)
+
+            records = query.all()
+            sku_list = [self._safe_str(record.sku) for record in records if self._safe_str(record.sku)]
+            item_master_map = self._get_item_master_catalog_metadata_map()
+            product_master_map = self._get_product_master_metadata_map(db, sku_list)
+            sales_order_map = self._get_sales_order_catalog_metadata_map(db, sku_list)
+            elements = [
+                self._inventory_record_to_catalog_element(
+                    record,
+                    item_master_meta=item_master_map.get(self._safe_str(record.sku), {}),
+                    product_master_meta=product_master_map.get(self._safe_str(record.sku), {}),
+                    sales_order_meta=sales_order_map.get(self._safe_str(record.sku), {}),
+                )
+                for record in records
+            ]
+
+            keyword_norm = self._safe_str(keyword).lower()
+            if keyword_norm:
+                def _matches(entry: Dict[str, Any]) -> bool:
+                    searchable = " ".join(
+                        [
+                            self._safe_str(entry.get("skuCode")),
+                            self._safe_str(entry.get("name")),
+                            self._safe_str(entry.get("description")),
+                            self._safe_str(entry.get("categoryName")),
+                            self._safe_str(entry.get("brand")),
+                            self._safe_str(entry.get("color")),
+                            self._safe_str(entry.get("size")),
+                        ]
+                    ).lower()
+                    return keyword_norm in searchable
+
+                elements = [entry for entry in elements if _matches(entry)]
+
+            category_norm = self._safe_str(category).lower()
+            if category_norm:
+                elements = [
+                    entry for entry in elements
+                    if self._safe_str(entry.get("categoryName")).lower() == category_norm
+                ]
+
+            stock_filter_norm = self._safe_str(stock_filter).lower() or "all"
+            if stock_filter_norm == "in_stock":
+                elements = [
+                    entry
+                    for entry in elements
+                    if int(((entry.get("inventorySnapshots") or [{}])[0]).get("inventory", 0) or 0) > 0
+                ]
+            elif stock_filter_norm == "out_of_stock":
+                elements = [
+                    entry
+                    for entry in elements
+                    if int(((entry.get("inventorySnapshots") or [{}])[0]).get("inventory", 0) or 0) <= 0
+                ]
+
+            elements.sort(key=lambda entry: self._safe_str(entry.get("skuCode")))
+
+            total_records = len(elements)
+            safe_start = max(0, int(display_start or 0))
+            safe_length = max(1, min(500, int(display_length or 25)))
+            paged = elements[safe_start:safe_start + safe_length]
+
+            if not include_inventory_snapshot:
+                for entry in paged:
+                    entry.pop("inventorySnapshots", None)
+
+            last_synced = max((r.updated_at for r in records if r.updated_at), default=None)
+
+            return {
+                "successful": True,
+                "data_source": "normalized_inventory_snapshots",
+                "fallback_used": False,
+                "last_synced_at": last_synced.isoformat() if last_synced else None,
+                "totalRecords": total_records,
+                "displayStart": safe_start,
+                "displayLength": safe_length,
+                "elements": paged,
+            }
+        finally:
+            db.close()
+
+    def get_inventory_summary_db(self, warehouse: Optional[str] = None) -> Dict[str, Any]:
+        db = self._get_db()
+        try:
+            query = db.query(InventorySnapshotRecord)
+            warehouse_norm = self._safe_str(warehouse)
+            if warehouse_norm:
+                query = query.filter(InventorySnapshotRecord.warehouse == warehouse_norm)
+
+            records = query.all()
+            if not records:
+                return {
+                    "successful": True,
+                    "data_source": "none",
+                    "fallback_used": False,
+                    "last_synced_at": None,
+                    "totalProducts": 0,
+                    "totalSKUs": 0,
+                    "activeSKUs": 0,
+                    "facilitySKUs": 0,
+                    "skusWithStock": 0,
+                    "skusOutOfStock": 0,
+                    "outOfStockPercent": 0,
+                    "totalRealInventory": 0,
+                    "totalVirtualInventory": 0,
+                    "totalStockValue": 0.0,
+                    "categories": [],
+                }
+
+            sku_list = [self._safe_str(record.sku) for record in records if self._safe_str(record.sku)]
+            item_master_map = self._get_item_master_catalog_metadata_map()
+            product_master_map = self._get_product_master_metadata_map(db, sku_list)
+            sales_order_map = self._get_sales_order_catalog_metadata_map(db, sku_list)
+            elements = [
+                self._inventory_record_to_catalog_element(
+                    record,
+                    item_master_meta=item_master_map.get(self._safe_str(record.sku), {}),
+                    product_master_meta=product_master_map.get(self._safe_str(record.sku), {}),
+                    sales_order_meta=sales_order_map.get(self._safe_str(record.sku), {}),
+                )
+                for record in records
+            ]
+
+            total_skus = len(elements)
+            in_stock = 0
+            out_of_stock = 0
+            enabled_count = 0
+            total_inventory = 0
+            total_virtual = 0
+            total_value = 0.0
+            category_map: Dict[str, Dict[str, int]] = {}
+
+            for entry in elements:
+                snap = (entry.get("inventorySnapshots") or [{}])[0]
+                inventory = int(snap.get("inventory", 0) or 0)
+                virtual_inventory = int(snap.get("virtualInventory", 0) or 0)
+                category = self._safe_str(entry.get("categoryName")) or "Uncategorized"
+
+                total_inventory += inventory
+                total_virtual += virtual_inventory
+                total_value += inventory * float(entry.get("costPrice") or entry.get("price") or 0.0)
+
+                if bool(entry.get("enabled")):
+                    enabled_count += 1
+
+                if inventory > 0:
+                    in_stock += 1
+                else:
+                    out_of_stock += 1
+
+                bucket = category_map.setdefault(
+                    category,
+                    {
+                        "name": category,
+                        "skus": 0,
+                        "inventory": 0,
+                        "inStock": 0,
+                        "outOfStock": 0,
+                    },
+                )
+                bucket["skus"] += 1
+                bucket["inventory"] += inventory
+                if inventory > 0:
+                    bucket["inStock"] += 1
+                else:
+                    bucket["outOfStock"] += 1
+
+            categories = sorted(category_map.values(), key=lambda item: int(item["inventory"]), reverse=True)
+            last_synced = max((r.updated_at for r in records if r.updated_at), default=None)
+
+            return {
+                "successful": True,
+                "data_source": "normalized_inventory_snapshots",
+                "fallback_used": False,
+                "last_synced_at": last_synced.isoformat() if last_synced else None,
+                "totalProducts": total_skus,
+                "totalSKUs": total_skus,
+                "activeSKUs": enabled_count,
+                "facilitySKUs": total_skus,
+                "skusWithStock": in_stock,
+                "skusOutOfStock": out_of_stock,
+                "outOfStockPercent": round((out_of_stock / total_skus) * 100) if total_skus else 0,
+                "totalRealInventory": total_inventory,
+                "totalVirtualInventory": total_virtual,
+                "totalStockValue": round(total_value, 2),
+                "categories": categories,
             }
         finally:
             db.close()

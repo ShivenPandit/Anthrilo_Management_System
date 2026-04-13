@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ucSales } from '@/features/sales';
+import { ucSales } from '@/features/sales/api';
 import { PageHeader, ProgressLoader } from '@/components/ui/Common';
 import { DataTable, Column } from '@/components/ui/DataTable';
 

@@ -24,12 +24,33 @@ services:
       - ./backend/.env
     environment:
       - REDIS_URL=redis://redis:6379
+      - UNICOMMERCE_SYNC_ENABLE_SCHEDULER=false
     volumes:
       - ./backend:/app        # hot reload in dev
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       redis:
         condition: service_healthy
+    restart: unless-stopped
+
+  sync_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: anthrilo_sync_worker
+    env_file:
+      - ./backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - UNICOMMERCE_SYNC_ENABLE_SCHEDULER=true
+    volumes:
+      - ./backend:/app
+    command: python -m app.workers.unicommerce_scheduler_worker
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
     restart: unless-stopped
 
   frontend:

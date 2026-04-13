@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from threading import Lock
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Body, Query
+from fastapi.concurrency import run_in_threadpool
 
 from app.core.redis import redis_client
 from app.services.cache_service import CacheService
@@ -16,6 +18,9 @@ from app.services.unicommerce_sync_orchestrator import get_unicommerce_sync_orch
 
 router = APIRouter()
 IST = timezone(timedelta(hours=5, minutes=30))
+_REPORT_PROGRESS_TTL_SECONDS = 60 * 60
+_report_progress_store: Dict[str, Dict[str, Any]] = {}
+_report_progress_lock = Lock()
 
 
 def _parse_date_boundary(value: str, end_of_day: bool = False) -> datetime:
@@ -27,6 +32,99 @@ def _parse_date_boundary(value: str, end_of_day: bool = False) -> datetime:
     return parsed.replace(tzinfo=timezone.utc)
 
 
+def _progress_cache_key(progress_id: str) -> str:
+    return f"uc:report-progress:{progress_id}"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _cleanup_stale_progress(now_epoch: float) -> None:
+    stale_ids = [
+        key
+        for key, value in _report_progress_store.items()
+        if float(value.get("expires_at_epoch", 0)) <= now_epoch
+    ]
+    for key in stale_ids:
+        _report_progress_store.pop(key, None)
+
+
+def _set_report_progress(
+    progress_id: str,
+    percent: int,
+    label: str,
+    status: str = "running",
+    error: Optional[str] = None,
+) -> Dict[str, Any]:
+    now_epoch = datetime.now(timezone.utc).timestamp()
+    payload: Dict[str, Any] = {
+        "success": status != "failed",
+        "progress_id": progress_id,
+        "status": status,
+        "percent": max(0, min(100, int(percent))),
+        "label": label,
+        "error": error,
+        "updated_at": _utc_now_iso(),
+        "expires_at_epoch": now_epoch + _REPORT_PROGRESS_TTL_SECONDS,
+    }
+
+    if redis_client is not None:
+        CacheService.set(
+            _progress_cache_key(progress_id),
+            payload,
+            _REPORT_PROGRESS_TTL_SECONDS,
+        )
+
+    with _report_progress_lock:
+        _cleanup_stale_progress(now_epoch)
+        _report_progress_store[progress_id] = payload
+
+    return payload
+
+
+def _get_report_progress(progress_id: str) -> Optional[Dict[str, Any]]:
+    if redis_client is not None:
+        payload = CacheService.get(_progress_cache_key(progress_id))
+        if isinstance(payload, dict):
+            return payload
+
+    now_epoch = datetime.now(timezone.utc).timestamp()
+    with _report_progress_lock:
+        _cleanup_stale_progress(now_epoch)
+        payload = _report_progress_store.get(progress_id)
+
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def _build_progress_callback(progress_id: Optional[str]):
+    if not progress_id:
+        return None
+
+    _set_report_progress(progress_id, 1, "Starting report generation…", status="running")
+
+    def _callback(percent: int, label: str) -> None:
+        _set_report_progress(progress_id, percent, label, status="running")
+
+    return _callback
+
+
+def _finish_report_progress(progress_id: Optional[str], success: bool, error: Optional[str] = None) -> None:
+    if not progress_id:
+        return
+
+    if success:
+        _set_report_progress(progress_id, 100, "Report ready", status="completed")
+    else:
+        _set_report_progress(
+            progress_id,
+            100,
+            "Report failed",
+            status="failed",
+            error=error or "Report generation failed",
+        )
+
+
 @router.get("/sales")
 def get_sales_data(
     period: str = Query(
@@ -35,6 +133,10 @@ def get_sales_data(
     ),
     from_date: Optional[str] = Query(None, description="YYYY-MM-DD (required for custom)"),
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD (required for custom)"),
+    lightweight: bool = Query(
+        False,
+        description="When true, omits heavy legacy order payload for faster dashboard chart loads",
+    ),
 ):
     service = get_unicommerce_data_service()
 
@@ -58,6 +160,7 @@ def get_sales_data(
         period=period,
         from_date=parsed_from,
         to_date=parsed_to,
+        include_legacy_orders=not lightweight,
     )
 
 
@@ -112,6 +215,101 @@ def get_inventory_data(
     )
 
 
+@router.get("/inventory-summary")
+async def get_inventory_summary(
+    warehouse: Optional[str] = Query(None, description="Warehouse/facility code"),
+):
+    service = get_unicommerce_data_service()
+    result = await run_in_threadpool(service.get_inventory_summary_db, warehouse)
+
+    if int(result.get("totalSKUs", 0) or 0) <= 0:
+        orchestrator = get_unicommerce_sync_orchestrator()
+        sync_result = await orchestrator.sync_inventory(
+            facility_code=(warehouse or "anthrilo"),
+        )
+        if bool(sync_result.get("success")) and int(sync_result.get("fetched_skus", 0) or 0) > 0:
+            refreshed = await run_in_threadpool(service.get_inventory_summary_db, warehouse)
+            refreshed["bootstrap_sync"] = {
+                "triggered": True,
+                "requested_skus": int(sync_result.get("requested_skus", 0) or 0),
+                "fetched_skus": int(sync_result.get("fetched_skus", 0) or 0),
+            }
+            return refreshed
+
+        result["bootstrap_sync"] = {
+            "triggered": True,
+            "requested_skus": int(sync_result.get("requested_skus", 0) or 0),
+            "fetched_skus": int(sync_result.get("fetched_skus", 0) or 0),
+            "success": bool(sync_result.get("success")),
+        }
+
+    return result
+
+
+@router.post("/catalog-search")
+async def search_catalog_data(payload: Optional[Dict[str, Any]] = Body(None)):
+    service = get_unicommerce_data_service()
+    body = payload or {}
+    search_options = body.get("searchOptions") or {}
+
+    display_start = int(search_options.get("displayStart", 0) or 0)
+    display_length = int(search_options.get("displayLength", 25) or 25)
+    warehouse = body.get("warehouse") or body.get("facilityCode")
+    category = body.get("category") or body.get("categoryName")
+    stock_filter = body.get("stockFilter") or "all"
+
+    result = await run_in_threadpool(
+        service.get_inventory_catalog_search,
+        body.get("keyword"),
+        display_start,
+        display_length,
+        warehouse,
+        category,
+        stock_filter,
+        bool(body.get("getInventorySnapshot", False)),
+    )
+
+    should_bootstrap = (
+        not body.get("keyword")
+        and not category
+        and str(stock_filter).lower() == "all"
+        and display_start == 0
+        and int(result.get("totalRecords", 0) or 0) <= 0
+    )
+
+    if should_bootstrap:
+        orchestrator = get_unicommerce_sync_orchestrator()
+        sync_result = await orchestrator.sync_inventory(
+            facility_code=(warehouse or "anthrilo"),
+        )
+        if bool(sync_result.get("success")) and int(sync_result.get("fetched_skus", 0) or 0) > 0:
+            refreshed = await run_in_threadpool(
+                service.get_inventory_catalog_search,
+                body.get("keyword"),
+                display_start,
+                display_length,
+                warehouse,
+                category,
+                stock_filter,
+                bool(body.get("getInventorySnapshot", False)),
+            )
+            refreshed["bootstrap_sync"] = {
+                "triggered": True,
+                "requested_skus": int(sync_result.get("requested_skus", 0) or 0),
+                "fetched_skus": int(sync_result.get("fetched_skus", 0) or 0),
+            }
+            return refreshed
+
+        result["bootstrap_sync"] = {
+            "triggered": True,
+            "requested_skus": int(sync_result.get("requested_skus", 0) or 0),
+            "fetched_skus": int(sync_result.get("fetched_skus", 0) or 0),
+            "success": bool(sync_result.get("success")),
+        }
+
+    return result
+
+
 @router.get("/returns")
 def get_returns_data(
     from_date: str = Query(..., description="YYYY-MM-DD"),
@@ -150,13 +348,22 @@ def get_daily_sales_report(
     date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    progress_id: Optional[str] = Query(None, description="Client-generated progress tracker ID"),
 ):
     service = get_unicommerce_data_service()
-    return service.get_daily_sales_report(
+    progress_cb = _build_progress_callback(progress_id)
+    result = service.get_daily_sales_report(
         date=date,
         from_date=from_date,
         to_date=to_date,
+        progress_cb=progress_cb,
     )
+    _finish_report_progress(
+        progress_id,
+        success=bool(result.get("success")),
+        error=result.get("error") if not result.get("success") else None,
+    )
+    return result
 
 
 @router.get("/return-report")
@@ -166,15 +373,24 @@ def get_return_report(
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     period: str = Query("daily", description="daily | weekly | monthly | custom"),
     return_type: str = Query("ALL", description="RTO | CIR | ALL"),
+    progress_id: Optional[str] = Query(None, description="Client-generated progress tracker ID"),
 ):
     service = get_unicommerce_data_service()
-    return service.get_return_report(
+    progress_cb = _build_progress_callback(progress_id)
+    result = service.get_return_report(
         date=date,
         from_date=from_date,
         to_date=to_date,
         period=period,
         return_type=return_type,
+        progress_cb=progress_cb,
     )
+    _finish_report_progress(
+        progress_id,
+        success=bool(result.get("success")),
+        error=result.get("error") if not result.get("success") else None,
+    )
+    return result
 
 
 @router.get("/cancellation-report")
@@ -183,14 +399,41 @@ def get_cancellation_report(
     from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     to_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     period: str = Query("daily", description="daily | weekly | monthly | custom"),
+    progress_id: Optional[str] = Query(None, description="Client-generated progress tracker ID"),
 ):
     service = get_unicommerce_data_service()
-    return service.get_cancellation_report(
+    progress_cb = _build_progress_callback(progress_id)
+    result = service.get_cancellation_report(
         date=date,
         from_date=from_date,
         to_date=to_date,
         period=period,
+        progress_cb=progress_cb,
     )
+    _finish_report_progress(
+        progress_id,
+        success=bool(result.get("success")),
+        error=result.get("error") if not result.get("success") else None,
+    )
+    return result
+
+
+@router.get("/report-progress/{progress_id}")
+def get_report_progress(progress_id: str):
+    payload = _get_report_progress(progress_id)
+    if payload:
+        payload["success"] = payload.get("status") != "failed"
+        return payload
+
+    return {
+        "success": False,
+        "progress_id": progress_id,
+        "status": "not_found",
+        "percent": 0,
+        "label": "No active report progress",
+        "error": None,
+        "updated_at": _utc_now_iso(),
+    }
 
 
 @router.get("/sales-activity")

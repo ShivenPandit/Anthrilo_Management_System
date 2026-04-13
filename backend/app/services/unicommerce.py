@@ -182,6 +182,8 @@ class UnicommerceService:
                     response = await client.get(download_url)
 
                     if response.status_code in (401, 403):
+                        self.token_manager.invalidate_token()
+                        await self.token_manager.get_valid_token()
                         headers = await self._get_headers()
                         response = await client.get(download_url, headers=headers)
 
@@ -206,7 +208,7 @@ class UnicommerceService:
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code if exc.response is not None else None
                 retryable = (
-                    status_code in {429, 500, 502, 503, 504}
+                    status_code in {401, 403, 429, 500, 502, 503, 504}
                     and attempt < max_retries
                 )
                 logger.warning(
@@ -456,6 +458,7 @@ class UnicommerceService:
         export_job_id: Optional[int],
         export_type: str,
         rows: List[Dict[str, Any]],
+        row_number_start: int = 1,
     ) -> Tuple[int, Optional[str]]:
         if not export_job_id or not rows:
             return 0, None
@@ -463,7 +466,8 @@ class UnicommerceService:
         payloads: List[Dict[str, Any]] = []
         checksum = hashlib.sha256()
 
-        for row_number, raw_row in enumerate(rows, start=1):
+        safe_row_start = max(1, int(row_number_start))
+        for row_number, raw_row in enumerate(rows, start=safe_row_start):
             normalized_row = self._normalize_csv_row(raw_row)
             row_hash = self._row_hash(normalized_row)
             entity_type, entity_key = self._derive_export_entity(export_type, normalized_row)
@@ -840,13 +844,35 @@ class UnicommerceService:
 
                     response = await client.post(url, json=payload, headers=headers)
 
-                    # Handle 401 - token refresh
-                    if response.status_code == 401:
+                    # Handle auth failures with token refresh/re-auth
+                    if response.status_code in (401, 403):
+                        try:
+                            auth_error_body = response.json()
+                        except Exception:
+                            auth_error_body = response.text[:500]
+                        logger.warning(
+                            f"Export: Job creation auth HTTP {response.status_code} "
+                            f"attempt {attempt}/{MAX_RETRIES}: {auth_error_body}"
+                        )
                         self.token_manager.invalidate_token()
                         await self.token_manager.get_valid_token()
                         headers = await self._get_headers()
                         headers["Facility"] = "anthrilo"
                         response = await client.post(url, json=payload, headers=headers)
+
+                        if response.status_code in (401, 403):
+                            if attempt < MAX_RETRIES:
+                                await asyncio.sleep(3 * attempt)
+                                continue
+                            try:
+                                auth_error_body = response.json()
+                            except Exception:
+                                auth_error_body = response.text[:500]
+                            logger.error(
+                                f"Export: Job creation auth still failing HTTP {response.status_code}: "
+                                f"{auth_error_body}"
+                            )
+                            return None
 
                     # Handle 400 - may be transient; retry with fresh token
                     if response.status_code == 400:
@@ -972,7 +998,7 @@ class UnicommerceService:
 
                     response = await client.post(url, json=payload, headers=headers)
 
-                    if response.status_code == 401:
+                    if response.status_code in (401, 403):
                         self.token_manager.invalidate_token()
                         await self.token_manager.get_valid_token()
                         headers = await self._get_headers()
@@ -1484,10 +1510,26 @@ class UnicommerceService:
             download_time = time_module.time() - start_time - create_time - poll_time
             total_time = time_module.time() - start_time
 
-            if not orders and total_time < 10:
-                logger.warning(
-                    "Export: No orders returned (possibly empty range or column mismatch)"
-                )
+            if not orders:
+                if not raw_rows:
+                    logger.info(
+                        "Export: No sale-order rows for range %s -> %s (likely empty chunk)",
+                        from_date.isoformat(),
+                        to_date.isoformat(),
+                    )
+                elif normalized_rows > 0:
+                    logger.info(
+                        "Export: Grouped orders=0 but normalized rows=%s for range %s -> %s",
+                        normalized_rows,
+                        from_date.isoformat(),
+                        to_date.isoformat(),
+                    )
+                else:
+                    logger.warning(
+                        "Export: CSV rows present but no grouped/normalized orders for range %s -> %s; check headers/mapping",
+                        from_date.isoformat(),
+                        to_date.isoformat(),
+                    )
 
             logger.info(
                 f"  Step 3 done in {download_time:.1f}s {len(orders)} orders"
@@ -3542,12 +3584,34 @@ class UnicommerceService:
 
                     response = await client.post(url, json=payload, headers=headers)
 
-                    if response.status_code == 401:
+                    if response.status_code in (401, 403):
+                        try:
+                            auth_error_body = response.json()
+                        except Exception:
+                            auth_error_body = response.text[:500]
+                        logger.warning(
+                            f"Return Export: Job creation auth HTTP {response.status_code} "
+                            f"attempt {attempt}/{MAX_RETRIES}: {auth_error_body}"
+                        )
                         self.token_manager.invalidate_token()
                         await self.token_manager.get_valid_token()
                         headers = await self._get_headers()
                         headers["Facility"] = "anthrilo"
                         response = await client.post(url, json=payload, headers=headers)
+
+                        if response.status_code in (401, 403):
+                            if attempt < MAX_RETRIES:
+                                await asyncio.sleep(3 * attempt)
+                                continue
+                            try:
+                                auth_error_body = response.json()
+                            except Exception:
+                                auth_error_body = response.text[:500]
+                            logger.error(
+                                f"Return Export: Job creation auth still failing HTTP {response.status_code}: "
+                                f"{auth_error_body}"
+                            )
+                            return None
 
                     if response.status_code == 400:
                         try:

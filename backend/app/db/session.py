@@ -3,7 +3,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
 
-# Supabase PostgreSQL connection with SSL and pooling
+# PostgreSQL connection with SSL and pooling
 engine = create_engine(
     settings.DATABASE_URL,
     pool_pre_ping=True,

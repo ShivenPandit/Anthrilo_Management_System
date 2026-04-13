@@ -2,7 +2,7 @@
 
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ucSales } from '@/features/sales';
+import { ucSales } from '@/features/sales/api';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ProgressLoader } from '@/components/ui/Common';
 import {
@@ -76,6 +76,13 @@ const PERIOD_OPTIONS: { value: ReportPeriod; label: string }[] = [
 
 const SKU_ROWS_PER_PAGE = 50;
 
+const createProgressId = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `report-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+};
+
 /*  */
 export default function ReturnReportPage() {
   const [reportDate, setReportDate] = useState<string>(() => {
@@ -104,6 +111,9 @@ export default function ReturnReportPage() {
   const [skuDir, setSkuDir] = useState<Dir>('desc');
   const [skuSearch, setSkuSearch] = useState('');
   const [skuPage, setSkuPage] = useState(1);
+  const [activeProgressId, setActiveProgressId] = useState<string | null>(null);
+  const [backendPercent, setBackendPercent] = useState(0);
+  const [backendLabel, setBackendLabel] = useState('');
 
   // Close calendar on outside click
   useEffect(() => {
@@ -116,8 +126,8 @@ export default function ReturnReportPage() {
 
   const canGenerate = period !== 'custom' || (!!fromDate && !!toDate);
 
-  const { data: raw, isLoading, isFetching, refetch } = useQuery({
-    queryKey: ['return-report', period, reportDate, fromDate, toDate],
+  const { data: raw, isLoading, isFetching, isError, error } = useQuery({
+    queryKey: ['return-report', period, reportDate, fromDate, toDate, activeProgressId],
     queryFn: async () => {
       const params: any = { return_type: 'ALL', period };
       if (period === 'custom') {
@@ -126,15 +136,45 @@ export default function ReturnReportPage() {
       } else if (period === 'daily') {
         params.date = reportDate;
       }
+      params.progress_id = activeProgressId || undefined;
       return (await ucSales.getReturnReport(params)).data;
     },
     enabled: showReport && canGenerate,
     staleTime: 5 * 60_000,
+    retry: false,
   });
+
+  const { data: progressData } = useQuery({
+    queryKey: ['return-report-progress', activeProgressId],
+    queryFn: async () => {
+      if (!activeProgressId) return null;
+      const res = await ucSales.getReportProgress(activeProgressId);
+      return res.data;
+    },
+    enabled: !!activeProgressId && (isLoading || isFetching),
+    refetchInterval: (isLoading || isFetching) ? 800 : false,
+    retry: false,
+    staleTime: 0,
+  });
+
+  useEffect(() => {
+    if (!progressData) return;
+    const nextPercent = Number(progressData.percent || 0);
+    if (Number.isFinite(nextPercent)) {
+      setBackendPercent((prev) => (nextPercent > prev ? nextPercent : prev));
+    }
+    const nextLabel = String(progressData.label || '').trim();
+    if (nextLabel) setBackendLabel(nextLabel);
+  }, [progressData]);
 
   const queryLoading = isLoading || isFetching;
 
-  const handleGenerate = useCallback(() => { setShowReport(true); refetch(); }, [refetch]);
+  const handleGenerate = useCallback(() => {
+    setBackendPercent(1);
+    setBackendLabel('Starting return report generation…');
+    setActiveProgressId(createProgressId());
+    setShowReport(true);
+  }, []);
 
   /* CSV download */
   const handleCSV = useCallback(() => {
@@ -391,12 +431,17 @@ export default function ReturnReportPage() {
         { at: 40, label: 'Classifying RTO vs CIR…' },
         { at: 70, label: 'Building channel breakdown…' },
         { at: 90, label: 'Finalizing…' },
-      ]} />
+      ]}
+        progressPercent={Math.max(backendPercent, 0)}
+        progressLabel={backendLabel || undefined}
+      />
 
       {/* Error */}
-      {showReport && raw && !raw.success && !queryLoading && (
+      {showReport && (isError || (raw && !raw.success)) && !queryLoading && (
         <div className="rounded-2xl bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 p-4">
-          <p className="text-sm text-rose-600 dark:text-rose-400">{raw.error || 'Failed to generate report'}</p>
+          <p className="text-sm text-rose-600 dark:text-rose-400">
+            {raw?.error || (error as any)?.message || 'Failed to generate report'}
+          </p>
         </div>
       )}
 

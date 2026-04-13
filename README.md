@@ -158,9 +158,14 @@ Gate policy before enabling scheduler:
 - `sync_lag_minutes` gate must pass
 - `dashboard_paths_db_first` gate must pass
 
-Only after all gates pass, enable scheduler in backend config/env:
+Only after all gates pass, run scheduler in the dedicated worker (recommended):
 
-- `UNICOMMERCE_SYNC_ENABLE_SCHEDULER=true`
+- Keep API container/process with `UNICOMMERCE_SYNC_ENABLE_SCHEDULER=false`
+- Start `sync_worker` service with `UNICOMMERCE_SYNC_ENABLE_SCHEDULER=true`
+- Configure cadence:
+	- `UNICOMMERCE_SYNC_SALES_INTERVAL_HOURS=6`
+	- `UNICOMMERCE_SYNC_RETURNS_INTERVAL_HOURS=24`
+	- `UNICOMMERCE_SYNC_INVENTORY_INTERVAL_HOURS=24`
 
 ## Testing
 

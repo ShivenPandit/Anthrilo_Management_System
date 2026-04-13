@@ -1,10 +1,11 @@
 'use client';
 
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ucSales } from '@/features/sales';
+import { ucSales } from '@/features/sales/api';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useWebSocket } from '@/lib/hooks/useWebSocket';
-import { useEffect, useRef, useState, useMemo, lazy, Suspense } from 'react';
+import { useEffect, useRef, useState, useMemo, lazy, Suspense, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ShoppingCart, DollarSign, TrendingUp, Package,
@@ -39,6 +40,15 @@ const timeAgo = (timestamp: number) => {
 // ---
 export default function DashboardPage() {
   const queryClient = useQueryClient();
+  const router = useRouter();
+
+  const prefetchRoute = useCallback((href: string) => {
+    try {
+      router.prefetch(href);
+    } catch {
+      // Ignore prefetch errors; links still navigate normally.
+    }
+  }, [router]);
 
   // WebSocket
   const { isConnected: wsConnected, lastUpdate: wsLastUpdate, newOrderNotification, dismissNotification, requestRefresh } = useWebSocket();
@@ -61,36 +71,26 @@ export default function DashboardPage() {
   const { data: todayData, isLoading: loadingToday, dataUpdatedAt: updatedAt, isFetching: fetchingToday } = useQuery({
     queryKey: ['unicommerce-today'],
     queryFn: async () => (await ucSales.getToday()).data,
-    refetchInterval: 5 * 60 * 1000,
-    staleTime: 2 * 60 * 1000,
+    refetchInterval: 30 * 60 * 1000,
+    staleTime: 10 * 60 * 1000,
     gcTime: 10 * 60 * 1000,
   });
 
   const { data: yesterdayData, isLoading: loadingYesterday } = useQuery({
     queryKey: ['unicommerce-yesterday'],
     queryFn: async () => (await ucSales.getYesterday()).data,
-    refetchInterval: 10 * 60 * 1000,
-    staleTime: 5 * 60 * 1000,
-    enabled: !loadingToday,
+    refetchInterval: 6 * 60 * 60 * 1000,
+    staleTime: 2 * 60 * 60 * 1000,
   });
 
-  // Delay last-7-days until today finishes to avoid concurrent UC export jobs
+  // Parallel reads are safe because data is served from DB-first endpoints.
   const { data: last7Days, isLoading: loading7d } = useQuery({
     queryKey: ['unicommerce-last-7-days'],
     queryFn: async () => (await ucSales.getLast7Days()).data,
-    refetchInterval: 30 * 60 * 1000,
-    staleTime: 30 * 60 * 1000,
+    refetchInterval: 6 * 60 * 60 * 1000,
+    staleTime: 2 * 60 * 60 * 1000,
     gcTime: 60 * 60 * 1000,
     placeholderData: (prev: any) => prev,
-    enabled: !loadingToday,
-  });
-
-  // Delay channels until last-7-days finishes (uses same backend data)
-  const { data: channelData } = useQuery({
-    queryKey: ['unicommerce-channels'],
-    queryFn: async () => (await ucSales.getChannelRevenue('last_7_days')).data,
-    staleTime: 5 * 60 * 1000,
-    enabled: !loading7d,
   });
 
   // -- Derived Values --
@@ -165,10 +165,20 @@ export default function DashboardPage() {
       }));
   }, [last7Days]);
 
+  const channelRows = useMemo(() => {
+    const breakdown = last7Days?.summary?.channel_breakdown || {};
+    return Object.entries(breakdown).map(([channel, values]: [string, any]) => ({
+      channel,
+      revenue: Number(values?.revenue || 0),
+      orders: Number(values?.orders || 0),
+      items: Number(values?.items || 0),
+    }));
+  }, [last7Days]);
+
   // Channel chart data (memoized)
   const channelChartData = useMemo(() => {
-    if (!channelData?.channels) return [];
-    return channelData.channels
+    if (!channelRows.length) return [];
+    return channelRows
       .sort((a: any, b: any) => (b.revenue || 0) - (a.revenue || 0))
       .slice(0, 7)
       .map((ch: any) => ({
@@ -176,19 +186,19 @@ export default function DashboardPage() {
         revenue: Math.round(ch.revenue || 0),
         orders: ch.orders || 0,
       }));
-  }, [channelData]);
+  }, [channelRows]);
 
   // Channel distribution for donut (memoized)
   const channelDonutData = useMemo(() => {
-    if (!channelData?.channels) return [];
-    return channelData.channels
+    if (!channelRows.length) return [];
+    return channelRows
       .sort((a: any, b: any) => (b.orders || 0) - (a.orders || 0))
       .slice(0, 6)
       .map((ch: any) => ({
         name: ch.channel?.replace(/_/g, ' ')?.slice(0, 12) || 'Other',
         value: ch.orders || 0,
       }));
-  }, [channelData]);
+  }, [channelRows]);
 
   // Top channel for insights
   const topChannel = useMemo(() => {
@@ -229,7 +239,6 @@ export default function DashboardPage() {
     queryClient.invalidateQueries({ queryKey: ['unicommerce-today'] });
     queryClient.invalidateQueries({ queryKey: ['unicommerce-yesterday'] });
     queryClient.invalidateQueries({ queryKey: ['unicommerce-last-7-days'] });
-    queryClient.invalidateQueries({ queryKey: ['unicommerce-channels'] });
     if (wsConnected) requestRefresh();
   };
 
@@ -468,7 +477,7 @@ export default function DashboardPage() {
               todayItems={ydayItems}
               yesterdayItems={dbyItems}
               topChannel={topChannel}
-              totalChannels={channelData?.channels?.length}
+              totalChannels={channelRows.length}
               loading={loading7d && !last7Days}
               comparisonLabel="day before yesterday"
             />
@@ -483,7 +492,13 @@ export default function DashboardPage() {
         </h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-6 gap-3 md:gap-4 2xl:gap-5">
           {quickLinks.map((link, i) => (
-            <Link key={link.href} href={link.href}>
+            <Link
+              key={link.href}
+              href={link.href}
+              prefetch
+              onMouseEnter={() => prefetchRoute(link.href)}
+              onFocus={() => prefetchRoute(link.href)}
+            >
               <motion.div
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}

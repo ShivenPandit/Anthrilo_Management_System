@@ -8,6 +8,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import distinct, func
 from sqlalchemy.exc import SQLAlchemyError
@@ -15,7 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core.config import settings
 from app.core.redis import redis_client
 from app.db.session import SessionLocal
-from app.db.export_models import ExportRow, SalesOrderRecord, SyncLog
+from app.db.export_models import ExportJob, ExportRow, SalesOrderRecord, SyncLog
 from app.services.unicommerce_data_service import get_unicommerce_data_service
 from app.services.unicommerce import get_unicommerce_service
 
@@ -38,6 +39,8 @@ class UnicommerceSyncOrchestrator:
         self.uc_service = get_unicommerce_service()
         self._scheduler_task: Optional[asyncio.Task] = None
         self._scheduler_stop_event: Optional[asyncio.Event] = None
+        self._scheduler_next_run_at: Dict[str, datetime] = {}
+        self._scheduler_bootstrapped = False
 
     @staticmethod
     def _utcnow() -> datetime:
@@ -122,6 +125,211 @@ class UnicommerceSyncOrchestrator:
             return [str(row[0]).strip() for row in rows if row and row[0]]
         finally:
             db.close()
+
+    def _discover_item_master_skus(self, limit: int = 5000) -> List[str]:
+        db = SessionLocal()
+        try:
+            item_master_job = (
+                db.query(ExportJob)
+                .filter(
+                    ExportJob.export_type == "item_master",
+                    ExportJob.status == "completed",
+                )
+                .order_by(ExportJob.completed_at.desc(), ExportJob.id.desc())
+                .first()
+            )
+
+            if not item_master_job:
+                return []
+
+            row_payloads = (
+                db.query(ExportRow.payload)
+                .filter(ExportRow.export_job_id == item_master_job.id)
+                .order_by(ExportRow.row_number.asc())
+                .all()
+            )
+
+            max_items = max(1, int(limit))
+            seen: set[str] = set()
+            skus: List[str] = []
+            for wrapped in row_payloads:
+                row = dict(wrapped[0] or {})
+                sku = str(
+                    row.get("Product Code")
+                    or row.get("SKU Code")
+                    or row.get("skuCode")
+                    or row.get("itemTypeSKU")
+                    or row.get("sku")
+                    or ""
+                ).strip()
+                if not sku or sku in seen:
+                    continue
+                seen.add(sku)
+                skus.append(sku)
+                if len(skus) >= max_items:
+                    break
+
+            return skus
+        finally:
+            db.close()
+
+    def _scheduler_plan(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            "sales": {
+                "sync_entity": "sale_orders",
+                "interval_hours": max(1, int(settings.UNICOMMERCE_SYNC_SALES_INTERVAL_HOURS)),
+            },
+            "returns": {
+                "sync_entity": "sales_returns",
+                "interval_hours": max(1, int(settings.UNICOMMERCE_SYNC_RETURNS_INTERVAL_HOURS)),
+            },
+            "inventory": {
+                "sync_entity": "inventory_snapshot",
+                "interval_hours": max(1, int(settings.UNICOMMERCE_SYNC_INVENTORY_INTERVAL_HOURS)),
+            },
+        }
+
+    def _get_last_completed_sync_time(self, entity: str) -> Optional[datetime]:
+        db = SessionLocal()
+        try:
+            latest = (
+                db.query(SyncLog)
+                .filter(SyncLog.entity == entity, SyncLog.status == "completed")
+                .order_by(SyncLog.id.desc())
+                .first()
+            )
+            if not latest:
+                return None
+
+            completed = latest.completed_at or latest.started_at
+            return self._ensure_utc(completed) if completed else None
+        finally:
+            db.close()
+
+    def _bootstrap_scheduler_state(self) -> None:
+        if self._scheduler_bootstrapped:
+            return
+
+        now_utc = self._utcnow()
+        for job_key, cfg in self._scheduler_plan().items():
+            interval = timedelta(hours=int(cfg["interval_hours"]))
+            last_completed = self._get_last_completed_sync_time(str(cfg["sync_entity"]))
+
+            if last_completed is None:
+                self._scheduler_next_run_at[job_key] = now_utc
+                continue
+
+            next_due = last_completed + interval
+            self._scheduler_next_run_at[job_key] = next_due if next_due > now_utc else now_utc
+
+        self._scheduler_bootstrapped = True
+
+        timezone_name = str(settings.UNICOMMERCE_SYNC_TIMEZONE or "UTC").strip() or "UTC"
+        try:
+            tz = ZoneInfo(timezone_name)
+        except Exception:
+            tz = timezone.utc
+
+        local_schedule = {
+            key: value.astimezone(tz).isoformat()
+            for key, value in self._scheduler_next_run_at.items()
+        }
+        logger.info(f"Unicommerce scheduler bootstrapped ({timezone_name}): {local_schedule}")
+
+    def _schedule_next_run(self, job_key: str, success: bool, interval_hours: int) -> datetime:
+        now_utc = self._utcnow()
+        if success:
+            next_due = now_utc + timedelta(hours=max(1, int(interval_hours)))
+        else:
+            retry_minutes = max(1, int(settings.UNICOMMERCE_SYNC_RETRY_MINUTES))
+            next_due = now_utc + timedelta(minutes=retry_minutes)
+
+        self._scheduler_next_run_at[job_key] = next_due
+        return next_due
+
+    async def _run_sales_scheduler_job(self) -> Dict[str, Any]:
+        lookback_days = max(
+            1,
+            int(
+                settings.UNICOMMERCE_SYNC_SALES_LOOKBACK_DAYS
+                or settings.UNICOMMERCE_SYNC_LOOKBACK_DAYS
+            ),
+        )
+        now_utc = self._utcnow()
+        from_date = now_utc - timedelta(days=lookback_days)
+        return await self.sync_orders_window(from_date, now_utc)
+
+    async def _run_returns_scheduler_job(self) -> Dict[str, Any]:
+        lookback_days = max(
+            1,
+            int(
+                settings.UNICOMMERCE_SYNC_RETURNS_LOOKBACK_DAYS
+                or settings.UNICOMMERCE_SYNC_LOOKBACK_DAYS
+            ),
+        )
+        now_utc = self._utcnow()
+        from_date = now_utc - timedelta(days=lookback_days)
+        return await self.sync_returns_window(from_date, now_utc)
+
+    async def _run_inventory_scheduler_job(self) -> Dict[str, Any]:
+        facility = str(settings.UNICOMMERCE_SYNC_INVENTORY_FACILITY_CODE or "anthrilo").strip() or "anthrilo"
+        return await self.sync_inventory(facility_code=facility)
+
+    async def run_due_scheduler_jobs(self) -> Dict[str, Any]:
+        self._bootstrap_scheduler_state()
+
+        now_utc = self._utcnow()
+        schedule = self._scheduler_plan()
+        jobs: Dict[str, Dict[str, Any]] = {}
+        executed = 0
+
+        for job_key, cfg in schedule.items():
+            next_due = self._scheduler_next_run_at.get(job_key, now_utc)
+            if now_utc < next_due:
+                jobs[job_key] = {
+                    "success": True,
+                    "skipped": True,
+                    "next_due_at": next_due.isoformat(),
+                    "reason": "not_due",
+                }
+                continue
+
+            executed += 1
+            try:
+                if job_key == "sales":
+                    result = await self._run_sales_scheduler_job()
+                elif job_key == "returns":
+                    result = await self._run_returns_scheduler_job()
+                else:
+                    result = await self._run_inventory_scheduler_job()
+            except Exception as exc:
+                logger.error(f"Scheduled sync job '{job_key}' failed: {exc}", exc_info=True)
+                result = {
+                    "success": False,
+                    "error": str(exc),
+                }
+
+            success = bool(result.get("success"))
+            next_run = self._schedule_next_run(
+                job_key,
+                success=success,
+                interval_hours=int(cfg["interval_hours"]),
+            )
+
+            jobs[job_key] = {
+                **result,
+                "skipped": False,
+                "next_due_at": next_run.isoformat(),
+                "interval_hours": int(cfg["interval_hours"]),
+            }
+
+        ran_jobs = [item for item in jobs.values() if not item.get("skipped")]
+        return {
+            "success": all(bool(item.get("success")) for item in ran_jobs) if ran_jobs else True,
+            "executed_jobs": executed,
+            "jobs": jobs,
+            "evaluated_at": now_utc.isoformat(),
+        }
 
     async def sync_orders_window(self, from_date: datetime, to_date: datetime) -> Dict[str, Any]:
         lock = await self._acquire_lock("orders")
@@ -214,10 +422,23 @@ class UnicommerceSyncOrchestrator:
         try:
             clean_skus = [str(sku).strip() for sku in (skus or []) if str(sku).strip()]
             if not clean_skus:
-                clean_skus = self._discover_recent_skus(
+                discovery_limit = max(1, int(settings.UNICOMMERCE_SYNC_DISCOVERY_SKU_LIMIT))
+                item_master_skus = self._discover_item_master_skus(limit=discovery_limit)
+                recent_skus = self._discover_recent_skus(
                     lookback_days=max(7, int(settings.UNICOMMERCE_SYNC_LOOKBACK_DAYS * 7)),
-                    limit=settings.UNICOMMERCE_SYNC_DISCOVERY_SKU_LIMIT,
+                    limit=discovery_limit,
                 )
+
+                clean_skus = []
+                seen: set[str] = set()
+                for sku in item_master_skus + recent_skus:
+                    normalized = str(sku).strip()
+                    if not normalized or normalized in seen:
+                        continue
+                    seen.add(normalized)
+                    clean_skus.append(normalized)
+                    if len(clean_skus) >= discovery_limit:
+                        break
 
             if not clean_skus:
                 return {
@@ -385,9 +606,24 @@ class UnicommerceSyncOrchestrator:
             "error": "Unknown profile. Use incremental | realtime_trigger | full_backfill",
         }
 
+    def _entity_max_lag_minutes(self, entity: str) -> int:
+        retry_minutes = max(0, int(settings.UNICOMMERCE_SYNC_RETRY_MINUTES))
+        entity_norm = str(entity or "").strip().lower()
+
+        if entity_norm == "sale_orders":
+            return max(1, int(settings.UNICOMMERCE_SYNC_SALES_INTERVAL_HOURS) * 60 + retry_minutes)
+
+        if entity_norm == "sales_returns":
+            return max(1, int(settings.UNICOMMERCE_SYNC_RETURNS_INTERVAL_HOURS) * 60 + retry_minutes)
+
+        if entity_norm == "inventory_snapshot":
+            return max(1, int(settings.UNICOMMERCE_SYNC_INVENTORY_INTERVAL_HOURS) * 60 + retry_minutes)
+
+        return max(1, int(settings.UNICOMMERCE_SYNC_MAX_LAG_MINUTES))
+
     def get_sync_health(self) -> Dict[str, Any]:
         now_utc = self._utcnow()
-        max_lag = int(settings.UNICOMMERCE_SYNC_MAX_LAG_MINUTES)
+        default_max_lag = int(settings.UNICOMMERCE_SYNC_MAX_LAG_MINUTES)
 
         db = SessionLocal()
         try:
@@ -401,6 +637,7 @@ class UnicommerceSyncOrchestrator:
 
             entity_health: List[Dict[str, Any]] = []
             for entity in entities:
+                entity_target_lag = self._entity_max_lag_minutes(entity)
                 latest = (
                     db.query(SyncLog)
                     .filter(SyncLog.entity == entity)
@@ -415,6 +652,7 @@ class UnicommerceSyncOrchestrator:
                             "status": "never_synced",
                             "last_completed_at": None,
                             "lag_minutes": None,
+                            "target_lag_minutes": entity_target_lag,
                             "processed_count": 0,
                             "failed_count": 0,
                         }
@@ -431,7 +669,7 @@ class UnicommerceSyncOrchestrator:
                     health_status = "failed"
                 elif lag_minutes is None:
                     health_status = "unknown"
-                elif lag_minutes > max_lag:
+                elif lag_minutes > entity_target_lag:
                     health_status = "sync_lag"
                 elif latest.status == "running":
                     health_status = "running"
@@ -444,6 +682,7 @@ class UnicommerceSyncOrchestrator:
                         "status": health_status,
                         "last_completed_at": completed_at.isoformat() if completed_at else None,
                         "lag_minutes": lag_minutes,
+                        "target_lag_minutes": entity_target_lag,
                         "processed_count": int(latest.processed_count or 0),
                         "failed_count": int(latest.failed_count or 0),
                         "error_message": latest.error_message,
@@ -463,7 +702,7 @@ class UnicommerceSyncOrchestrator:
             return {
                 "success": True,
                 "status": overall_status,
-                "max_lag_minutes": max_lag,
+                "max_lag_minutes": default_max_lag,
                 "entities": entity_health,
             }
         finally:
@@ -536,23 +775,34 @@ class UnicommerceSyncOrchestrator:
                 "sales_returns",
                 "inventory_snapshot",
             }
+            required_entity_rows = [
+                item for item in entities if item.get("entity") in required_entities
+            ]
+
+            entity_targets = {
+                str(item.get("entity")): int(
+                    item.get("target_lag_minutes")
+                    or self._entity_max_lag_minutes(str(item.get("entity") or ""))
+                )
+                for item in required_entity_rows
+            }
+
             lag_values = [
                 float(item["lag_minutes"])
-                for item in entities
+                for item in required_entity_rows
                 if item.get("lag_minutes") is not None and item.get("entity") in required_entities
             ]
             max_observed_lag = max(lag_values) if lag_values else None
 
             lag_blockers = [
                 item.get("entity", "unknown")
-                for item in entities
+                for item in required_entity_rows
                 if item.get("entity") in required_entities and item.get("status") != "healthy"
             ]
             lag_gate_passed = (
-                bool([item for item in entities if item.get("entity") in required_entities])
+                bool(required_entity_rows)
                 and not lag_blockers
-                and max_observed_lag is not None
-                and max_observed_lag <= settings.UNICOMMERCE_SYNC_MAX_LAG_MINUTES
+                and all(item.get("lag_minutes") is not None for item in required_entity_rows)
             )
         except Exception as exc:
             readiness_errors.append(f"Sync health query failed: {exc}")
@@ -563,6 +813,11 @@ class UnicommerceSyncOrchestrator:
                 "entities": [],
             }
             lag_blockers = ["health_probe_failed"]
+            entity_targets = {
+                "sale_orders": self._entity_max_lag_minutes("sale_orders"),
+                "sales_returns": self._entity_max_lag_minutes("sales_returns"),
+                "inventory_snapshot": self._entity_max_lag_minutes("inventory_snapshot"),
+            }
 
         dashboard_gate = {
             "target": True,
@@ -585,7 +840,8 @@ class UnicommerceSyncOrchestrator:
         gates = {
             "coverage_ratio": coverage_gate,
             "sync_lag_minutes": {
-                "target": settings.UNICOMMERCE_SYNC_MAX_LAG_MINUTES,
+                "target": max(entity_targets.values()) if entity_targets else settings.UNICOMMERCE_SYNC_MAX_LAG_MINUTES,
+                "target_by_entity_minutes": entity_targets,
                 "value": round(max_observed_lag, 2) if max_observed_lag is not None else None,
                 "passed": lag_gate_passed,
                 "blockers": lag_blockers,
@@ -612,6 +868,7 @@ class UnicommerceSyncOrchestrator:
         if self._scheduler_task and not self._scheduler_task.done():
             return False
 
+        self._bootstrap_scheduler_state()
         self._scheduler_stop_event = asyncio.Event()
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
         logger.info("Unicommerce sync scheduler started")
@@ -631,16 +888,20 @@ class UnicommerceSyncOrchestrator:
 
         self._scheduler_task = None
         self._scheduler_stop_event = None
+        self._scheduler_next_run_at = {}
+        self._scheduler_bootstrapped = False
         logger.info("Unicommerce sync scheduler stopped")
         return True
 
     async def _scheduler_loop(self) -> None:
-        interval_seconds = max(60, int(settings.UNICOMMERCE_SYNC_INCREMENTAL_MINUTES) * 60)
+        interval_seconds = max(15, int(settings.UNICOMMERCE_SYNC_SCHEDULER_TICK_SECONDS))
         while self._scheduler_stop_event is not None and not self._scheduler_stop_event.is_set():
             try:
-                await self.run_incremental_sync()
+                run_result = await self.run_due_scheduler_jobs()
+                if not run_result.get("success"):
+                    logger.warning(f"Scheduled sync cycle finished with failures: {run_result}")
             except Exception as exc:
-                logger.error(f"Incremental scheduler sync failed: {exc}", exc_info=True)
+                logger.error(f"Scheduler loop failed: {exc}", exc_info=True)
 
             try:
                 await asyncio.wait_for(self._scheduler_stop_event.wait(), timeout=interval_seconds)
