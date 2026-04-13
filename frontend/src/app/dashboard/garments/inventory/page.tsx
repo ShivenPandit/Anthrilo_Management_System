@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ucInventory } from '@/features/sales';
+import { ucInventory } from '@/features/sales/api';
 
 const PAGE_SIZE = 25;
 const fmt = (n?: number) => (n ?? 0).toLocaleString('en-IN');
@@ -236,7 +236,7 @@ export default function GarmentInventoryPage() {
           </h2>
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 text-xs font-medium">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            Live
+            Synced
           </span>
         </div>
 

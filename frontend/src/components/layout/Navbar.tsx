@@ -1,11 +1,15 @@
 'use client';
 
+import dynamic from 'next/dynamic';
 import { useState, useCallback, useEffect, memo } from 'react';
 import { Search, Moon, Sun, Command, Menu } from 'lucide-react';
 import { Breadcrumbs } from './Breadcrumbs';
 import { NotificationDropdown } from './NotificationDropdown';
 import { AvatarMenu } from './AvatarMenu';
-import CommandPalette from './CommandPalette';
+
+const CommandPalette = dynamic(() => import('./CommandPalette'), {
+  ssr: false,
+});
 
 // Theme Toggle
 const ThemeToggle = memo(function ThemeToggle() {

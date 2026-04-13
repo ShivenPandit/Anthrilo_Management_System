@@ -2,6 +2,9 @@
 const nextConfig = {
   reactStrictMode: true,
   output: 'standalone', // Required for Docker multi-stage build
+  experimental: {
+    optimizePackageImports: ['lucide-react', 'recharts', 'framer-motion'],
+  },
   eslint: {
     // Keep linting available via `npm run lint`, but don't block container image builds.
     ignoreDuringBuilds: true,

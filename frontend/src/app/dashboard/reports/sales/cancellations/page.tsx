@@ -1,8 +1,8 @@
 'use client';
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ucSales } from '@/features/sales';
+import { ucSales } from '@/features/sales/api';
 import { ProgressLoader } from '@/components/ui/Common';
 import { AlertTriangle, BarChart3, Calendar, Download, Loader2, Search } from 'lucide-react';
 
@@ -17,6 +17,13 @@ type Period = 'daily' | 'weekly' | 'monthly' | 'custom';
 
 type SortKey = 'channel' | 'cancellations' | 'items' | 'value' | 'cod' | 'prepaid';
 type SortDir = 'asc' | 'desc';
+
+const createProgressId = () => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+    }
+    return `report-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+};
 
 const fmtCurr = (v: number) =>
     `₹${(v || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -42,11 +49,14 @@ export default function CancellationReportPage() {
     const [search, setSearch] = useState('');
     const [sortKey, setSortKey] = useState<SortKey>('value');
     const [sortDir, setSortDir] = useState<SortDir>('desc');
+    const [activeProgressId, setActiveProgressId] = useState<string | null>(null);
+    const [backendPercent, setBackendPercent] = useState(0);
+    const [backendLabel, setBackendLabel] = useState('');
 
     const canGenerate = period !== 'custom' || (!!fromDate && !!toDate);
 
-    const { data: raw, isLoading, isFetching, isError, error, refetch } = useQuery({
-        queryKey: ['cancellation-report', period, reportDate, fromDate, toDate],
+    const { data: raw, isLoading, isFetching, isError, error } = useQuery({
+        queryKey: ['cancellation-report', period, reportDate, fromDate, toDate, activeProgressId],
         queryFn: async () => {
             const params: any = { period };
             if (period === 'custom') {
@@ -55,12 +65,38 @@ export default function CancellationReportPage() {
             } else if (period === 'daily' || period === 'weekly' || period === 'monthly') {
                 params.date = reportDate;
             }
+            params.progress_id = activeProgressId || undefined;
             return (await ucSales.getCancellationReport(params)).data;
         },
         enabled: showReport && canGenerate,
         staleTime: 5 * 60_000,
         retry: false,
     });
+
+    const { data: progressData } = useQuery({
+        queryKey: ['cancellation-report-progress', activeProgressId],
+        queryFn: async () => {
+            if (!activeProgressId) return null;
+            const res = await ucSales.getReportProgress(activeProgressId);
+            return res.data;
+        },
+        enabled: !!activeProgressId && (isLoading || isFetching),
+        refetchInterval: (isLoading || isFetching) ? 800 : false,
+        retry: false,
+        staleTime: 0,
+    });
+
+    useEffect(() => {
+        if (!progressData) return;
+        const nextPercent = Number(progressData.percent || 0);
+        if (Number.isFinite(nextPercent)) {
+            setBackendPercent((prev) => (nextPercent > prev ? nextPercent : prev));
+        }
+        const nextLabel = String(progressData.label || '').trim();
+        if (nextLabel) {
+            setBackendLabel(nextLabel);
+        }
+    }, [progressData]);
 
     const queryLoading = isLoading || isFetching;
 
@@ -93,9 +129,11 @@ export default function CancellationReportPage() {
     };
 
     const handleGenerate = useCallback(() => {
+        setBackendPercent(1);
+        setBackendLabel('Starting cancellation report generation…');
+        setActiveProgressId(createProgressId());
         setShowReport(true);
-        refetch();
-    }, [refetch]);
+    }, []);
 
     const handleCSV = useCallback(() => {
         if (!items.length) return;
@@ -238,6 +276,8 @@ export default function CancellationReportPage() {
                     { at: 75, label: 'Preparing item-level details…' },
                     { at: 92, label: 'Finalizing cancellation report…' },
                 ]}
+                progressPercent={Math.max(backendPercent, 0)}
+                progressLabel={backendLabel || undefined}
             />
 
             {showReport && (isError || (raw && !raw.success)) && !queryLoading && (

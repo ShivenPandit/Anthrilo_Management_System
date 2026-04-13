@@ -87,3 +87,7 @@ docker-compose.override.yml
 sdist/
 var/
 parts/
+
+# --- Generated data artifacts (local only) ---------------
+Export-Sale Orders-*.xlsx
+backend/scripts/*checkpoint*.json

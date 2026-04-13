@@ -82,7 +82,7 @@ Set:
 What this does:
 
 - Builds fresh backend/frontend images
-- Starts Redis, backend, frontend
+- Starts Redis, backend, sync_worker, frontend
 - Runs Alembic migrations on backend startup
 - Prints container status and recent backend logs
 
@@ -123,6 +123,7 @@ git pull --ff-only
 ```bash
 # View logs
 docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f backend
+docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f sync_worker
 docker compose --env-file .env.prod -f docker-compose.prod.yml logs -f frontend
 
 # Restart one service

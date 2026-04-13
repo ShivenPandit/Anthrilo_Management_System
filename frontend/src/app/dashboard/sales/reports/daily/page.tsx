@@ -2,7 +2,7 @@
 
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ucSales } from '@/features/sales';
+import { ucSales } from '@/features/sales/api';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Calendar, Download, BarChart3, TrendingUp, TrendingDown,
@@ -60,6 +60,13 @@ const PIE_COLORS = ['#EC4899', '#F97316', '#22C55E', '#3B82F6', '#A855F7', '#14B
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
 const ITEMS_PER_PAGE = 50;
+
+const createProgressId = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `report-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+};
 
 type ReportMode = 'daily' | 'weekly' | 'monthly' | 'custom';
 type SortKey = 'channel_name' | 'quantity' | 'selling_price' | 'orders' | 'avg' | 'pct';
@@ -121,6 +128,9 @@ export default function DailySalesReportPage() {
   const [itemSortKey, setItemSortKey] = useState<ItemSortKey>('channel_name');
   const [itemSortDir, setItemSortDir] = useState<SortDir>('asc');
   const [itemPage, setItemPage] = useState(1);
+  const [activeProgressId, setActiveProgressId] = useState<string | null>(null);
+  const [backendPercent, setBackendPercent] = useState(0);
+  const [backendLabel, setBackendLabel] = useState('');
 
 
   useEffect(() => {
@@ -160,12 +170,18 @@ export default function DailySalesReportPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, reportDate, customFrom, customTo]);
 
-  const queryKey = useMemo(() => ['sales-report', mode, ...Object.values(queryParams)], [mode, queryParams]);
+  const queryKey = useMemo(
+    () => ['sales-report', mode, ...Object.values(queryParams), activeProgressId],
+    [mode, queryParams, activeProgressId],
+  );
 
-  const { data: raw, isLoading, isFetching, refetch } = useQuery({
+  const { data: raw, isLoading, isFetching, isError, error } = useQuery({
     queryKey,
     queryFn: async () => {
-      const res = await ucSales.getDailySalesReport(queryParams);
+      const res = await ucSales.getDailySalesReport({
+        ...queryParams,
+        progress_id: activeProgressId || undefined,
+      });
       return res.data;
     },
     enabled: showReport,
@@ -175,8 +191,37 @@ export default function DailySalesReportPage() {
     gcTime: 30 * 60_000,
   });
 
-  const handleGenerate = useCallback(() => { setShowReport(true); refetch(); }, [refetch]);
-  const queryLoading = (isLoading || isFetching) && !raw;
+  const { data: progressData } = useQuery({
+    queryKey: ['daily-sales-progress', activeProgressId],
+    queryFn: async () => {
+      if (!activeProgressId) return null;
+      const res = await ucSales.getReportProgress(activeProgressId);
+      return res.data;
+    },
+    enabled: !!activeProgressId && (isLoading || isFetching),
+    refetchInterval: (isLoading || isFetching) ? 800 : false,
+    retry: false,
+    staleTime: 0,
+  });
+
+  useEffect(() => {
+    if (!progressData) return;
+    const nextPercent = Number(progressData.percent || 0);
+    if (Number.isFinite(nextPercent)) {
+      setBackendPercent((prev) => (nextPercent > prev ? nextPercent : prev));
+    }
+    const nextLabel = String(progressData.label || '').trim();
+    if (nextLabel) setBackendLabel(nextLabel);
+  }, [progressData]);
+
+  const handleGenerate = useCallback(() => {
+    setBackendPercent(1);
+    setBackendLabel('Starting report generation…');
+    setActiveProgressId(createProgressId());
+    setShowReport(true);
+  }, []);
+
+  const queryLoading = isLoading || isFetching;
 
   // Real elapsed-time counter + percentage progress while loading
   const [elapsed, setElapsed] = useState(0);
@@ -200,6 +245,17 @@ export default function DailySalesReportPage() {
     }, 500);
     return () => clearInterval(id);
   }, [queryLoading]);
+
+  useEffect(() => {
+    if (!queryLoading && (raw?.success || (!raw && !isError))) {
+      setBackendPercent(0);
+      setBackendLabel('');
+      return;
+    }
+    if (!queryLoading && isError) {
+      setBackendLabel('Report request failed');
+    }
+  }, [isError, queryLoading, raw]);
 
   /* CSV download */
   const handleCSV = useCallback(() => {
@@ -615,16 +671,16 @@ export default function DailySalesReportPage() {
           <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
             className="rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm p-10 flex flex-col items-center gap-4">
             <div className="h-10 w-10 rounded-full border-[3px] border-blue-500 border-t-transparent animate-spin" />
-            <p className="text-sm text-slate-500 dark:text-slate-400">Fetching sales data for {dateLabel}…</p>
+            <p className="text-sm text-slate-500 dark:text-slate-400">{backendLabel || `Fetching sales data for ${dateLabel}…`}</p>
             <div className="w-full max-w-md space-y-1.5">
               <div className="h-2 rounded-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
                 <div
                   className="h-full rounded-full bg-blue-600 transition-all duration-300"
-                  style={{ width: `${loadingPercent}%` }}
+                  style={{ width: `${Math.max(loadingPercent, backendPercent)}%` }}
                 />
               </div>
               <div className="flex items-center justify-between text-xs font-medium tabular-nums text-blue-600 dark:text-blue-400">
-                <span>{loadingPercent}%</span>
+                <span>{Math.max(loadingPercent, backendPercent)}%</span>
                 <span>{elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`} elapsed</span>
               </div>
             </div>
@@ -634,9 +690,11 @@ export default function DailySalesReportPage() {
       </AnimatePresence>
 
       {/* Error */}
-      {showReport && raw && !raw.success && (
+      {showReport && (isError || (raw && !raw.success)) && !queryLoading && (
         <div className="rounded-2xl bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 p-4">
-          <p className="text-sm text-rose-600 dark:text-rose-400">{raw.error || 'Failed to generate report'}</p>
+          <p className="text-sm text-rose-600 dark:text-rose-400">
+            {raw?.error || (error as any)?.message || 'Failed to generate report'}
+          </p>
         </div>
       )}
 

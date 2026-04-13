@@ -5,6 +5,8 @@ Uses the export job API exclusively for bulk CSV downloads.
 """
 
 import csv
+import hashlib
+import json
 import re
 import io
 import time as time_module
@@ -13,7 +15,19 @@ import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any, Optional, Tuple, Set
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
 from app.core.token_manager import get_token_manager
+from app.core.config import settings
+from app.db.session import SessionLocal
+from app.db.export_models import (
+    ExportJob,
+    ExportRow,
+    SalesOrderRecord,
+    SalesReturnRecord,
+    InventorySnapshotRecord,
+    SyncLog,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +94,22 @@ class UnicommerceService:
         # Serialize export job creation — UC allows only one at a time
         self._export_lock = asyncio.Lock()
 
+        self.export_max_no_filepath_retries = max(
+            1, int(settings.UNICOMMERCE_EXPORT_MAX_NO_FILEPATH_RETRIES)
+        )
+        self.export_status_retry_grace_seconds = max(
+            0, int(settings.UNICOMMERCE_EXPORT_STATUS_RETRY_GRACE_SECONDS)
+        )
+        self.export_max_consecutive_poll_errors = max(
+            1, int(settings.UNICOMMERCE_EXPORT_MAX_CONSECUTIVE_POLL_ERRORS)
+        )
+        self.export_download_max_retries = max(
+            1, int(settings.UNICOMMERCE_EXPORT_DOWNLOAD_MAX_RETRIES)
+        )
+        self.export_download_backoff_seconds = max(
+            1, int(settings.UNICOMMERCE_EXPORT_DOWNLOAD_BACKOFF_SECONDS)
+        )
+
         logger.info(
             f"UnicommerceService v3 initialized | "
             f"Tenant: {self.tenant} | "
@@ -110,6 +140,665 @@ class UnicommerceService:
 
     def _set_cache(self, key: str, data: Any):
         self._cache[key] = (datetime.now(), data)
+
+    @staticmethod
+    def _extract_export_file_path(payload: Dict[str, Any]) -> str:
+        if not isinstance(payload, dict):
+            return ""
+
+        candidate_keys = (
+            "filePath",
+            "filepath",
+            "fileUrl",
+            "fileURL",
+            "downloadUrl",
+            "downloadURL",
+            "signedUrl",
+            "signedURL",
+            "url",
+        )
+
+        containers: List[Dict[str, Any]] = [payload]
+        nested_payload = payload.get("data")
+        if isinstance(nested_payload, dict):
+            containers.append(nested_payload)
+
+        for container in containers:
+            for key in candidate_keys:
+                value = container.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        return ""
+
+    async def _download_csv_text(self, download_url: str, label: str) -> Optional[str]:
+        download_timeout = httpx.Timeout(120.0, connect=15.0)
+        max_retries = max(1, int(self.export_download_max_retries))
+        base_backoff_seconds = max(1, int(self.export_download_backoff_seconds))
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=download_timeout) as client:
+                    response = await client.get(download_url)
+
+                    if response.status_code in (401, 403):
+                        self.token_manager.invalidate_token()
+                        await self.token_manager.get_valid_token()
+                        headers = await self._get_headers()
+                        response = await client.get(download_url, headers=headers)
+
+                    response.raise_for_status()
+                    return response.text
+
+            except (
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+                httpx.PoolTimeout,
+                httpx.TransportError,
+            ) as exc:
+                retryable = attempt < max_retries
+                logger.warning(
+                    f"{label}: download transport error attempt {attempt}/{max_retries}: {exc}"
+                )
+                if retryable:
+                    await asyncio.sleep(base_backoff_seconds * attempt)
+                    continue
+                return None
+
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code if exc.response is not None else None
+                retryable = (
+                    status_code in {401, 403, 429, 500, 502, 503, 504}
+                    and attempt < max_retries
+                )
+                logger.warning(
+                    f"{label}: download HTTP {status_code} attempt {attempt}/{max_retries}"
+                )
+                if retryable:
+                    await asyncio.sleep(base_backoff_seconds * attempt)
+                    continue
+                return None
+
+            except Exception as exc:
+                retryable = attempt < max_retries
+                logger.warning(
+                    f"{label}: download unexpected error attempt {attempt}/{max_retries}: {exc}"
+                )
+                if retryable:
+                    await asyncio.sleep(base_backoff_seconds * attempt)
+                    continue
+                return None
+
+        return None
+
+    @staticmethod
+    def _safe_str(value: Any) -> str:
+        return str(value).strip() if value is not None else ""
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            if value is None or value == "":
+                return default
+            cleaned = str(value).strip().replace(",", "")
+            return int(float(cleaned))
+        except (ValueError, TypeError):
+            return default
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            if value is None or value == "":
+                return default
+            cleaned = str(value).strip().replace(",", "")
+            return float(cleaned)
+        except (ValueError, TypeError):
+            return default
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> Optional[datetime]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, datetime):
+            return value
+
+        raw = str(value).strip()
+        if not raw:
+            return None
+
+        try:
+            numeric = float(raw)
+            if numeric > 1e12:
+                numeric /= 1000.0
+            return datetime.fromtimestamp(numeric, tz=timezone.utc)
+        except (ValueError, TypeError, OverflowError, OSError):
+            pass
+
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except ValueError:
+            pass
+
+        formats = [
+            "%d %b %Y %H:%M:%S",
+            "%d/%m/%Y %H:%M:%S",
+            "%d-%m-%Y %H:%M:%S",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d",
+            "%d/%m/%Y",
+            "%d-%m-%Y",
+        ]
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(raw, fmt)
+                return parsed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+
+        return None
+
+    @staticmethod
+    def _partition_month_from_dt(value: Optional[datetime]):
+        if value is None:
+            return datetime(2000, 1, 1, tzinfo=timezone.utc).date()
+        normalized = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return normalized.astimezone(timezone.utc).date().replace(day=1)
+
+    @staticmethod
+    def _normalize_csv_row(row: Dict[str, Any]) -> Dict[str, Any]:
+        normalized: Dict[str, Any] = {}
+        for key, value in row.items():
+            key_str = str(key) if key is not None else ""
+            if not key_str:
+                continue
+            normalized[key_str] = "" if value is None else str(value)
+        return normalized
+
+    @staticmethod
+    def _row_hash(payload: Dict[str, Any]) -> str:
+        serialized = json.dumps(
+            payload,
+            sort_keys=True,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _derive_export_entity(
+        self,
+        export_type: str,
+        row: Dict[str, Any],
+    ) -> Tuple[str, Optional[str]]:
+        et = export_type.lower()
+        if et == "sale_orders":
+            entity_key = (
+                self._safe_str(row.get("Sale Order Code"))
+                or self._safe_str(row.get("saleOrderCode"))
+                or self._safe_str(row.get("code"))
+            )
+            return "sale_order", entity_key or None
+
+        if et == "return_gst":
+            order_code = (
+                self._safe_str(row.get("Sale Order Number"))
+                or self._safe_str(row.get("Sale Order Code"))
+                or self._safe_str(row.get("saleOrderCode"))
+            )
+            invoice_code = (
+                self._safe_str(row.get("Invoice number"))
+                or self._safe_str(row.get("Invoice Code"))
+                or self._safe_str(row.get("invoiceCode"))
+            )
+            entity_key = f"{order_code}:{invoice_code}" if (order_code or invoice_code) else None
+            return "sales_return", entity_key
+
+        if et == "item_master":
+            entity_key = (
+                self._safe_str(row.get("Product Code"))
+                or self._safe_str(row.get("SKU Code"))
+            )
+            return "item_master", entity_key or None
+
+        if et == "inventory_snapshot":
+            entity_key = self._safe_str(row.get("itemTypeSKU")) or self._safe_str(row.get("sku"))
+            return "inventory_snapshot", entity_key or None
+
+        return et, None
+
+    def _create_export_job_record(
+        self,
+        export_type: str,
+        requested_from: Optional[datetime],
+        requested_to: Optional[datetime],
+        requested_columns: Optional[List[str]],
+        job_code: Optional[str] = None,
+    ) -> Optional[int]:
+        db = SessionLocal()
+        try:
+            job = ExportJob(
+                export_type=export_type,
+                job_code=job_code,
+                status="running",
+                requested_from=requested_from,
+                requested_to=requested_to,
+                requested_columns=requested_columns,
+                started_at=datetime.utcnow(),
+            )
+            db.add(job)
+            db.commit()
+            db.refresh(job)
+            return job.id
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"Export archival: failed to create export_jobs row: {exc}")
+            return None
+        finally:
+            db.close()
+
+    def _update_export_job_record(self, export_job_id: Optional[int], **fields: Any) -> None:
+        if not export_job_id:
+            return
+
+        db = SessionLocal()
+        try:
+            fields["updated_at"] = datetime.utcnow()
+            db.query(ExportJob).filter(ExportJob.id == export_job_id).update(fields)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"Export archival: failed to update export job {export_job_id}: {exc}")
+        finally:
+            db.close()
+
+    def _create_sync_log_record(
+        self,
+        sync_type: str,
+        entity: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> Optional[int]:
+        db = SessionLocal()
+        try:
+            sync_log = SyncLog(
+                sync_type=sync_type,
+                entity=entity,
+                status="running",
+                started_at=datetime.utcnow(),
+                details=details or {},
+            )
+            db.add(sync_log)
+            db.commit()
+            db.refresh(sync_log)
+            return sync_log.id
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"Sync log: failed to create row: {exc}")
+            return None
+        finally:
+            db.close()
+
+    def _update_sync_log_record(self, sync_log_id: Optional[int], **fields: Any) -> None:
+        if not sync_log_id:
+            return
+
+        db = SessionLocal()
+        try:
+            db.query(SyncLog).filter(SyncLog.id == sync_log_id).update(fields)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"Sync log: failed to update row {sync_log_id}: {exc}")
+        finally:
+            db.close()
+
+    def _archive_export_rows(
+        self,
+        export_job_id: Optional[int],
+        export_type: str,
+        rows: List[Dict[str, Any]],
+        row_number_start: int = 1,
+    ) -> Tuple[int, Optional[str]]:
+        if not export_job_id or not rows:
+            return 0, None
+
+        payloads: List[Dict[str, Any]] = []
+        checksum = hashlib.sha256()
+
+        safe_row_start = max(1, int(row_number_start))
+        for row_number, raw_row in enumerate(rows, start=safe_row_start):
+            normalized_row = self._normalize_csv_row(raw_row)
+            row_hash = self._row_hash(normalized_row)
+            entity_type, entity_key = self._derive_export_entity(export_type, normalized_row)
+            created_at = datetime.utcnow()
+
+            checksum.update(f"{row_number}:{row_hash}".encode("utf-8"))
+            payloads.append(
+                {
+                    "export_job_id": export_job_id,
+                    "row_number": row_number,
+                    "entity_type": entity_type,
+                    "entity_key": entity_key,
+                    "row_hash": row_hash,
+                    "payload": normalized_row,
+                    "created_at": created_at,
+                    "partition_month": created_at.date().replace(day=1),
+                }
+            )
+
+        db = SessionLocal()
+        try:
+            chunk_size = 2000
+            for start in range(0, len(payloads), chunk_size):
+                chunk = payloads[start:start + chunk_size]
+                stmt = (
+                    pg_insert(ExportRow)
+                    .values(chunk)
+                    .on_conflict_do_nothing(
+                        index_elements=["export_job_id", "row_number", "partition_month"]
+                    )
+                )
+                db.execute(stmt)
+
+            db.commit()
+            return len(payloads), checksum.hexdigest()
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"Export archival: failed to persist export rows: {exc}")
+            return 0, checksum.hexdigest()
+        finally:
+            db.close()
+
+    def _upsert_sales_order_rows(self, rows: List[Dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+
+        payloads: List[Dict[str, Any]] = []
+
+        for raw_row in rows:
+            row = self._normalize_csv_row(raw_row)
+
+            order_id = (
+                self._safe_str(row.get("Sale Order Code"))
+                or self._safe_str(row.get("saleOrderCode"))
+                or self._safe_str(row.get("code"))
+            )
+            if not order_id:
+                continue
+
+            sale_order_item_code = (
+                self._safe_str(row.get("Sale Order Item Code"))
+                or self._safe_str(row.get("soicode"))
+            )
+            if not sale_order_item_code:
+                sale_order_item_code = f"AUTO-{self._row_hash(row)[:20]}"
+
+            qty = self._safe_int(
+                row.get("Quantity")
+                or row.get("Qty")
+                or row.get("QTY")
+                or row.get("quantity")
+                or 1,
+                default=1,
+            )
+            if qty <= 0:
+                qty = 1
+
+            channel_raw = self._safe_str(row.get("Channel Name") or row.get("channel") or "UNKNOWN")
+            order_date = self._parse_datetime(row.get("Created") or row.get("created"))
+            payloads.append(
+                {
+                    "order_id": order_id,
+                    "sale_order_item_code": sale_order_item_code,
+                    "channel": channel_raw.replace(" ", "_"),
+                    "sku": self._safe_str(
+                        row.get("Item SKU Code")
+                        or row.get("skuCode")
+                        or row.get("itemSku")
+                    ),
+                    "product_name": self._safe_str(
+                        row.get("Item Details")
+                        or row.get("itemDetails")
+                        or row.get("itemTypeName")
+                    ),
+                    "qty": qty,
+                    "selling_price": self._safe_float(row.get("Selling Price") or row.get("sellingPrice") or 0),
+                    "status": self._safe_str(row.get("Sale Order Status") or row.get("status") or "CREATED"),
+                    "order_date": order_date,
+                    "dispatch_date": self._parse_datetime(row.get("Dispatch Date") or row.get("dispatchdate")),
+                    "delivery_date": self._parse_datetime(row.get("Delivery Date") or row.get("deliverydate")),
+                    "cancel_date": self._parse_datetime(row.get("Cancel Date") or row.get("cancelDate")),
+                    "return_date": self._parse_datetime(row.get("Return Date") or row.get("returnDate")),
+                    "warehouse": self._safe_str(
+                        row.get("Warehouse")
+                        or row.get("Facility")
+                        or row.get("godDown")
+                    ),
+                    "customer_name": self._safe_str(
+                        row.get("Customer Name")
+                        or row.get("customerName")
+                        or row.get("shippingAddressName")
+                    ),
+                    "customer_city": self._safe_str(
+                        row.get("Shipping Address City")
+                        or row.get("shippingAddressCity")
+                    ),
+                    "raw_data": row,
+                    "updated_at": datetime.utcnow(),
+                    "partition_month": self._partition_month_from_dt(order_date),
+                }
+            )
+
+        if not payloads:
+            return 0
+
+        db = SessionLocal()
+        try:
+            chunk_size = 1000
+            for start in range(0, len(payloads), chunk_size):
+                chunk = payloads[start:start + chunk_size]
+                stmt = pg_insert(SalesOrderRecord).values(chunk)
+                upsert_stmt = stmt.on_conflict_do_update(
+                    index_elements=["order_id", "sale_order_item_code", "partition_month"],
+                    set_={
+                        "channel": stmt.excluded.channel,
+                        "sku": stmt.excluded.sku,
+                        "product_name": stmt.excluded.product_name,
+                        "qty": stmt.excluded.qty,
+                        "selling_price": stmt.excluded.selling_price,
+                        "status": stmt.excluded.status,
+                        "order_date": stmt.excluded.order_date,
+                        "dispatch_date": stmt.excluded.dispatch_date,
+                        "delivery_date": stmt.excluded.delivery_date,
+                        "cancel_date": stmt.excluded.cancel_date,
+                        "return_date": stmt.excluded.return_date,
+                        "warehouse": stmt.excluded.warehouse,
+                        "customer_name": stmt.excluded.customer_name,
+                        "customer_city": stmt.excluded.customer_city,
+                        "raw_data": stmt.excluded.raw_data,
+                        "updated_at": datetime.utcnow(),
+                    },
+                )
+                db.execute(upsert_stmt)
+
+            db.commit()
+            return len(payloads)
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"Export archival: failed to upsert normalized sales orders: {exc}")
+            return 0
+        finally:
+            db.close()
+
+    def _upsert_sales_return_rows(self, rows: List[Dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+
+        payload_map: Dict[str, Dict[str, Any]] = {}
+
+        for raw_row in rows:
+            row = self._normalize_csv_row(raw_row)
+
+            order_id = (
+                self._safe_str(row.get("Sale Order Number"))
+                or self._safe_str(row.get("Sale Order Code"))
+                or self._safe_str(row.get("saleOrderCode"))
+            )
+            sku = (
+                self._safe_str(row.get("Product SKU Code"))
+                or self._safe_str(row.get("Product SKU"))
+                or self._safe_str(row.get("productSKU"))
+            )
+
+            return_code = (
+                self._safe_str(row.get("rpcode"))
+                or self._safe_str(row.get("RP Code"))
+                or self._safe_str(row.get("returnCode"))
+            )
+            row_hash = self._row_hash(row)
+            if not return_code:
+                return_code = f"RET-{row_hash[:24]}"
+
+            # A single return code can contain multiple SKUs in one export,
+            # so compose a deterministic per-line key for idempotent upserts.
+            return_key_parts = [return_code]
+            if sku:
+                return_key_parts.append(sku)
+            elif order_id:
+                return_key_parts.append(order_id)
+            else:
+                return_key_parts.append(row_hash[:12])
+
+            normalized_return_code = ":".join(return_key_parts)
+            if len(normalized_return_code) > 120:
+                normalized_return_code = f"{return_code[:80]}:{row_hash[:32]}"
+
+            qty = self._safe_int(row.get("Qty") or row.get("QTY") or row.get("quantity") or 1, default=1)
+            if qty <= 0:
+                qty = 1
+
+            refund_amount = self._safe_float(row.get("Total") or row.get("total") or row.get("Sales") or 0)
+            return_status = self._safe_str(row.get("Return Type") or row.get("returnType"))
+
+            payload = payload_map.get(normalized_return_code)
+            if payload is None:
+                payload_map[normalized_return_code] = {
+                    "return_code": normalized_return_code,
+                    "order_id": order_id or "UNKNOWN",
+                    "sku": sku,
+                    "reason": self._safe_str(
+                        row.get("Return Reason")
+                        or row.get("returnReason")
+                        or row.get("narration")
+                        or return_status
+                    ),
+                    "return_qty": qty,
+                    "refund_amount": refund_amount,
+                    "return_status": return_status,
+                    "raw_data": row,
+                    "updated_at": datetime.utcnow(),
+                }
+            else:
+                # Merge duplicate rows for the same return line key within the same batch.
+                payload["return_qty"] = int(payload.get("return_qty", 0) or 0) + qty
+                payload["refund_amount"] = float(payload.get("refund_amount", 0) or 0.0) + refund_amount
+                payload["raw_data"] = row
+                payload["updated_at"] = datetime.utcnow()
+
+        payloads: List[Dict[str, Any]] = list(payload_map.values())
+
+        db = SessionLocal()
+        try:
+            chunk_size = 1000
+            for start in range(0, len(payloads), chunk_size):
+                chunk = payloads[start:start + chunk_size]
+                stmt = pg_insert(SalesReturnRecord).values(chunk)
+                upsert_stmt = stmt.on_conflict_do_update(
+                    index_elements=["return_code"],
+                    set_={
+                        "order_id": stmt.excluded.order_id,
+                        "sku": stmt.excluded.sku,
+                        "reason": stmt.excluded.reason,
+                        "return_qty": stmt.excluded.return_qty,
+                        "refund_amount": stmt.excluded.refund_amount,
+                        "return_status": stmt.excluded.return_status,
+                        "raw_data": stmt.excluded.raw_data,
+                        "updated_at": datetime.utcnow(),
+                    },
+                )
+                db.execute(upsert_stmt)
+
+            db.commit()
+            return len(payloads)
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"Export archival: failed to upsert normalized returns: {exc}")
+            return 0
+        finally:
+            db.close()
+
+    def _upsert_inventory_snapshot_rows(self, snapshots: List[Dict[str, Any]], facility_code: str) -> int:
+        if not snapshots:
+            return 0
+
+        payloads: List[Dict[str, Any]] = []
+        normalized_warehouse = self._safe_str(facility_code or "anthrilo")
+
+        for snap in snapshots:
+            sku = self._safe_str(snap.get("itemTypeSKU") or snap.get("sku"))
+            if not sku:
+                continue
+
+            payloads.append(
+                {
+                    "sku": sku,
+                    "warehouse": normalized_warehouse,
+                    "available_qty": self._safe_int(snap.get("inventory"), default=0),
+                    "reserved_qty": self._safe_int(
+                        snap.get("openSale")
+                        or snap.get("virtualInventory")
+                        or snap.get("reservedInventory")
+                        or 0,
+                        default=0,
+                    ),
+                    "blocked_qty": self._safe_int(
+                        snap.get("inventoryBlocked")
+                        or snap.get("blockedInventory")
+                        or snap.get("badInventory")
+                        or 0,
+                        default=0,
+                    ),
+                    "raw_data": snap,
+                    "updated_at": datetime.utcnow(),
+                }
+            )
+
+        if not payloads:
+            return 0
+
+        db = SessionLocal()
+        try:
+            stmt = pg_insert(InventorySnapshotRecord).values(payloads)
+            upsert_stmt = stmt.on_conflict_do_update(
+                index_elements=["sku", "warehouse"],
+                set_={
+                    "available_qty": stmt.excluded.available_qty,
+                    "reserved_qty": stmt.excluded.reserved_qty,
+                    "blocked_qty": stmt.excluded.blocked_qty,
+                    "raw_data": stmt.excluded.raw_data,
+                    "updated_at": datetime.utcnow(),
+                },
+            )
+            db.execute(upsert_stmt)
+            db.commit()
+            return len(payloads)
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"Export archival: failed to upsert inventory snapshots: {exc}")
+            return 0
+        finally:
+            db.close()
 
 
     async def _create_export_job(
@@ -155,13 +844,35 @@ class UnicommerceService:
 
                     response = await client.post(url, json=payload, headers=headers)
 
-                    # Handle 401 - token refresh
-                    if response.status_code == 401:
+                    # Handle auth failures with token refresh/re-auth
+                    if response.status_code in (401, 403):
+                        try:
+                            auth_error_body = response.json()
+                        except Exception:
+                            auth_error_body = response.text[:500]
+                        logger.warning(
+                            f"Export: Job creation auth HTTP {response.status_code} "
+                            f"attempt {attempt}/{MAX_RETRIES}: {auth_error_body}"
+                        )
                         self.token_manager.invalidate_token()
                         await self.token_manager.get_valid_token()
                         headers = await self._get_headers()
                         headers["Facility"] = "anthrilo"
                         response = await client.post(url, json=payload, headers=headers)
+
+                        if response.status_code in (401, 403):
+                            if attempt < MAX_RETRIES:
+                                await asyncio.sleep(3 * attempt)
+                                continue
+                            try:
+                                auth_error_body = response.json()
+                            except Exception:
+                                auth_error_body = response.text[:500]
+                            logger.error(
+                                f"Export: Job creation auth still failing HTTP {response.status_code}: "
+                                f"{auth_error_body}"
+                            )
+                            return None
 
                     # Handle 400 - may be transient; retry with fresh token
                     if response.status_code == 400:
@@ -273,9 +984,9 @@ class UnicommerceService:
         start_time = time_module.time()
         poll_interval = self.EXPORT_INITIAL_POLL_INTERVAL
         no_filepath_retries = 0
-        MAX_NO_FILEPATH_RETRIES = 3
+        MAX_NO_FILEPATH_RETRIES = self.export_max_no_filepath_retries
         consecutive_errors = 0
-        MAX_CONSECUTIVE_ERRORS = 5
+        MAX_CONSECUTIVE_ERRORS = self.export_max_consecutive_poll_errors
 
         while (time_module.time() - start_time) < max_wait:
             elapsed = time_module.time() - start_time
@@ -287,7 +998,7 @@ class UnicommerceService:
 
                     response = await client.post(url, json=payload, headers=headers)
 
-                    if response.status_code == 401:
+                    if response.status_code in (401, 403):
                         self.token_manager.invalidate_token()
                         await self.token_manager.get_valid_token()
                         headers = await self._get_headers()
@@ -301,8 +1012,8 @@ class UnicommerceService:
                 data = response.json()
 
                 if data.get("successful"):
-                    status = data.get("status", "")
-                    file_path = data.get("filePath", "")
+                    status = str(data.get("status", "")).strip().upper()
+                    file_path = self._extract_export_file_path(data)
 
                     if status == "COMPLETE":
                         if file_path:
@@ -312,7 +1023,11 @@ class UnicommerceService:
                             return file_path
                         else:
                             no_filepath_retries += 1
-                            if no_filepath_retries <= MAX_NO_FILEPATH_RETRIES:
+                            should_retry = (
+                                no_filepath_retries <= MAX_NO_FILEPATH_RETRIES
+                                or elapsed < self.export_status_retry_grace_seconds
+                            )
+                            if should_retry:
                                 logger.warning(
                                     f"Export: Job {job_code} COMPLETE but no filePath "
                                     f"(attempt {no_filepath_retries}/{MAX_NO_FILEPATH_RETRIES}, {elapsed:.1f}s)"
@@ -325,7 +1040,7 @@ class UnicommerceService:
                                     f"{MAX_NO_FILEPATH_RETRIES} retries ({elapsed:.1f}s)"
                                 )
                                 return None
-                    elif status in ("FAILED", "CANCELLED"):
+                    elif status in ("FAILED", "CANCELLED", "ABORTED"):
                         logger.error(
                             f"Export: Job {job_code} {status} after {elapsed:.1f}s"
                         )
@@ -336,25 +1051,61 @@ class UnicommerceService:
                             f"elapsed={elapsed:.1f}s, next poll in {poll_interval:.1f}s"
                         )
                 else:
-                    logger.warning(
-                        f"Export: Status check not successful: {data.get('message', '')}"
-                    )
+                    status = str(data.get("status", "")).strip().upper()
+                    if status in {"QUEUED", "PENDING", "PROCESSING", "IN_PROGRESS", "RUNNING"}:
+                        logger.debug(
+                            f"Export: Job {job_code} status={status}, "
+                            f"elapsed={elapsed:.1f}s, next poll in {poll_interval:.1f}s"
+                        )
+                    else:
+                        logger.warning(
+                            f"Export: Status check not successful for {job_code}: "
+                            f"status={status or 'unknown'} message={data.get('message', '')}"
+                        )
 
-            except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+            except (
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+                httpx.PoolTimeout,
+                httpx.TransportError,
+            ) as e:
                 consecutive_errors += 1
                 logger.warning(
-                    f"Export: Poll timeout for {job_code} ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}, "
+                    f"Export: Poll transport error for {job_code} ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}, "
                     f"{elapsed:.0f}s elapsed): {type(e).__name__}"
                 )
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                     logger.error(
                         f"Export: Job {job_code} — {MAX_CONSECUTIVE_ERRORS} consecutive "
-                        f"timeouts, giving up after {elapsed:.0f}s"
+                        f"transport errors, giving up after {elapsed:.0f}s"
                     )
                     return None
                 # Wait longer after a timeout before retrying
                 await asyncio.sleep(poll_interval * 2)
                 continue
+
+            except httpx.HTTPStatusError as e:
+                status_code = e.response.status_code if e.response is not None else None
+                if status_code in {429, 500, 502, 503, 504}:
+                    consecutive_errors += 1
+                    logger.warning(
+                        f"Export: Poll transient HTTP {status_code} for {job_code} "
+                        f"({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS})"
+                    )
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        logger.error(
+                            f"Export: Job {job_code} — {MAX_CONSECUTIVE_ERRORS} consecutive "
+                            f"transient HTTP errors, giving up after {elapsed:.0f}s"
+                        )
+                        return None
+                    await asyncio.sleep(poll_interval * 2)
+                    continue
+
+                logger.error(
+                    f"Export: Poll non-retryable HTTP {status_code} for {job_code}, "
+                    f"aborting after {elapsed:.0f}s"
+                )
+                return None
 
             except Exception as e:
                 consecutive_errors += 1
@@ -380,24 +1131,24 @@ class UnicommerceService:
         logger.error(f"Export: Job {job_code} timed out after {elapsed:.0f}s")
         return None
 
-    async def _download_parse_export(self, download_url: str) -> List[Dict]:
+    async def _download_parse_export(
+        self,
+        download_url: str,
+        include_rows: bool = False,
+    ) -> Any:
         """Download export CSV and group rows by order code into order dicts."""
         try:
-            download_timeout = httpx.Timeout(120.0, connect=15.0)
-
-            async with httpx.AsyncClient(timeout=download_timeout) as client:
-                # CloudFront pre-signed URL â€” no auth needed
-                response = await client.get(download_url)
-
-                if response.status_code in (401, 403):
-                    headers = await self._get_headers()
-                    response = await client.get(download_url, headers=headers)
-
-                response.raise_for_status()
-                csv_text = response.text
+            csv_text = await self._download_csv_text(download_url, label="Export")
+            if csv_text is None:
+                logger.error("Export: Failed to download CSV after retries")
+                if include_rows:
+                    return [], [], []
+                return []
 
             if not csv_text or not csv_text.strip():
                 logger.warning("Export: Downloaded CSV is empty")
+                if include_rows:
+                    return [], [], []
                 return []
 
             reader = csv.DictReader(io.StringIO(csv_text))
@@ -406,11 +1157,14 @@ class UnicommerceService:
 
             # Group rows by order code nested order structure
             orders_map: Dict[str, Dict] = {}
+            raw_rows: List[Dict[str, Any]] = []
             row_count = 0
             fabric_skipped = 0
 
             for row in reader:
                 row_count += 1
+                if include_rows:
+                    raw_rows.append(dict(row))
 
                 # Skip items with excluded categories (e.g. FABRIC)
                 item_category = (
@@ -609,10 +1363,14 @@ class UnicommerceService:
                 f"Export: Parsed {row_count} CSV rows "
                 f"{len(orders)} orders, {total_items} items"
             )
+            if include_rows:
+                return orders, raw_rows, fieldnames
             return orders
 
         except Exception as e:
             logger.error(f"Export: Download/parse failed: {e}", exc_info=True)
+            if include_rows:
+                return [], [], []
             return []
 
     async def fetch_orders_via_export(
@@ -630,6 +1388,22 @@ class UnicommerceService:
         logger.info("Starting export job fetch")
         logger.info(f"  Range: {from_date.isoformat()} {to_date.isoformat()}")
 
+        sync_log_id = self._create_sync_log_record(
+            sync_type="export_job",
+            entity="sale_orders",
+            details={
+                "from_date": from_date.isoformat(),
+                "to_date": to_date.isoformat(),
+            },
+        )
+
+        export_job_id = self._create_export_job_record(
+            export_type="sale_orders",
+            requested_from=from_date,
+            requested_to=to_date,
+            requested_columns=self.EXPORT_COLUMNS,
+        )
+
         try:
             # Step 1: Create export job
             job_code = await self._create_export_job(from_date, to_date)
@@ -637,12 +1411,31 @@ class UnicommerceService:
 
             if not job_code:
                 logger.error("Export: Job creation failed")
+                self._update_export_job_record(
+                    export_job_id,
+                    status="failed",
+                    error_message="Export job creation failed",
+                    completed_at=datetime.utcnow(),
+                )
+                self._update_sync_log_record(
+                    sync_log_id,
+                    status="failed",
+                    failed_count=1,
+                    error_message="Export job creation failed",
+                    completed_at=datetime.utcnow(),
+                )
                 return {
                     "successful": False,
                     "error": "Export job creation failed",
                     "orders": [],
                     "totalRecords": 0,
                 }
+
+            self._update_export_job_record(
+                export_job_id,
+                job_code=job_code,
+                status="running",
+            )
 
             logger.info(f"  Step 1 done in {create_time:.1f}s job={job_code}")
 
@@ -652,6 +1445,19 @@ class UnicommerceService:
 
             if not download_url:
                 logger.error("Export: Job failed or timed out")
+                self._update_export_job_record(
+                    export_job_id,
+                    status="failed",
+                    error_message="Export job timed out or failed",
+                    completed_at=datetime.utcnow(),
+                )
+                self._update_sync_log_record(
+                    sync_log_id,
+                    status="failed",
+                    failed_count=1,
+                    error_message="Export job timed out or failed",
+                    completed_at=datetime.utcnow(),
+                )
                 return {
                     "successful": False,
                     "error": "Export job timed out or failed",
@@ -662,14 +1468,68 @@ class UnicommerceService:
             logger.info(f"  Step 2 done in {poll_time:.1f}s file ready")
 
             # Step 3: Download and parse CSV
-            orders = await self._download_parse_export(download_url)
+            orders, raw_rows, csv_headers = await self._download_parse_export(
+                download_url,
+                include_rows=True,
+            )
+
+            archived_rows, file_checksum = self._archive_export_rows(
+                export_job_id,
+                "sale_orders",
+                raw_rows,
+            )
+            normalized_rows = self._upsert_sales_order_rows(raw_rows)
+
+            self._update_export_job_record(
+                export_job_id,
+                status="completed",
+                download_url=download_url,
+                csv_headers=csv_headers,
+                file_checksum=file_checksum,
+                total_csv_rows=len(raw_rows),
+                parsed_entities=normalized_rows,
+                completed_at=datetime.utcnow(),
+            )
+
+            self._update_sync_log_record(
+                sync_log_id,
+                status="completed",
+                processed_count=normalized_rows,
+                failed_count=max(0, len(raw_rows) - normalized_rows),
+                completed_at=datetime.utcnow(),
+                details={
+                    "from_date": from_date.isoformat(),
+                    "to_date": to_date.isoformat(),
+                    "export_job_id": export_job_id,
+                    "archived_rows": archived_rows,
+                    "normalized_rows": normalized_rows,
+                    "total_csv_rows": len(raw_rows),
+                },
+            )
+
             download_time = time_module.time() - start_time - create_time - poll_time
             total_time = time_module.time() - start_time
 
-            if not orders and total_time < 10:
-                logger.warning(
-                    "Export: No orders returned (possibly empty range or column mismatch)"
-                )
+            if not orders:
+                if not raw_rows:
+                    logger.info(
+                        "Export: No sale-order rows for range %s -> %s (likely empty chunk)",
+                        from_date.isoformat(),
+                        to_date.isoformat(),
+                    )
+                elif normalized_rows > 0:
+                    logger.info(
+                        "Export: Grouped orders=0 but normalized rows=%s for range %s -> %s",
+                        normalized_rows,
+                        from_date.isoformat(),
+                        to_date.isoformat(),
+                    )
+                else:
+                    logger.warning(
+                        "Export: CSV rows present but no grouped/normalized orders for range %s -> %s; check headers/mapping",
+                        from_date.isoformat(),
+                        to_date.isoformat(),
+                    )
 
             logger.info(
                 f"  Step 3 done in {download_time:.1f}s {len(orders)} orders"
@@ -682,6 +1542,9 @@ class UnicommerceService:
                 "successful": True,
                 "orders": orders,
                 "totalRecords": len(orders),
+                "export_job_id": export_job_id,
+                "archived_rows": archived_rows,
+                "normalized_rows": normalized_rows,
                 "phase1_time": round(create_time + poll_time, 2),
                 "phase2_time": round(download_time, 2),
                 "total_time": round(total_time, 2),
@@ -696,6 +1559,19 @@ class UnicommerceService:
             total_time = time_module.time() - start_time
             logger.error(
                 f"Export: Failed after {total_time:.1f}s: {e}", exc_info=True
+            )
+            self._update_export_job_record(
+                export_job_id,
+                status="failed",
+                error_message=f"Export failed: {str(e)}",
+                completed_at=datetime.utcnow(),
+            )
+            self._update_sync_log_record(
+                sync_log_id,
+                status="failed",
+                failed_count=1,
+                error_message=f"Export failed: {str(e)}",
+                completed_at=datetime.utcnow(),
             )
             return {
                 "successful": False,
@@ -1353,8 +2229,32 @@ class UnicommerceService:
         BATCH_SIZE = 100
         url = f"{self.base_url}/inventory/inventorySnapshot/get"
         result: Dict[str, Dict[str, int]] = {}
+        raw_snapshot_rows: List[Dict[str, Any]] = []
+        batch_failures = 0
+
+        export_job_id = self._create_export_job_record(
+            export_type="inventory_snapshot",
+            requested_from=None,
+            requested_to=None,
+            requested_columns=[
+                "itemTypeSKU",
+                "inventory",
+                "virtualInventory",
+                "openSale",
+                "inventoryBlocked",
+            ],
+        )
 
         unique_skus = list(set(item_skus))
+        sync_log_id = self._create_sync_log_record(
+            sync_type="snapshot_api",
+            entity="inventory_snapshot",
+            details={
+                "facility_code": facility_code,
+                "requested_skus": len(unique_skus),
+            },
+        )
+
         batches = [
             unique_skus[i:i + BATCH_SIZE]
             for i in range(0, len(unique_skus), BATCH_SIZE)
@@ -1385,6 +2285,7 @@ class UnicommerceService:
                         response = await client.post(url, json=payload, headers=headers)
 
                     if response.status_code != 200:
+                        batch_failures += 1
                         logger.warning(
                             f"Inventory: Batch {batch_idx + 1}/{len(batches)} "
                             f"HTTP {response.status_code}"
@@ -1394,6 +2295,7 @@ class UnicommerceService:
                     data = response.json()
 
                     if not data.get("successful"):
+                        batch_failures += 1
                         logger.warning(
                             f"Inventory: Batch {batch_idx + 1} not successful: "
                             f"{data.get('message', '')}"
@@ -1405,6 +2307,12 @@ class UnicommerceService:
                         sku = snap.get("itemTypeSKU", "")
                         if not sku:
                             continue
+                        raw_snapshot_rows.append(
+                            {
+                                **snap,
+                                "facilityCode": facility_code,
+                            }
+                        )
                         inventory = snap.get("inventory", 0)
                         virtual_inv = snap.get("virtualInventory", 0)
                         # inventory = total physical available (good) inventory
@@ -1420,11 +2328,13 @@ class UnicommerceService:
                     )
 
             except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+                batch_failures += 1
                 logger.warning(
                     f"Inventory: Batch {batch_idx + 1} timeout: {type(e).__name__}"
                 )
                 continue
             except Exception as e:
+                batch_failures += 1
                 logger.warning(
                     f"Inventory: Batch {batch_idx + 1} error: {e}"
                 )
@@ -1436,6 +2346,47 @@ class UnicommerceService:
 
         logger.info(
             f"Inventory: Got data for {len(result)}/{len(unique_skus)} SKUs"
+        )
+
+        archived_rows, file_checksum = self._archive_export_rows(
+            export_job_id,
+            "inventory_snapshot",
+            raw_snapshot_rows,
+        )
+        normalized_rows = self._upsert_inventory_snapshot_rows(raw_snapshot_rows, facility_code)
+
+        sync_status = "completed" if raw_snapshot_rows or batch_failures == 0 else "failed"
+
+        self._update_export_job_record(
+            export_job_id,
+            status=sync_status,
+            error_message=None if (raw_snapshot_rows or batch_failures == 0) else "No inventory snapshots fetched",
+            csv_headers=list(raw_snapshot_rows[0].keys()) if raw_snapshot_rows else [],
+            file_checksum=file_checksum,
+            total_csv_rows=len(raw_snapshot_rows),
+            parsed_entities=normalized_rows,
+            completed_at=datetime.utcnow(),
+        )
+
+        self._update_sync_log_record(
+            sync_log_id,
+            status=sync_status,
+            processed_count=normalized_rows,
+            failed_count=batch_failures,
+            error_message=None if sync_status == "completed" else "No inventory snapshots fetched",
+            completed_at=datetime.utcnow(),
+            details={
+                "facility_code": facility_code,
+                "requested_skus": len(unique_skus),
+                "archived_rows": archived_rows,
+                "normalized_rows": normalized_rows,
+                "batch_failures": batch_failures,
+            },
+        )
+
+        logger.info(
+            "Inventory archival: "
+            f"archived_rows={archived_rows}, normalized_rows={normalized_rows}"
         )
         return result
 
@@ -1597,26 +2548,34 @@ class UnicommerceService:
 
     # ── Fabric-only sales data ────────────────────────────────────────
 
-    async def _download_parse_export_fabric(self, download_url: str) -> List[Dict]:
+    async def _download_parse_export_fabric(
+        self,
+        download_url: str,
+        include_rows: bool = False,
+    ) -> Any:
         """Download export CSV and return ONLY rows where category = FABRIC."""
         try:
-            download_timeout = httpx.Timeout(120.0, connect=15.0)
-            async with httpx.AsyncClient(timeout=download_timeout) as client:
-                response = await client.get(download_url)
-                if response.status_code in (401, 403):
-                    headers = await self._get_headers()
-                    response = await client.get(download_url, headers=headers)
-                response.raise_for_status()
-                csv_text = response.text
+            csv_text = await self._download_csv_text(download_url, label="Fabric Export")
+            if csv_text is None:
+                logger.error("Fabric export: Failed to download CSV after retries")
+                if include_rows:
+                    return [], [], []
+                return []
 
             if not csv_text or not csv_text.strip():
+                if include_rows:
+                    return [], [], []
                 return []
 
             reader = csv.DictReader(io.StringIO(csv_text))
+            fieldnames = reader.fieldnames or []
             orders_map: Dict[str, Dict] = {}
             fabric_count = 0
+            raw_rows: List[Dict[str, Any]] = []
 
             for row in reader:
+                if include_rows:
+                    raw_rows.append(dict(row))
                 item_category = (
                     row.get("Category") or row.get("category")
                     or row.get("Item Type Category") or row.get("categoryCode") or ""
@@ -1688,10 +2647,14 @@ class UnicommerceService:
 
             orders = [o for o in orders_map.values() if o["saleOrderItems"]]
             logger.info(f"Fabric export: {fabric_count} rows → {len(orders)} orders")
+            if include_rows:
+                return orders, raw_rows, fieldnames
             return orders
 
         except Exception as e:
             logger.error(f"Fabric export parse failed: {e}", exc_info=True)
+            if include_rows:
+                return [], [], []
             return []
 
     async def get_fabric_sales_data(
@@ -1709,16 +2672,101 @@ class UnicommerceService:
 
         logger.info(f"Fetching FABRIC sales data for {period_name}")
 
+        sync_log_id = self._create_sync_log_record(
+            sync_type="export_job",
+            entity="sale_orders_fabric",
+            details={
+                "period": period_name,
+                "from_date": from_date.isoformat(),
+                "to_date": to_date.isoformat(),
+            },
+        )
+
+        export_job_id = self._create_export_job_record(
+            export_type="sale_orders",
+            requested_from=from_date,
+            requested_to=to_date,
+            requested_columns=self.EXPORT_COLUMNS,
+        )
+
         try:
             job_code = await self._create_export_job(from_date, to_date)
             if not job_code:
+                self._update_export_job_record(
+                    export_job_id,
+                    status="failed",
+                    error_message="Export job creation failed",
+                    completed_at=datetime.utcnow(),
+                )
+                self._update_sync_log_record(
+                    sync_log_id,
+                    status="failed",
+                    failed_count=1,
+                    error_message="Export job creation failed",
+                    completed_at=datetime.utcnow(),
+                )
                 return {"success": False, "error": "Export job creation failed", "orders": [], "summary": {}}
+
+            self._update_export_job_record(
+                export_job_id,
+                job_code=job_code,
+                status="running",
+            )
 
             download_url = await self._poll_export_status(job_code)
             if not download_url:
+                self._update_export_job_record(
+                    export_job_id,
+                    status="failed",
+                    error_message="Export job timed out",
+                    completed_at=datetime.utcnow(),
+                )
+                self._update_sync_log_record(
+                    sync_log_id,
+                    status="failed",
+                    failed_count=1,
+                    error_message="Export job timed out",
+                    completed_at=datetime.utcnow(),
+                )
                 return {"success": False, "error": "Export job timed out", "orders": [], "summary": {}}
 
-            orders = await self._download_parse_export_fabric(download_url)
+            orders, raw_rows, csv_headers = await self._download_parse_export_fabric(
+                download_url,
+                include_rows=True,
+            )
+
+            archived_rows, file_checksum = self._archive_export_rows(
+                export_job_id,
+                "sale_orders",
+                raw_rows,
+            )
+            normalized_rows = self._upsert_sales_order_rows(raw_rows)
+
+            self._update_export_job_record(
+                export_job_id,
+                status="completed",
+                download_url=download_url,
+                csv_headers=csv_headers,
+                file_checksum=file_checksum,
+                total_csv_rows=len(raw_rows),
+                parsed_entities=normalized_rows,
+                completed_at=datetime.utcnow(),
+            )
+
+            self._update_sync_log_record(
+                sync_log_id,
+                status="completed",
+                processed_count=normalized_rows,
+                failed_count=max(0, len(raw_rows) - normalized_rows),
+                completed_at=datetime.utcnow(),
+                details={
+                    "period": period_name,
+                    "from_date": from_date.isoformat(),
+                    "to_date": to_date.isoformat(),
+                    "archived_rows": archived_rows,
+                    "normalized_rows": normalized_rows,
+                },
+            )
 
             # Build flat item-level rows and aggregate summary
             total_orders = 0
@@ -1751,6 +2799,9 @@ class UnicommerceService:
                 "period": period_name,
                 "from_date": from_date.isoformat(),
                 "to_date": to_date.isoformat(),
+                "export_job_id": export_job_id,
+                "archived_rows": archived_rows,
+                "normalized_rows": normalized_rows,
                 "summary": {
                     "total_orders": total_orders,
                     "total_items": total_items,
@@ -1764,6 +2815,19 @@ class UnicommerceService:
 
         except Exception as e:
             logger.error(f"Fabric sales data error: {e}", exc_info=True)
+            self._update_export_job_record(
+                export_job_id,
+                status="failed",
+                error_message=str(e),
+                completed_at=datetime.utcnow(),
+            )
+            self._update_sync_log_record(
+                sync_log_id,
+                status="failed",
+                failed_count=1,
+                error_message=str(e),
+                completed_at=datetime.utcnow(),
+            )
             return {"success": False, "error": str(e), "orders": [], "summary": {}}
 
     # ── Bundle SKU data (Item Master export) ──────────────────────────
@@ -1825,8 +2889,10 @@ class UnicommerceService:
             return None
 
     async def _download_parse_bundle_export(
-        self, download_url: str,
-    ) -> List[Dict]:
+        self,
+        download_url: str,
+        include_rows: bool = False,
+    ) -> Any:
         """
         Download Item Master export CSV, keep only Type=BUNDLE rows,
         and aggregate multiple component rows per SKU into a single record
@@ -1836,17 +2902,17 @@ class UnicommerceService:
         3 components produces 3 CSV rows sharing the same Product Code.
         """
         try:
-            download_timeout = httpx.Timeout(120.0, connect=15.0)
-            async with httpx.AsyncClient(timeout=download_timeout) as client:
-                response = await client.get(download_url)
-                if response.status_code in (401, 403):
-                    headers = await self._get_headers()
-                    response = await client.get(download_url, headers=headers)
-                response.raise_for_status()
-                csv_text = response.text
+            csv_text = await self._download_csv_text(download_url, label="Bundle Export")
+            if csv_text is None:
+                logger.error("Bundle export: Failed to download CSV after retries")
+                if include_rows:
+                    return [], [], []
+                return []
 
             if not csv_text or not csv_text.strip():
                 logger.warning("Bundle Export: Downloaded CSV is empty")
+                if include_rows:
+                    return [], [], []
                 return []
 
             reader = csv.DictReader(io.StringIO(csv_text))
@@ -1855,11 +2921,14 @@ class UnicommerceService:
 
             # Aggregate: dict keyed by SKU code → single bundle record
             bundle_map: Dict[str, Dict] = {}
+            raw_rows: List[Dict[str, Any]] = []
             skipped_type = 0
             total_rows = 0
 
             for row in reader:
                 total_rows += 1
+                if include_rows:
+                    raw_rows.append(dict(row))
                 row_type = (row.get("Type") or row.get("type") or "").strip().upper()
                 if row_type != "BUNDLE":
                     skipped_type += 1
@@ -1947,10 +3016,14 @@ class UnicommerceService:
                 f"Bundle Export: {total_rows} CSV rows → {len(bundles)} unique bundles "
                 f"(skipped {skipped_type} non-bundle rows)"
             )
+            if include_rows:
+                return bundles, raw_rows, fieldnames
             return bundles
 
         except Exception as e:
             logger.error(f"Bundle Export: Download/parse failed: {e}", exc_info=True)
+            if include_rows:
+                return [], [], []
             return []
 
     async def get_bundle_sku_data(self) -> Dict[str, Any]:
@@ -1970,16 +3043,72 @@ class UnicommerceService:
 
         logger.info("Fetching BUNDLE SKU data via Item Master export")
 
+        sync_log_id = self._create_sync_log_record(
+            sync_type="export_job",
+            entity="bundle_sku_catalog",
+            details={
+                "export_type": "item_master",
+            },
+        )
+
+        export_job_id = self._create_export_job_record(
+            export_type="item_master",
+            requested_from=None,
+            requested_to=None,
+            requested_columns=["All"],
+        )
+
         try:
             job_code = await self._create_item_master_export_job()
             if not job_code:
+                self._update_export_job_record(
+                    export_job_id,
+                    status="failed",
+                    error_message="Item Master export job creation failed",
+                    completed_at=datetime.utcnow(),
+                )
+                self._update_sync_log_record(
+                    sync_log_id,
+                    status="failed",
+                    failed_count=1,
+                    error_message="Item Master export job creation failed",
+                    completed_at=datetime.utcnow(),
+                )
                 return {"success": False, "error": "Item Master export job creation failed", "bundles": [], "summary": {}}
+
+            self._update_export_job_record(
+                export_job_id,
+                job_code=job_code,
+                status="running",
+            )
 
             download_url = await self._poll_export_status(job_code)
             if not download_url:
+                self._update_export_job_record(
+                    export_job_id,
+                    status="failed",
+                    error_message="Item Master export job timed out",
+                    completed_at=datetime.utcnow(),
+                )
+                self._update_sync_log_record(
+                    sync_log_id,
+                    status="failed",
+                    failed_count=1,
+                    error_message="Item Master export job timed out",
+                    completed_at=datetime.utcnow(),
+                )
                 return {"success": False, "error": "Item Master export job timed out", "bundles": [], "summary": {}}
 
-            bundles = await self._download_parse_bundle_export(download_url)
+            bundles, raw_rows, csv_headers = await self._download_parse_bundle_export(
+                download_url,
+                include_rows=True,
+            )
+
+            archived_rows, file_checksum = self._archive_export_rows(
+                export_job_id,
+                "item_master",
+                raw_rows,
+            )
 
             total_bundles = len(bundles)
             enabled_count = sum(1 for b in bundles if b.get("enabled"))
@@ -2003,6 +3132,8 @@ class UnicommerceService:
             result = {
                 "success": True,
                 "bundles": bundles,
+                "export_job_id": export_job_id,
+                "archived_rows": archived_rows,
                 "summary": {
                     "total_bundles": total_bundles,
                     "enabled": enabled_count,
@@ -2014,12 +3145,48 @@ class UnicommerceService:
                 },
             }
 
+            self._update_export_job_record(
+                export_job_id,
+                status="completed",
+                download_url=download_url,
+                csv_headers=csv_headers,
+                file_checksum=file_checksum,
+                total_csv_rows=len(raw_rows),
+                parsed_entities=total_bundles,
+                completed_at=datetime.utcnow(),
+            )
+
+            self._update_sync_log_record(
+                sync_log_id,
+                status="completed",
+                processed_count=total_bundles,
+                failed_count=max(0, len(raw_rows) - total_bundles),
+                completed_at=datetime.utcnow(),
+                details={
+                    "archived_rows": archived_rows,
+                    "bundle_count": total_bundles,
+                },
+            )
+
             # Cache — this is static catalogue data
             self._set_cache(cache_key, result)
             return result
 
         except Exception as e:
             logger.error(f"Bundle SKU data error: {e}", exc_info=True)
+            self._update_export_job_record(
+                export_job_id,
+                status="failed",
+                error_message=str(e),
+                completed_at=datetime.utcnow(),
+            )
+            self._update_sync_log_record(
+                sync_log_id,
+                status="failed",
+                failed_count=1,
+                error_message=str(e),
+                completed_at=datetime.utcnow(),
+            )
             return {"success": False, "error": str(e), "bundles": [], "summary": {}}
 
     # ── Bundle Sales Analysis ─────────────────────────────────────────
@@ -2417,12 +3584,34 @@ class UnicommerceService:
 
                     response = await client.post(url, json=payload, headers=headers)
 
-                    if response.status_code == 401:
+                    if response.status_code in (401, 403):
+                        try:
+                            auth_error_body = response.json()
+                        except Exception:
+                            auth_error_body = response.text[:500]
+                        logger.warning(
+                            f"Return Export: Job creation auth HTTP {response.status_code} "
+                            f"attempt {attempt}/{MAX_RETRIES}: {auth_error_body}"
+                        )
                         self.token_manager.invalidate_token()
                         await self.token_manager.get_valid_token()
                         headers = await self._get_headers()
                         headers["Facility"] = "anthrilo"
                         response = await client.post(url, json=payload, headers=headers)
+
+                        if response.status_code in (401, 403):
+                            if attempt < MAX_RETRIES:
+                                await asyncio.sleep(3 * attempt)
+                                continue
+                            try:
+                                auth_error_body = response.json()
+                            except Exception:
+                                auth_error_body = response.text[:500]
+                            logger.error(
+                                f"Return Export: Job creation auth still failing HTTP {response.status_code}: "
+                                f"{auth_error_body}"
+                            )
+                            return None
 
                     if response.status_code == 400:
                         try:
@@ -2510,25 +3699,28 @@ class UnicommerceService:
 
         return None
 
-    async def _download_parse_return_export(self, download_url: str) -> List[Dict]:
+    async def _download_parse_return_export(
+        self,
+        download_url: str,
+        include_rows: bool = False,
+    ) -> Any:
         """
         Download Tally Return GST Report CSV and parse into return item records.
         Each CSV row represents one returned item with channel, SKU, price, qty,
         return type, GST breakdown, etc.
         """
         try:
-            download_timeout = httpx.Timeout(120.0, connect=15.0)
-
-            async with httpx.AsyncClient(timeout=download_timeout) as client:
-                response = await client.get(download_url)
-                if response.status_code in (401, 403):
-                    headers = await self._get_headers()
-                    response = await client.get(download_url, headers=headers)
-                response.raise_for_status()
-                csv_text = response.text
+            csv_text = await self._download_csv_text(download_url, label="Return Export")
+            if csv_text is None:
+                logger.error("Return export: Failed to download CSV after retries")
+                if include_rows:
+                    return [], [], []
+                return []
 
             if not csv_text or not csv_text.strip():
                 logger.warning("Return Export: Downloaded CSV is empty")
+                if include_rows:
+                    return [], [], []
                 return []
 
             reader = csv.DictReader(io.StringIO(csv_text))
@@ -2536,10 +3728,13 @@ class UnicommerceService:
             logger.info(f"Return Export: CSV columns ({len(fieldnames)}): {fieldnames[:15]}...")
 
             items = []
+            raw_rows: List[Dict[str, Any]] = []
             row_count = 0
 
             for row in reader:
                 row_count += 1
+                if include_rows:
+                    raw_rows.append(dict(row))
 
                 sale_order_code = (
                     row.get("Sale Order Number")
@@ -2645,10 +3840,14 @@ class UnicommerceService:
             logger.info(
                 f"Return Export: Parsed {row_count} CSV rows → {len(items)} return items"
             )
+            if include_rows:
+                return items, raw_rows, fieldnames
             return items
 
         except Exception as e:
             logger.error(f"Return Export: Download/parse failed: {e}", exc_info=True)
+            if include_rows:
+                return [], [], []
             return []
 
     # Maximum days per return export chunk — UC returns empty for very large ranges
@@ -2745,6 +3944,22 @@ class UnicommerceService:
         logger.info("Starting return export job fetch")
         logger.info(f"  Range: {from_date.isoformat()} → {to_date.isoformat()}")
 
+        sync_log_id = self._create_sync_log_record(
+            sync_type="export_job",
+            entity="sales_returns",
+            details={
+                "from_date": from_date.isoformat(),
+                "to_date": to_date.isoformat(),
+            },
+        )
+
+        export_job_id = self._create_export_job_record(
+            export_type="return_gst",
+            requested_from=from_date,
+            requested_to=to_date,
+            requested_columns=self.RETURN_EXPORT_COLUMNS,
+        )
+
         try:
             # Step 1: Create export job
             job_code = await self._create_return_export_job(from_date, to_date)
@@ -2752,12 +3967,31 @@ class UnicommerceService:
 
             if not job_code:
                 logger.error("Return Export: Job creation failed")
+                self._update_export_job_record(
+                    export_job_id,
+                    status="failed",
+                    error_message="Return export job creation failed",
+                    completed_at=datetime.utcnow(),
+                )
+                self._update_sync_log_record(
+                    sync_log_id,
+                    status="failed",
+                    failed_count=1,
+                    error_message="Return export job creation failed",
+                    completed_at=datetime.utcnow(),
+                )
                 return {
                     "successful": False,
                     "error": "Return export job creation failed",
                     "items": [],
                     "total_items": 0,
                 }
+
+            self._update_export_job_record(
+                export_job_id,
+                job_code=job_code,
+                status="running",
+            )
 
             logger.info(f"  Step 1 done in {create_time:.1f}s — job={job_code}")
 
@@ -2767,6 +4001,19 @@ class UnicommerceService:
 
             if not download_url:
                 logger.error("Return Export: Job failed or timed out")
+                self._update_export_job_record(
+                    export_job_id,
+                    status="failed",
+                    error_message="Return export job timed out or failed",
+                    completed_at=datetime.utcnow(),
+                )
+                self._update_sync_log_record(
+                    sync_log_id,
+                    status="failed",
+                    failed_count=1,
+                    error_message="Return export job timed out or failed",
+                    completed_at=datetime.utcnow(),
+                )
                 return {
                     "successful": False,
                     "error": "Return export job timed out or failed",
@@ -2777,7 +4024,45 @@ class UnicommerceService:
             logger.info(f"  Step 2 done in {poll_time:.1f}s — file ready")
 
             # Step 3: Download and parse CSV
-            items = await self._download_parse_return_export(download_url)
+            items, raw_rows, csv_headers = await self._download_parse_return_export(
+                download_url,
+                include_rows=True,
+            )
+
+            archived_rows, file_checksum = self._archive_export_rows(
+                export_job_id,
+                "return_gst",
+                raw_rows,
+            )
+            normalized_rows = self._upsert_sales_return_rows(raw_rows)
+
+            self._update_export_job_record(
+                export_job_id,
+                status="completed",
+                download_url=download_url,
+                csv_headers=csv_headers,
+                file_checksum=file_checksum,
+                total_csv_rows=len(raw_rows),
+                parsed_entities=normalized_rows,
+                completed_at=datetime.utcnow(),
+            )
+
+            self._update_sync_log_record(
+                sync_log_id,
+                status="completed",
+                processed_count=normalized_rows,
+                failed_count=max(0, len(raw_rows) - normalized_rows),
+                completed_at=datetime.utcnow(),
+                details={
+                    "from_date": from_date.isoformat(),
+                    "to_date": to_date.isoformat(),
+                    "export_job_id": export_job_id,
+                    "archived_rows": archived_rows,
+                    "normalized_rows": normalized_rows,
+                    "total_csv_rows": len(raw_rows),
+                },
+            )
+
             download_time = time_module.time() - start_time - create_time - poll_time
             total_time = time_module.time() - start_time
 
@@ -2792,6 +4077,9 @@ class UnicommerceService:
                 "successful": True,
                 "items": items,
                 "total_items": len(items),
+                "export_job_id": export_job_id,
+                "archived_rows": archived_rows,
+                "normalized_rows": normalized_rows,
                 "phase1_time": round(create_time + poll_time, 2),
                 "phase2_time": round(download_time, 2),
                 "total_time": round(total_time, 2),
@@ -2802,6 +4090,19 @@ class UnicommerceService:
             total_time = time_module.time() - start_time
             logger.error(
                 f"Return Export: Failed after {total_time:.1f}s: {e}", exc_info=True
+            )
+            self._update_export_job_record(
+                export_job_id,
+                status="failed",
+                error_message=f"Return export failed: {str(e)}",
+                completed_at=datetime.utcnow(),
+            )
+            self._update_sync_log_record(
+                sync_log_id,
+                status="failed",
+                failed_count=1,
+                error_message=f"Return export failed: {str(e)}",
+                completed_at=datetime.utcnow(),
             )
             return {
                 "successful": False,

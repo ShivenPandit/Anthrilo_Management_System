@@ -4,17 +4,28 @@ from fastapi import APIRouter, Query, BackgroundTasks, WebSocket, WebSocketDisco
 import logging
 import asyncio
 import json as json_module
-from calendar import monthrange
 from datetime import datetime, timezone, timedelta, date as date_cls
 from app.services.unicommerce import get_unicommerce_service
-from app.services.sync_service import get_sync_service
+from app.services.unicommerce_data_service import get_unicommerce_data_service
+from app.services.unicommerce_sync_orchestrator import get_unicommerce_sync_orchestrator
 from app.core.token_manager import get_token_manager
+from app.core.redis import redis_client
 from app.services.cache_service import CacheService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 IST = timezone(timedelta(hours=5, minutes=30))
+EXCLUDED_REVENUE_STATUSES = {
+    "CANCELLED",
+    "CANCELED",
+    "RETURNED",
+    "REFUNDED",
+    "FAILED",
+    "UNFULFILLABLE",
+    "ERROR",
+    "PENDING_VERIFICATION",
+}
 
 
 # WEBSOCKET CONNECTION MANAGER
@@ -51,6 +62,32 @@ class ConnectionManager:
 ws_manager = ConnectionManager()
 
 
+def _parse_date_boundary_utc(value: str, end_of_day: bool = False) -> datetime:
+    parsed = datetime.strptime(value, "%Y-%m-%d")
+    if end_of_day:
+        parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=0)
+    else:
+        parsed = parsed.replace(hour=0, minute=0, second=0, microsecond=0)
+    return parsed.replace(tzinfo=timezone.utc)
+
+
+async def _broadcast_sales_refresh(sync_event: dict | None = None) -> None:
+    """Broadcast refreshed sales snapshot and optional sync completion event."""
+    try:
+        today_key = f"uc:today:{datetime.now(IST).strftime('%Y-%m-%d')}"
+        data_service = get_unicommerce_data_service()
+        today_result = data_service.get_sales_data(period="today")
+
+        if today_result.get("success"):
+            CacheService.set(today_key, today_result, 180)
+            await ws_manager.broadcast({"type": "today_sales", "data": today_result})
+
+        if sync_event is not None:
+            await ws_manager.broadcast({"type": "sync_completed", "data": sync_event})
+    except Exception as exc:
+        logger.warning(f"Failed to broadcast sync refresh event: {exc}")
+
+
 # Summary endpoints
 
 @router.get("/unicommerce/today")
@@ -66,8 +103,8 @@ async def get_today_sales():
             return cached
 
         logger.info("Fetching TODAY sales (cache miss)")
-        service = get_unicommerce_service()
-        result = await service.get_today_sales()
+        data_service = get_unicommerce_data_service()
+        result = data_service.get_sales_data(period="today")
 
         if result.get("success"):
             summary = result.get("summary", {})
@@ -102,8 +139,8 @@ async def get_yesterday_sales():
             return cached
 
         logger.info("Fetching YESTERDAY sales (cache miss)")
-        service = get_unicommerce_service()
-        result = await service.get_yesterday_sales()
+        data_service = get_unicommerce_data_service()
+        result = data_service.get_sales_data(period="yesterday")
 
         if result.get("success"):
             summary = result.get("summary", {})
@@ -132,8 +169,8 @@ async def get_last_7_days():
             return cached
 
         logger.info("Fetching LAST 7 DAYS sales (cache miss)")
-        service = get_unicommerce_service()
-        result = await service.get_last_7_days_sales()
+        data_service = get_unicommerce_data_service()
+        result = data_service.get_sales_data(period="last_7_days")
 
         if result.get("success"):
             summary = result.get("summary", {})
@@ -166,8 +203,12 @@ async def get_today_orders_paginated(
 ):
     """Get today's orders with pagination."""
     try:
-        service = get_unicommerce_service()
-        return await service.get_today_orders_paginated(page, page_size)
+        data_service = get_unicommerce_data_service()
+        return data_service.get_orders_paginated(
+            period="today",
+            page=page,
+            page_size=page_size,
+        )
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -180,8 +221,12 @@ async def get_yesterday_orders_paginated(
 ):
     """Get yesterday's orders with pagination."""
     try:
-        service = get_unicommerce_service()
-        return await service.get_yesterday_orders_paginated(page, page_size)
+        data_service = get_unicommerce_data_service()
+        return data_service.get_orders_paginated(
+            period="yesterday",
+            page=page,
+            page_size=page_size,
+        )
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -194,8 +239,12 @@ async def get_last_7_days_orders_paginated(
 ):
     """Get last 7 days orders with pagination."""
     try:
-        service = get_unicommerce_service()
-        return await service.get_last_7_days_orders_paginated(page, page_size)
+        data_service = get_unicommerce_data_service()
+        return data_service.get_orders_paginated(
+            period="last_7_days",
+            page=page,
+            page_size=page_size,
+        )
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -217,8 +266,14 @@ async def get_custom_orders_paginated(
             hour=23, minute=59, second=59, tzinfo=timezone.utc
         )
 
-        service = get_unicommerce_service()
-        return await service.get_orders_paginated(from_dt, to_dt, page, page_size)
+        data_service = get_unicommerce_data_service()
+        return data_service.get_orders_paginated(
+            period="custom",
+            from_date=from_dt,
+            to_date=to_dt,
+            page=page,
+            page_size=page_size,
+        )
 
     except ValueError as e:
         return {"success": False, "error": f"Invalid date format: {e}"}
@@ -245,14 +300,14 @@ async def get_sales_report(
             cached["_cached"] = True
             return cached
 
-        service = get_unicommerce_service()
+        data_service = get_unicommerce_data_service()
 
         if period == "today":
-            result = await service.get_today_sales()
+            result = data_service.get_sales_data(period="today")
         elif period == "yesterday":
-            result = await service.get_yesterday_sales()
+            result = data_service.get_sales_data(period="yesterday")
         elif period == "last_7_days":
-            result = await service.get_last_7_days_sales()
+            result = data_service.get_sales_data(period="last_7_days")
         elif period == "custom" and from_date and to_date:
             from_dt = datetime.strptime(from_date, "%Y-%m-%d").replace(
                 hour=0, minute=0, second=0, tzinfo=timezone.utc
@@ -260,9 +315,13 @@ async def get_sales_report(
             to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(
                 hour=23, minute=59, second=59, tzinfo=timezone.utc
             )
-            result = await service.get_custom_range_sales(from_dt, to_dt)
+            result = data_service.get_sales_data(
+                period="custom",
+                from_date=from_dt,
+                to_date=to_dt,
+            )
         else:
-            result = await service.get_today_sales()
+            result = data_service.get_sales_data(period="today")
 
         # Cache result
         ttl = 180 if period == "today" else CacheService.TTL_MEDIUM
@@ -301,7 +360,7 @@ async def get_daily_sales_report(
             cached["cached"] = True
             return cached
 
-        service = get_unicommerce_service()
+        data_service = get_unicommerce_data_service()
 
         # Determine mode: range vs single date
         is_range = from_date and to_date
@@ -315,7 +374,11 @@ async def get_daily_sales_report(
             to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(
                 hour=23, minute=59, second=59, tzinfo=timezone.utc
             )
-            result = await service.get_custom_range_sales(from_dt, to_dt)
+            result = data_service.get_sales_data(
+                period="custom",
+                from_date=from_dt,
+                to_date=to_dt,
+            )
             date_label = f"{from_date} to {to_date}"
         else:
             # Single date mode (existing logic)
@@ -325,9 +388,9 @@ async def get_daily_sales_report(
 
             result = None
             if report_date == today:
-                result = await service.get_today_sales()
+                result = data_service.get_sales_data(period="today")
             elif report_date == yesterday:
-                result = await service.get_yesterday_sales()
+                result = data_service.get_sales_data(period="yesterday")
             else:
                 from_dt = datetime.strptime(date, "%Y-%m-%d").replace(
                     hour=0, minute=0, second=0, tzinfo=timezone.utc
@@ -335,7 +398,11 @@ async def get_daily_sales_report(
                 to_dt = datetime.strptime(date, "%Y-%m-%d").replace(
                     hour=23, minute=59, second=59, tzinfo=timezone.utc
                 )
-                result = await service.get_custom_range_sales(from_dt, to_dt)
+                result = data_service.get_sales_data(
+                    period="custom",
+                    from_date=from_dt,
+                    to_date=to_dt,
+                )
             date_label = date
 
         if not result.get("success"):
@@ -441,7 +508,16 @@ async def get_daily_sales_report(
         inventory_map = {}
         try:
             if unique_skus:
-                inventory_map = await service.get_inventory_snapshot(unique_skus)
+                inventory_result = data_service.get_inventory_data(skus=unique_skus)
+                if inventory_result.get("success"):
+                    for inventory_item in inventory_result.get("items", []):
+                        sku_code = inventory_item.get("sku")
+                        if not sku_code:
+                            continue
+                        inventory_map[str(sku_code)] = {
+                            "good_inventory": int(inventory_item.get("available_qty", 0) or 0),
+                            "virtual_inventory": int(inventory_item.get("reserved_qty", 0) or 0),
+                        }
         except Exception as inv_err:
             logger.warning(f"Could not fetch inventory data: {inv_err}")
 
@@ -460,13 +536,17 @@ async def get_daily_sales_report(
                 comp_today = datetime.now(timezone.utc).date()
                 comp_yesterday = comp_today - timedelta(days=1)
                 if comp_date == comp_today:
-                    comp_result = await service.get_today_sales()
+                    comp_result = data_service.get_sales_data(period="today")
                 elif comp_date == comp_yesterday:
-                    comp_result = await service.get_yesterday_sales()
+                    comp_result = data_service.get_sales_data(period="yesterday")
                 else:
                     comp_from = datetime.combine(comp_date, datetime.min.time()).replace(tzinfo=timezone.utc)
                     comp_to = datetime.combine(comp_date, datetime.max.time()).replace(tzinfo=timezone.utc)
-                    comp_result = await service.get_custom_range_sales(comp_from, comp_to)
+                    comp_result = data_service.get_sales_data(
+                        period="custom",
+                        from_date=comp_from,
+                        to_date=comp_to,
+                    )
 
                 if comp_result.get("success"):
                     comp_breakdown = comp_result.get("summary", {}).get("channel_breakdown", {})
@@ -512,7 +592,7 @@ async def get_daily_sales_report(
                 "all_orders": total_all_orders,
             },
             "currency": "INR",
-            "data_source": "export_job_api",
+            "data_source": result.get("data_source", "db_first"),
             "cached": False,
             "note": f"Report shows {total_quantity} items from revenue-generating orders. {excluded_items} items excluded from cancelled/returned orders.",
         }
@@ -552,7 +632,7 @@ async def get_sales_activity_report(
             cached["_cached"] = True
             return cached
 
-        service = get_unicommerce_service()
+        data_service = get_unicommerce_data_service()
 
         # Construct dates in IST and convert to UTC so the Unicommerce
         # export filter covers the correct IST business day boundaries.
@@ -564,7 +644,11 @@ async def get_sales_activity_report(
             hour=23, minute=59, second=59, tzinfo=IST
         ).astimezone(timezone.utc)
 
-        result = await service.get_custom_range_sales(from_dt, to_dt)
+        result = data_service.get_sales_data(
+            period="custom",
+            from_date=from_dt,
+            to_date=to_dt,
+        )
         if not result.get("success"):
             return result
 
@@ -776,7 +860,16 @@ async def get_sales_activity_report(
         inventory_map = {}
         try:
             if unique_skus:
-                inventory_map = await service.get_inventory_snapshot(unique_skus)
+                inventory_result = data_service.get_inventory_data(skus=unique_skus)
+                if inventory_result.get("success"):
+                    for inventory_item in inventory_result.get("items", []):
+                        sku_code = inventory_item.get("sku")
+                        if not sku_code:
+                            continue
+                        inventory_map[str(sku_code)] = {
+                            "good_inventory": int(inventory_item.get("available_qty", 0) or 0),
+                            "virtual_inventory": int(inventory_item.get("reserved_qty", 0) or 0),
+                        }
         except Exception as inv_err:
             logger.warning(f"Sales activity: inventory fetch failed: {inv_err}")
 
@@ -832,14 +925,14 @@ async def get_channel_revenue(
             cached["_cached"] = True
             return cached
 
-        service = get_unicommerce_service()
+        data_service = get_unicommerce_data_service()
 
         if period == "today":
-            result = await service.get_today_sales()
+            result = data_service.get_sales_data(period="today")
         elif period == "yesterday":
-            result = await service.get_yesterday_sales()
+            result = data_service.get_sales_data(period="yesterday")
         else:
-            result = await service.get_last_7_days_sales()
+            result = data_service.get_sales_data(period="last_7_days")
 
         if not result.get("success"):
             return result
@@ -902,9 +995,9 @@ async def trigger_sync(
     Trigger background sync for a period.
     Orders are fetched from Unicommerce and persisted to DB.
 
-    Valid periods: today, yesterday, last_7_days
+    Valid periods: today, yesterday, last_7_days, last_30_days
     """
-    valid_periods = {"today", "yesterday", "last_7_days"}
+    valid_periods = {"today", "yesterday", "last_7_days", "last_30_days"}
     if period not in valid_periods:
         return {
             "success": False,
@@ -912,27 +1005,43 @@ async def trigger_sync(
         }
 
     try:
-        sync_service = get_sync_service()
+        orchestrator = get_unicommerce_sync_orchestrator()
+        uc_service = get_unicommerce_service()
 
-        # Check if already running
-        status = sync_service.get_sync_status(period)
-        if status.get("status") == "running":
-            return {
-                "success": False,
-                "message": f"Sync for '{period}' is already running",
-                "status": status,
-            }
+        if period == "today":
+            from_dt, to_dt = uc_service.get_today_range()
+        elif period == "yesterday":
+            from_dt, to_dt = uc_service.get_yesterday_range()
+        elif period == "last_7_days":
+            from_dt, to_dt = uc_service.get_last_n_days_range(7)
+        else:
+            from_dt, to_dt = uc_service.get_last_n_days_range(30)
 
-        # Run sync in background
         async def _run_sync():
-            await sync_service.sync_period(period)
+            orders = await orchestrator.sync_orders_window(from_dt, to_dt)
+            returns = await orchestrator.sync_returns_window(from_dt, to_dt)
+            inventory = await orchestrator.sync_inventory()
+            await _broadcast_sales_refresh(
+                {
+                    "success": bool(orders.get("success")) and bool(returns.get("success")) and bool(inventory.get("success")),
+                    "profile": "period_sync",
+                    "period": period,
+                    "from_date": from_dt.isoformat(),
+                    "to_date": to_dt.isoformat(),
+                    "orders": orders,
+                    "returns": returns,
+                    "inventory": inventory,
+                }
+            )
 
         background_tasks.add_task(_run_sync)
 
         return {
             "success": True,
-            "message": f"Sync started for '{period}' in background",
+            "message": f"Orchestrated sync started for '{period}' in background",
             "period": period,
+            "from_date": from_dt.isoformat(),
+            "to_date": to_dt.isoformat(),
         }
 
     except Exception as e:
@@ -942,22 +1051,19 @@ async def trigger_sync(
 
 @router.post("/unicommerce/sync/all")
 async def trigger_sync_all(background_tasks: BackgroundTasks):
-    """Trigger background sync for all periods."""
+    """Trigger background incremental sync profile."""
     try:
-        sync_service = get_sync_service()
+        orchestrator = get_unicommerce_sync_orchestrator()
 
         async def _run_all_syncs():
-            for period in ["today", "yesterday", "last_7_days"]:
-                try:
-                    await sync_service.sync_period(period)
-                except Exception as e:
-                    logger.error(f"Sync failed for {period}: {e}")
+            result = await orchestrator.run_incremental_sync()
+            await _broadcast_sales_refresh(result)
 
         background_tasks.add_task(_run_all_syncs)
 
         return {
             "success": True,
-            "message": "Sync started for all periods in background",
+            "message": "Incremental sync profile started in background",
         }
 
     except Exception as e:
@@ -969,10 +1075,185 @@ async def trigger_sync_all(background_tasks: BackgroundTasks):
 async def get_sync_status(
     period: str = Query(None, description="Period to check, or omit for all")
 ):
-    """Get sync status for a specific period or all periods."""
+    """Get orchestrated sync health and lag status."""
     try:
-        sync_service = get_sync_service()
-        return sync_service.get_sync_status(period)
+        orchestrator = get_unicommerce_sync_orchestrator()
+        health = orchestrator.get_sync_health()
+        if period:
+            health["requested_period"] = period
+        return health
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/unicommerce/sync/health")
+async def get_sync_health():
+    """Alias endpoint for sync health checks."""
+    try:
+        orchestrator = get_unicommerce_sync_orchestrator()
+        return orchestrator.get_sync_health()
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@router.get("/unicommerce/sync/readiness")
+async def get_sync_readiness():
+    """Evaluate release gates: coverage, lag, and dashboard DB-first status."""
+    try:
+        orchestrator = get_unicommerce_sync_orchestrator()
+        return orchestrator.get_release_readiness()
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/unicommerce/sync/profile/{profile}")
+async def run_sync_profile(
+    profile: str,
+    background_tasks: BackgroundTasks,
+    from_date: str = Query(None, description="YYYY-MM-DD (required for full_backfill)"),
+    to_date: str = Query(None, description="YYYY-MM-DD (required for full_backfill)"),
+    run_in_background: bool = Query(True, description="Run profile asynchronously"),
+):
+    """Run a sync profile: incremental | realtime_trigger | full_backfill."""
+    try:
+        orchestrator = get_unicommerce_sync_orchestrator()
+        profile_norm = (profile or "").strip().lower()
+        parsed_from = _parse_date_boundary_utc(from_date, end_of_day=False) if from_date else None
+        parsed_to = _parse_date_boundary_utc(to_date, end_of_day=True) if to_date else None
+
+        valid_profiles = {"incremental", "realtime_trigger", "full_backfill"}
+        if profile_norm not in valid_profiles:
+            return {
+                "success": False,
+                "error": "Unknown profile. Use incremental | realtime_trigger | full_backfill",
+            }
+
+        if profile_norm == "full_backfill" and (parsed_from is None or parsed_to is None):
+            return {
+                "success": False,
+                "error": "from_date and to_date are required for full_backfill profile",
+            }
+
+        if run_in_background:
+            async def _run_profile_task():
+                result = await orchestrator.run_profile(profile_norm, parsed_from, parsed_to)
+                await _broadcast_sales_refresh(result)
+
+            background_tasks.add_task(_run_profile_task)
+            return {
+                "success": True,
+                "message": f"Profile '{profile_norm}' started in background",
+                "profile": profile_norm,
+                "from_date": parsed_from.isoformat() if parsed_from else None,
+                "to_date": parsed_to.isoformat() if parsed_to else None,
+            }
+
+        result = await orchestrator.run_profile(profile_norm, parsed_from, parsed_to)
+        await _broadcast_sales_refresh(result)
+        return result
+    except ValueError as e:
+        return {"success": False, "error": f"Invalid date format: {e}"}
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/unicommerce/sync/backfill/windows")
+async def run_backfill_windows(
+    background_tasks: BackgroundTasks,
+    windows: str = Query("7,30,90,365", description="Comma-separated day windows"),
+    run_in_background: bool = Query(True, description="Run backfill in background"),
+):
+    """Run staged backfill windows for export-first ingestion validation."""
+    try:
+        orchestrator = get_unicommerce_sync_orchestrator()
+        window_values = [int(part.strip()) for part in windows.split(",") if part.strip()]
+        window_values = [value for value in window_values if value > 0]
+        if not window_values:
+            return {"success": False, "error": "At least one positive window is required"}
+
+        if run_in_background:
+            async def _run_backfill_task():
+                result = await orchestrator.run_backfill_windows(window_values)
+                await _broadcast_sales_refresh(result)
+
+            background_tasks.add_task(_run_backfill_task)
+            return {
+                "success": True,
+                "message": "Backfill windows started in background",
+                "windows": window_values,
+            }
+
+        result = await orchestrator.run_backfill_windows(window_values)
+        await _broadcast_sales_refresh(result)
+        return result
+    except ValueError as e:
+        return {"success": False, "error": f"Invalid windows format: {e}"}
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/unicommerce/sync/operator/orders")
+async def operator_sync_orders(
+    from_date: str = Query(..., description="YYYY-MM-DD"),
+    to_date: str = Query(..., description="YYYY-MM-DD"),
+):
+    """Operator command: manually sync orders for a date range."""
+    try:
+        orchestrator = get_unicommerce_sync_orchestrator()
+        parsed_from = _parse_date_boundary_utc(from_date, end_of_day=False)
+        parsed_to = _parse_date_boundary_utc(to_date, end_of_day=True)
+        return await orchestrator.sync_orders_window(parsed_from, parsed_to)
+    except ValueError as e:
+        return {"success": False, "error": f"Invalid date format: {e}"}
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/unicommerce/sync/operator/returns")
+async def operator_sync_returns(
+    from_date: str = Query(..., description="YYYY-MM-DD"),
+    to_date: str = Query(..., description="YYYY-MM-DD"),
+):
+    """Operator command: manually sync returns for a date range."""
+    try:
+        orchestrator = get_unicommerce_sync_orchestrator()
+        parsed_from = _parse_date_boundary_utc(from_date, end_of_day=False)
+        parsed_to = _parse_date_boundary_utc(to_date, end_of_day=True)
+        return await orchestrator.sync_returns_window(parsed_from, parsed_to)
+    except ValueError as e:
+        return {"success": False, "error": f"Invalid date format: {e}"}
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/unicommerce/sync/operator/item-master")
+async def operator_sync_item_master():
+    """Operator command: manually sync item master export."""
+    try:
+        orchestrator = get_unicommerce_sync_orchestrator()
+        return await orchestrator.sync_item_master()
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/unicommerce/sync/operator/inventory")
+async def operator_sync_inventory(
+    skus: str = Query(None, description="Comma-separated SKUs (optional)"),
+    facility_code: str = Query("anthrilo", description="Facility code"),
+):
+    """Operator command: manually sync inventory snapshots."""
+    try:
+        orchestrator = get_unicommerce_sync_orchestrator()
+        sku_list = [part.strip() for part in (skus or "").split(",") if part.strip()]
+        return await orchestrator.sync_inventory(skus=sku_list or None, facility_code=facility_code)
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -982,10 +1263,15 @@ async def get_sync_status(
 
 @router.get("/unicommerce/validate")
 async def validate_revenue():
-    """Run revenue validation checks across all periods."""
+    """Run DB-first readiness and revenue coverage validation gates."""
     try:
-        service = get_unicommerce_service()
-        return await service.validate_revenue_consistency()
+        orchestrator = get_unicommerce_sync_orchestrator()
+        readiness = orchestrator.get_release_readiness()
+        return {
+            "success": True,
+            "validation": readiness,
+            "message": "Validation uses DB-first coverage and lag gates",
+        }
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -1043,8 +1329,8 @@ async def search_orders(
         from_dt = datetime.fromisoformat(from_date.replace('Z', '+00:00'))
         to_dt = datetime.fromisoformat(to_date.replace('Z', '+00:00'))
 
-        service = get_unicommerce_service()
-        return await service.search_sale_orders(
+        data_service = get_unicommerce_data_service()
+        return data_service.search_sale_orders(
             from_date=from_dt,
             to_date=to_dt,
             display_start=display_start,
@@ -1059,8 +1345,8 @@ async def search_orders(
 async def get_order_items(order_code: str):
     """Get order details."""
     try:
-        service = get_unicommerce_service()
-        return await service.get_order_details(order_code)
+        data_service = get_unicommerce_data_service()
+        return data_service.get_order_details(order_code)
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -1070,12 +1356,25 @@ async def get_order_items(order_code: str):
 
 @router.post("/unicommerce/clear-cache")
 async def clear_cache():
-    """Clear the in-memory sales data cache to force fresh data fetch."""
+    """Clear Unicommerce cache state (Redis primary + legacy in-memory cache)."""
     try:
         service = get_unicommerce_service()
         service._cache.clear()
-        logger.info("Sales data cache cleared")
-        return {"success": True, "message": "Cache cleared successfully"}
+        CacheService.invalidate_all_uc_cache()
+        await _broadcast_sales_refresh(
+            {
+                "success": True,
+                "profile": "cache_clear",
+                "cache_cleared": True,
+            }
+        )
+        logger.info("Unicommerce cache cleared (Redis + in-memory)")
+        return {
+            "success": True,
+            "message": "Unicommerce cache cleared successfully",
+            "redis_cleared": True,
+            "memory_cleared": True,
+        }
     except Exception as e:
         logger.error(f"Error clearing cache: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -1086,6 +1385,36 @@ async def get_cache_stats():
     """Get cache statistics showing what's cached and TTL info."""
     try:
         service = get_unicommerce_service()
+        now_ist = datetime.now(IST)
+        today_key = f"uc:today:{now_ist.strftime('%Y-%m-%d')}"
+        yesterday_key = f"uc:yesterday:{(now_ist - timedelta(days=1)).strftime('%Y-%m-%d')}"
+        last7_key = f"uc:last7:{now_ist.strftime('%Y-%m-%d')}"
+
+        redis_entries = []
+        for period_name, cache_key in [
+            ("today", today_key),
+            ("yesterday", yesterday_key),
+            ("last_7_days", last7_key),
+        ]:
+            payload = CacheService.get(cache_key)
+            ttl_seconds = None
+            if redis_client is not None:
+                try:
+                    ttl_val = redis_client.ttl(cache_key)
+                    ttl_seconds = int(ttl_val) if ttl_val is not None else None
+                except Exception:
+                    ttl_seconds = None
+
+            redis_entries.append(
+                {
+                    "period": period_name,
+                    "key": cache_key,
+                    "cached": payload is not None,
+                    "ttl_seconds": ttl_seconds,
+                    "data_source": (payload or {}).get("data_source") if isinstance(payload, dict) else None,
+                    "last_synced_at": (payload or {}).get("last_synced_at") if isinstance(payload, dict) else None,
+                }
+            )
 
         stats = []
         for key, (timestamp, data) in service._cache.items():
@@ -1102,9 +1431,16 @@ async def get_cache_stats():
 
         return {
             "success": True,
-            "cache_ttl_seconds": service.CACHE_TTL_SECONDS,
-            "total_cached_items": len(stats),
-            "items": stats
+            "redis": {
+                "enabled": redis_client is not None,
+                "tracked_periods": redis_entries,
+                "total_cached_periods": sum(1 for item in redis_entries if item["cached"]),
+            },
+            "legacy_memory": {
+                "cache_ttl_seconds": service.CACHE_TTL_SECONDS,
+                "total_cached_items": len(stats),
+                "items": stats,
+            },
         }
     except Exception as e:
         logger.error(f"Error getting cache stats: {e}", exc_info=True)
@@ -1119,11 +1455,40 @@ async def check_cache_status():
     """
     try:
         service = get_unicommerce_service()
+        now_ist = datetime.now(IST)
+
+        redis_period_keys = {
+            "today": f"uc:today:{now_ist.strftime('%Y-%m-%d')}",
+            "yesterday": f"uc:yesterday:{(now_ist - timedelta(days=1)).strftime('%Y-%m-%d')}",
+            "last_7_days": f"uc:last7:{now_ist.strftime('%Y-%m-%d')}",
+        }
 
         periods = ["today", "yesterday", "last_7_days"]
         cache_status = {}
 
         for period in periods:
+            redis_key = redis_period_keys[period]
+            redis_payload = CacheService.get(redis_key)
+            if redis_payload is not None:
+                ttl_seconds = None
+                if redis_client is not None:
+                    try:
+                        ttl_val = redis_client.ttl(redis_key)
+                        ttl_seconds = int(ttl_val) if ttl_val is not None else None
+                    except Exception:
+                        ttl_seconds = None
+
+                cache_status[period] = {
+                    "cached": True,
+                    "valid": True,
+                    "source": "redis",
+                    "age_seconds": None,
+                    "remaining_seconds": ttl_seconds,
+                    "cached_at": None,
+                    "data_source": redis_payload.get("data_source") if isinstance(redis_payload, dict) else None,
+                }
+                continue
+
             cache_key = service._get_cache_key(period)
             if cache_key in service._cache:
                 timestamp, _ = service._cache[cache_key]
@@ -1133,6 +1498,7 @@ async def check_cache_status():
                 cache_status[period] = {
                     "cached": True,
                     "valid": is_valid,
+                    "source": "legacy_memory",
                     "age_seconds": round(age_seconds, 2),
                     "remaining_seconds": round(max(0, service.CACHE_TTL_SECONDS - age_seconds), 2),
                     "cached_at": timestamp.isoformat()
@@ -1141,6 +1507,7 @@ async def check_cache_status():
                 cache_status[period] = {
                     "cached": False,
                     "valid": False,
+                    "source": "none",
                     "age_seconds": None,
                     "remaining_seconds": 0
                 }
@@ -1150,6 +1517,7 @@ async def check_cache_status():
         return {
             "success": True,
             "all_periods_cached": all_cached,
+            "redis_enabled": redis_client is not None,
             "cache_ttl_seconds": service.CACHE_TTL_SECONDS,
             "periods": cache_status,
             "message": "All data cached and ready for instant load" if all_cached else "Some periods need fetching"
@@ -1170,145 +1538,15 @@ async def get_sales_by_sku(
 ):
     """
     Get sales aggregated by SKU with item-level breakdown.
-    Uses cached order data from two-phase fetch.
+    Uses DB-first sales data with normalized-first and raw fallback.
     """
     try:
-        service = get_unicommerce_service()
-
-        if period == "today":
-            dt_from, dt_to = service.get_today_range()
-        elif period == "yesterday":
-            dt_from, dt_to = service.get_yesterday_range()
-        elif period == "last_7_days":
-            dt_from, dt_to = service.get_last_n_days_range(7)
-        elif period == "last_30_days":
-            dt_from, dt_to = service.get_last_n_days_range(30)
-        elif from_date and to_date:
-            dt_from = datetime.strptime(from_date, "%Y-%m-%d").replace(
-                hour=0, minute=0, second=0, tzinfo=timezone.utc
-            )
-            dt_to = datetime.strptime(to_date, "%Y-%m-%d").replace(
-                hour=23, minute=59, second=59, tzinfo=timezone.utc
-            )
-        else:
-            dt_from, dt_to = service.get_today_range()
-
-        # Use cached orders if available (same cache as paginated orders)
-        cache_key = f"orders_detailed_{dt_from.date()}_{dt_to.date()}"
-        cached_orders = service._get_from_cache(cache_key)
-
-        if cached_orders is None:
-            # Need to fetch - use two-phase approach
-            fetch_result = await service.fetch_all_orders_with_revenue(dt_from, dt_to)
-            if not fetch_result.get("successful", False):
-                return {"success": False, "error": "Failed to fetch orders", "skus": []}
-
-            raw_orders = fetch_result.get("orders", [])
-        else:
-            # cached_orders is the processed list (no saleOrderItems) - re-fetch raw
-            fetch_result = await service.fetch_all_orders_with_revenue(dt_from, dt_to)
-            if not fetch_result.get("successful", False):
-                return {"success": False, "error": "Failed to fetch orders", "skus": []}
-            raw_orders = fetch_result.get("orders", [])
-
-        # Aggregate by SKU
-        sku_map = {}
-        for order in raw_orders:
-            channel = order.get("channel", "UNKNOWN")
-            status = (order.get("status") or "").strip().upper()
-            include = status not in service.EXCLUDED_STATUSES
-
-            for item in order.get("saleOrderItems", []):
-                if not include:
-                    continue
-
-                sku = item.get("itemSku", "UNKNOWN")
-                if sku not in sku_map:
-                    sku_map[sku] = {
-                        "sku": sku,
-                        "name": item.get("itemTypeName") or item.get("itemName", ""),
-                        "total_quantity": 0,
-                        "total_revenue": 0.0,
-                        "total_mrp": 0.0,
-                        "total_discount": 0.0,
-                        "order_count": 0,
-                        "channels": {},
-                        "avg_selling_price": 0.0,
-                    }
-
-                qty = item.get("quantity", 1) or 1
-                selling = float(item.get("sellingPrice", 0) or 0)
-                mrp = float(item.get("maxRetailPrice", 0) or 0)
-
-                # sellingPrice is post-discount effective price.
-                # Real discount = MRP - sellingPrice. Fall back to
-                # sellingPrice as MRP when MRP is missing/zero.
-                if mrp <= 0:
-                    mrp = selling
-
-                sku_map[sku]["total_quantity"] += qty
-                sku_map[sku]["total_revenue"] += selling
-                sku_map[sku]["total_mrp"] += mrp
-                sku_map[sku]["order_count"] += 1
-
-                if channel not in sku_map[sku]["channels"]:
-                    sku_map[sku]["channels"][channel] = {
-                        "quantity": 0, "revenue": 0.0}
-                sku_map[sku]["channels"][channel]["quantity"] += qty
-                sku_map[sku]["channels"][channel]["revenue"] += selling
-
-        # Compute discount from MRP, avg selling price, and round
-        for s in sku_map.values():
-            s["total_discount"] = round(s["total_mrp"] - s["total_revenue"], 2)
-            if s["total_discount"] < 0:
-                s["total_discount"] = 0.0
-            s["discount_pct"] = round(
-                (s["total_discount"] / s["total_mrp"] * 100)
-                if s["total_mrp"] > 0 else 0.0, 1
-            )
-            if s["total_quantity"] > 0:
-                s["avg_selling_price"] = round(
-                    s["total_revenue"] / s["total_quantity"], 2)
-                s["avg_mrp"] = round(
-                    s["total_mrp"] / s["total_quantity"], 2)
-            else:
-                s["avg_mrp"] = 0.0
-            s["total_revenue"] = round(s["total_revenue"], 2)
-            s["total_mrp"] = round(s["total_mrp"], 2)
-            for ch in s["channels"].values():
-                ch["revenue"] = round(ch["revenue"], 2)
-
-        # Keep ordering deterministic for tied revenues.
-        skus = sorted(
-            sku_map.values(),
-            key=lambda x: (-x["total_revenue"], -x["total_quantity"], x["sku"]),
+        data_service = get_unicommerce_data_service()
+        return data_service.get_sales_by_sku(
+            period=period,
+            from_date=from_date,
+            to_date=to_date,
         )
-        total_revenue = round(sum(s["total_revenue"] for s in skus), 2)
-        total_mrp = round(sum(s["total_mrp"] for s in skus), 2)
-        total_quantity = sum(s["total_quantity"] for s in skus)
-        total_discount = round(total_mrp - total_revenue, 2)
-        if total_discount < 0:
-            total_discount = 0.0
-
-        return {
-            "success": True,
-            "period": period,
-            "from_date": dt_from.isoformat(),
-            "to_date": dt_to.isoformat(),
-            "skus": skus,
-            "summary": {
-                "total_skus": len(skus),
-                "total_quantity": total_quantity,
-                "total_revenue": total_revenue,
-                "total_mrp": total_mrp,
-                "total_discount": total_discount,
-                "total_orders": len(raw_orders),
-                "avg_discount_pct": round(
-                    (total_discount / total_mrp * 100)
-                    if total_mrp > 0 else 0, 1
-                ),
-            },
-        }
 
     except Exception as e:
         logger.error(f"Error in sales_by_sku: {e}", exc_info=True)
@@ -1327,13 +1565,11 @@ async def get_return_report(
 ):
     """
     Return Report with channel-wise + SKU breakdown.
-    Uses Unicommerce Export Job API (Tally Return GST Report 3.0)
-    for bulk CSV download — 3 API calls regardless of data volume.
-
+    Uses DB-first returns data (normalized table with raw fallback).
     Supports RTO, CIR, or ALL return types and daily/weekly/monthly/custom ranges.
     """
     try:
-        service = get_unicommerce_service()
+        data_service = get_unicommerce_data_service()
 
         period_norm = (period or "daily").strip().lower()
         today_ist = datetime.now(IST).date()
@@ -1375,17 +1611,20 @@ async def get_return_report(
                 "return_type": return_type,
             }
 
-        # Build IST date range
-        from_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=IST)
-        to_dt = datetime.combine(end_date, datetime.max.time().replace(microsecond=0)).replace(tzinfo=IST)
+        # Build UTC date range for DB-first reads
+        from_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=IST).astimezone(timezone.utc)
+        to_dt = datetime.combine(end_date, datetime.max.time().replace(microsecond=0)).replace(tzinfo=IST).astimezone(timezone.utc)
 
-        # Fetch returns via export job
-        result = await service.fetch_returns_via_export(from_dt, to_dt)
+        returns_data = data_service.get_returns_data(
+            from_date=from_dt,
+            to_date=to_dt,
+            return_type=return_type,
+        )
 
-        if not result.get("successful"):
+        if not returns_data.get("success"):
             return {
                 "success": False,
-                "error": result.get("error", "Failed to fetch return data"),
+                "error": returns_data.get("error", "Failed to fetch return data"),
                 "period": period_norm,
                 "date": start_date.isoformat(),
                 "from_date": start_date.isoformat(),
@@ -1393,15 +1632,7 @@ async def get_return_report(
                 "return_type": return_type,
             }
 
-        all_items = result.get("items", [])
-
-        # Filter by return type if needed
-        if return_type != "ALL":
-            target_type = return_type.upper()
-            all_items = [
-                item for item in all_items
-                if item.get("returnType") == target_type
-            ]
+        all_items = returns_data.get("items", [])
 
         # Aggregate into channel-wise and SKU-wise breakdowns
         channel_map = {}
@@ -1526,8 +1757,8 @@ async def get_return_report(
             },
             "search_results": {
                 "export_items": len(all_items),
-                "method": "export_job_tally_return",
-                "total_time": result.get("total_time", 0),
+                "method": returns_data.get("data_source", "db_first_returns"),
+                "total_time": 0,
             },
             "debug_info": {
                 "failed_rto_codes": [],
@@ -1551,26 +1782,10 @@ async def get_cancellation_report(
 ):
     """
     Cancellation Report with channel-wise + SKU-wise + item-level breakdown.
-    Uses Unicommerce Sale Orders export and includes only CANCELLED/CANCELED orders.
+    Uses DB-first sales data and includes only CANCELLED/CANCELED orders.
     """
     try:
-        service = get_unicommerce_service()
-
-        def _add_months(src: date_cls, months: int) -> date_cls:
-            month_index = (src.month - 1) + months
-            year = src.year + (month_index // 12)
-            month = (month_index % 12) + 1
-            day = min(src.day, monthrange(year, month)[1])
-            return date_cls(year, month, day)
-
-        def _build_three_month_chunks(start: date_cls, end: date_cls) -> list[tuple[date_cls, date_cls]]:
-            chunks: list[tuple[date_cls, date_cls]] = []
-            cursor = start
-            while cursor <= end:
-                chunk_end = min(_add_months(cursor, 3) - timedelta(days=1), end)
-                chunks.append((cursor, chunk_end))
-                cursor = chunk_end + timedelta(days=1)
-            return chunks
+        data_service = get_unicommerce_data_service()
 
         period_norm = (period or "daily").strip().lower()
         today_ist = datetime.now(IST).date()
@@ -1618,33 +1833,25 @@ async def get_cancellation_report(
                 "to_date": end_date.isoformat(),
             }
 
-        chunks = _build_three_month_chunks(start_date, end_date)
-        all_orders = []
-        total_fetch_time = 0.0
+        from_dt = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=IST).astimezone(timezone.utc)
+        to_dt = datetime.combine(end_date, datetime.max.time().replace(microsecond=0)).replace(tzinfo=IST).astimezone(timezone.utc)
 
-        for chunk_start, chunk_end in chunks:
-            from_dt = datetime.combine(chunk_start, datetime.min.time()).replace(tzinfo=IST)
-            to_dt = datetime.combine(chunk_end, datetime.max.time().replace(microsecond=0)).replace(tzinfo=IST)
+        sales_result = data_service.get_sales_data(
+            period="custom",
+            from_date=from_dt,
+            to_date=to_dt,
+        )
+        if not sales_result.get("success", False):
+            return {
+                "success": False,
+                "error": sales_result.get("error", "Failed to fetch orders"),
+                "period": period_norm,
+                "from_date": start_date.isoformat(),
+                "to_date": end_date.isoformat(),
+            }
 
-            fetch_result = await service.fetch_all_orders_with_revenue(from_dt, to_dt)
-            if not fetch_result.get("successful", False):
-                return {
-                    "success": False,
-                    "error": fetch_result.get("error", "Failed to fetch orders"),
-                    "period": period_norm,
-                    "from_date": start_date.isoformat(),
-                    "to_date": end_date.isoformat(),
-                    "failed_chunk": {
-                        "from_date": chunk_start.isoformat(),
-                        "to_date": chunk_end.isoformat(),
-                    },
-                    "chunk_count": len(chunks),
-                }
-
-            all_orders.extend(fetch_result.get("orders", []))
-            total_fetch_time += float(fetch_result.get("total_time", 0) or 0)
-
-        raw_orders = all_orders
+        raw_orders = sales_result.get("_orders", [])
+        total_fetch_time = float(sales_result.get("fetch_info", {}).get("total_time_seconds", 0) or 0)
         total_orders_all = len(raw_orders)
         cancelled_statuses = {"CANCELLED", "CANCELED"}
 
@@ -1837,9 +2044,9 @@ async def get_cancellation_report(
             },
             "search_results": {
                 "export_orders": total_orders_all,
-                "method": "export_job_sale_orders_chunked" if len(chunks) > 1 else "export_job_sale_orders",
+                "method": sales_result.get("data_source", "db_first_sales_orders"),
                 "total_time": round(total_fetch_time, 2),
-                "chunk_count": len(chunks),
+                "chunk_count": 1,
             },
         }
 
@@ -1868,7 +2075,7 @@ async def get_best_skus_monthly(
     (invoicing is handled externally). Use b2c_only=true to exclude them.
     """
     try:
-        service = get_unicommerce_service()
+        data_service = get_unicommerce_data_service()
         now = datetime.now(IST)
         m = month or now.month
         y = year or now.year
@@ -1887,7 +2094,7 @@ async def get_best_skus_monthly(
             logger.info(
                 f"BEST SKUs {y}-{m:02d}: Force refresh - cache cleared")
 
-        logger.info(f"BEST SKUs {y}-{m:02d}: Cache miss, fetching from API...")
+        logger.info(f"BEST SKUs {y}-{m:02d}: Cache miss, fetching from DB...")
 
         from_dt = datetime(y, m, 1, 0, 0, 0, tzinfo=timezone.utc)
         if m == 12:
@@ -1901,17 +2108,21 @@ async def get_best_skus_monthly(
         if to_dt > now.replace(tzinfo=timezone.utc):
             to_dt = now.replace(tzinfo=timezone.utc)
 
-        fetch_result = await service.fetch_all_orders_with_revenue(from_dt, to_dt)
-        if not fetch_result.get("successful", False):
+        sales_result = data_service.get_sales_data(
+            period="custom",
+            from_date=from_dt,
+            to_date=to_dt,
+        )
+        if not sales_result.get("success", False):
             return {"success": False, "error": "Failed to fetch orders"}
 
-        raw_orders = fetch_result.get("orders", [])
+        raw_orders = sales_result.get("_orders", [])
 
         # Aggregate by SKU
         sku_map = {}
         for order in raw_orders:
             status = order.get("status", "")
-            if status in service.EXCLUDED_STATUSES:
+            if status in EXCLUDED_REVENUE_STATUSES:
                 continue
             channel = order.get("channel", "UNKNOWN")
             for item in order.get("saleOrderItems", []):
@@ -1999,25 +2210,8 @@ async def get_bundle_skus(
     business events. Use the frontend category / search filters instead.
     """
     try:
-        service = get_unicommerce_service()
-
-        cache_key = "uc:bundle_skus:all"
-        if not force_refresh:
-            cached = CacheService.get(cache_key)
-            if cached:
-                logger.info("BUNDLE SKUs: Redis cache hit")
-                cached["_cached"] = True
-                return cached
-        else:
-            CacheService.delete(cache_key)
-
-        result = await service.get_bundle_sku_data()
-
-        if result.get("success"):
-            CacheService.set(cache_key, result, 14400)  # 4 hours
-            logger.info(f"BUNDLE SKUs: Cached ({result['summary']['total_bundles']} bundles)")
-
-        return result
+        data_service = get_unicommerce_data_service()
+        return await data_service.get_bundle_skus(force_refresh=force_refresh)
 
     except Exception as e:
         logger.error(f"Error in bundle-skus: {e}", exc_info=True)
@@ -2039,61 +2233,13 @@ async def get_bundle_sales_analysis(
     breakdown, and per-bundle sales metrics.
     """
     try:
-        service = get_unicommerce_service()
-        now = datetime.now(IST)
-
-        if period == "today":
-            dt_from, dt_to = service.get_today_range()
-            cache_suffix = f"today:{now.strftime('%Y-%m-%d')}"
-            ttl = 300  # 5 min
-        elif period == "yesterday":
-            dt_from, dt_to = service.get_yesterday_range()
-            cache_suffix = f"yesterday:{(now - timedelta(days=1)).strftime('%Y-%m-%d')}"
-            ttl = 3600
-        elif period == "last_7_days":
-            dt_from, dt_to = service.get_last_n_days_range(7)
-            cache_suffix = f"7d:{now.strftime('%Y-%m-%d')}"
-            ttl = 1800
-        elif period == "last_30_days":
-            dt_from, dt_to = service.get_last_n_days_range(30)
-            cache_suffix = f"30d:{now.strftime('%Y-%m-%d')}"
-            ttl = 3600
-        elif period == "custom" and from_date and to_date:
-            dt_from = datetime.strptime(from_date, "%Y-%m-%d").replace(
-                hour=0, minute=0, second=0, tzinfo=IST
-            ).astimezone(timezone.utc)
-            dt_to = datetime.strptime(to_date, "%Y-%m-%d").replace(
-                hour=23, minute=59, second=59, tzinfo=IST
-            ).astimezone(timezone.utc)
-            cache_suffix = f"custom:{from_date}_{to_date}"
-            ttl = 3600
-        else:
-            return {"success": False, "error": "Invalid period. Use today|yesterday|last_7_days|last_30_days|custom"}
-
-        cache_key = f"uc:bundle_analysis:{cache_suffix}"
-
-        if not force_refresh:
-            cached = CacheService.get(cache_key)
-            if cached:
-                logger.info(f"Bundle Analysis: cache hit ({cache_suffix})")
-                cached["_cached"] = True
-                cached["period"] = period
-                return cached
-        else:
-            CacheService.delete(cache_key)
-
-        result = await service.get_bundle_sales_analysis(dt_from, dt_to)
-        result["period"] = period
-
-        if result.get("success"):
-            CacheService.set(cache_key, result, ttl)
-            s = result.get("summary", {})
-            logger.info(
-                f"Bundle Analysis: cached ({s.get('total_bundle_units', 0)} units, "
-                f"₹{s.get('total_bundle_revenue', 0)} revenue in {s.get('analysis_time', 0)}s)"
-            )
-
-        return result
+        data_service = get_unicommerce_data_service()
+        return await data_service.get_bundle_sales_analysis(
+            period=period,
+            from_date=from_date,
+            to_date=to_date,
+            force_refresh=force_refresh,
+        )
 
     except Exception as e:
         logger.error(f"Error in bundle-sales-analysis: {e}", exc_info=True)
@@ -2116,51 +2262,14 @@ async def get_fabric_sales(
     Supports monthly (month+year) or custom date range (from_date+to_date).
     """
     try:
-        service = get_unicommerce_service()
-        now = datetime.now(IST)
-
-        # Determine date range: custom takes priority over month/year
-        if from_date and to_date:
-            from_dt = datetime.strptime(from_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(
-                hour=23, minute=59, second=59, tzinfo=timezone.utc
-            )
-            period_name = f"custom_{from_date}_{to_date}"
-            cache_key = f"uc:fabric_sales:custom:{from_date}_{to_date}"
-        else:
-            m = month or now.month
-            y = year or now.year
-            from_dt = datetime(y, m, 1, 0, 0, 0, tzinfo=timezone.utc)
-            if m == 12:
-                to_dt = datetime(y + 1, 1, 1, 0, 0, 0, tzinfo=timezone.utc) - timedelta(seconds=1)
-            else:
-                to_dt = datetime(y, m + 1, 1, 0, 0, 0, tzinfo=timezone.utc) - timedelta(seconds=1)
-            period_name = f"{y}-{m:02d}"
-            cache_key = f"uc:fabric_sales:{y}:{m}"
-
-        if to_dt > now.replace(tzinfo=timezone.utc):
-            to_dt = now.replace(tzinfo=timezone.utc)
-
-        if not force_refresh:
-            cached = CacheService.get(cache_key)
-            if cached:
-                logger.info(f"FABRIC SALES {period_name}: Redis cache hit")
-                cached["_cached"] = True
-                return cached
-        else:
-            CacheService.delete(cache_key)
-
-        result = await service.get_fabric_sales_data(from_dt, to_dt, period_name)
-
-        if result.get("success"):
-            is_current = from_date is None and (
-                (month or now.month) == now.month and (year or now.year) == now.year
-            )
-            ttl = CacheService.TTL_VERY_LONG if is_current else 86400
-            CacheService.set(cache_key, result, ttl)
-            logger.info(f"FABRIC SALES {period_name}: Cached (TTL={ttl}s)")
-
-        return result
+        data_service = get_unicommerce_data_service()
+        return await data_service.get_fabric_sales(
+            month=month,
+            year=year,
+            from_date=from_date,
+            to_date=to_date,
+            force_refresh=force_refresh,
+        )
 
     except Exception as e:
         logger.error(f"Error in fabric-sales: {e}", exc_info=True)
@@ -2189,7 +2298,7 @@ async def get_sku_velocity(
     Uses Redis cache: current month 1hr TTL, historical 24hr TTL.
     """
     try:
-        service = get_unicommerce_service()
+        data_service = get_unicommerce_data_service()
         now = datetime.now(IST)
         m = month or now.month
         y = year or now.year
@@ -2209,7 +2318,7 @@ async def get_sku_velocity(
                 f"SKU VELOCITY {y}-{m:02d}: Force refresh - cache cleared")
 
         logger.info(
-            f"SKU VELOCITY {y}-{m:02d}: Cache miss, fetching from API...")
+            f"SKU VELOCITY {y}-{m:02d}: Cache miss, fetching from DB...")
 
         from_dt = datetime(y, m, 1, 0, 0, 0, tzinfo=timezone.utc)
         if m == 12:
@@ -2222,17 +2331,21 @@ async def get_sku_velocity(
         if to_dt > now.replace(tzinfo=timezone.utc):
             to_dt = now.replace(tzinfo=timezone.utc)
 
-        fetch_result = await service.fetch_all_orders_with_revenue(from_dt, to_dt)
-        if not fetch_result.get("successful", False):
+        sales_result = data_service.get_sales_data(
+            period="custom",
+            from_date=from_dt,
+            to_date=to_dt,
+        )
+        if not sales_result.get("success", False):
             return {"success": False, "error": "Failed to fetch orders"}
 
-        raw_orders = fetch_result.get("orders", [])
+        raw_orders = sales_result.get("_orders", [])
 
         # Aggregate by SKU (same logic as best-skus-monthly)
         sku_map = {}
         for order in raw_orders:
             status = order.get("status", "")
-            if status in service.EXCLUDED_STATUSES:
+            if status in EXCLUDED_REVENUE_STATUSES:
                 continue
             channel = order.get("channel", "UNKNOWN")
             for item in order.get("saleOrderItems", []):
@@ -2326,7 +2439,7 @@ async def get_cod_vs_prepaid(
 ):
     """Get COD vs Prepaid breakdown for a date range with Redis caching."""
     try:
-        service = get_unicommerce_service()
+        data_service = get_unicommerce_data_service()
         now = datetime.now(IST)
 
         period_norm = (period or "monthly").strip().lower()
@@ -2389,14 +2502,18 @@ async def get_cod_vs_prepaid(
             to_dt = now.replace(tzinfo=timezone.utc)
 
         logger.info(
-            f"COD vs Prepaid: fetching orders from {from_dt.date()} to {to_dt.date()}")
-        fetch_result = await service.fetch_all_orders_with_revenue(from_dt, to_dt)
+            f"COD vs Prepaid: fetching orders from {from_dt.date()} to {to_dt.date()} from DB")
+        sales_result = data_service.get_sales_data(
+            period="custom",
+            from_date=from_dt,
+            to_date=to_dt,
+        )
         logger.info(
-            f"COD vs Prepaid: fetched {len(fetch_result.get('orders', []))} orders")
-        if not fetch_result.get("successful", False):
+            f"COD vs Prepaid: fetched {len(sales_result.get('_orders', []))} orders")
+        if not sales_result.get("success", False):
             return {"success": False, "error": "Failed to fetch orders"}
 
-        raw_orders = fetch_result.get("orders", [])
+        raw_orders = sales_result.get("_orders", [])
 
         cod_orders = 0
         cod_revenue = 0.0
@@ -2408,7 +2525,7 @@ async def get_cod_vs_prepaid(
 
         for order in raw_orders:
             status = order.get("status", "")
-            if status in service.EXCLUDED_STATUSES:
+            if status in EXCLUDED_REVENUE_STATUSES:
                 continue
 
             # COD detection: use the direct `cod` boolean from the order.
@@ -2512,7 +2629,6 @@ async def websocket_sales(websocket: WebSocket):
     try:
         # Send initial data immediately
         try:
-            service = get_unicommerce_service()
             today_key = f"uc:today:{datetime.now(IST).strftime('%Y-%m-%d')}"
             cached = CacheService.get(today_key)
             if cached:
@@ -2528,8 +2644,8 @@ async def websocket_sales(websocket: WebSocket):
 
                 if msg.get("action") == "refresh":
                     # Client requests fresh data
-                    service = get_unicommerce_service()
-                    result = await service.get_today_sales()
+                    data_service = get_unicommerce_data_service()
+                    result = data_service.get_sales_data(period="today")
                     if result.get("success"):
                         today_key = f"uc:today:{datetime.now(IST).strftime('%Y-%m-%d')}"
                         CacheService.set(today_key, result, 180)

@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ucSales } from '@/features/sales';
+import { ucSales } from '@/features/sales/api';
 import { DataTable, Column } from '@/components/ui/DataTable';
 import { PageHeader, ProgressLoader, StatCard } from '@/components/ui/Common';
 import { ReportDateMode, resolveReportDateRange } from '@/lib/report-date-range';

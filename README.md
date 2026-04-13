@@ -126,6 +126,47 @@ alembic upgrade head
 alembic downgrade -1
 ```
 
+## DB-First Pipeline Validation
+
+```powershell
+# Run staged backfill windows (7/30/90/365) + readiness gates
+cd backend
+python scripts/verify_db_first.py
+
+# Run only readiness gates + one profile
+python scripts/verify_db_first.py --skip-backfill --profile incremental
+```
+
+### Rollout Order (Recommended)
+
+```powershell
+# 1) Apply schema first
+cd backend
+alembic upgrade head
+
+# 2) Run readiness without failing shell (capture evidence)
+python scripts/verify_db_first.py --skip-backfill --no-fail-on-gates
+
+# 3) Run staged backfill windows + gates
+python scripts/verify_db_first.py
+```
+
+Gate policy before enabling scheduler:
+
+- `readiness.overall_passed` must be `true`
+- `coverage_ratio` gate must pass
+- `sync_lag_minutes` gate must pass
+- `dashboard_paths_db_first` gate must pass
+
+Only after all gates pass, run scheduler in the dedicated worker (recommended):
+
+- Keep API container/process with `UNICOMMERCE_SYNC_ENABLE_SCHEDULER=false`
+- Start `sync_worker` service with `UNICOMMERCE_SYNC_ENABLE_SCHEDULER=true`
+- Configure cadence:
+	- `UNICOMMERCE_SYNC_SALES_INTERVAL_HOURS=6`
+	- `UNICOMMERCE_SYNC_RETURNS_INTERVAL_HOURS=24`
+	- `UNICOMMERCE_SYNC_INVENTORY_INTERVAL_HOURS=24`
+
 ## Testing
 
 ```powershell

@@ -2,7 +2,7 @@
 
 import { useState, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ucSales } from '@/features/sales';
+import { ucSales } from '@/features/sales/api';
 
 const fmt = (v: number) => v >= 100_000 ? `₹${(v / 100_000).toFixed(1)}L` : v >= 1_000 ? `₹${(v / 1_000).toFixed(1)}K` : `₹${v.toLocaleString('en-IN')}`;
 

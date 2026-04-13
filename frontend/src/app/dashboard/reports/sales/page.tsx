@@ -1,7 +1,7 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { unicommerceApi } from '@/features/sales';
+import { unicommerceApi } from '@/features/sales/api';
 import { useState, useMemo } from 'react';
 import {
     ReportDateMode,
