@@ -1,6 +1,6 @@
 'use client';
 
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ucSales } from '@/features/sales/api';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -29,12 +29,43 @@ const ChannelDonutChart = lazy(() => import('@/components/dashboard/charts/Chann
 const formatCurrency = (v: number) =>
   v >= 100000 ? `${(v / 100000).toFixed(1)}L` : v >= 1000 ? `${(v / 1000).toFixed(1)}K` : v.toLocaleString('en-IN');
 
+const SALES_SYNC_INTERVAL_MINUTES = 6 * 60;
+
 const timeAgo = (timestamp: number) => {
   const seconds = Math.floor((Date.now() - timestamp) / 1000);
   if (seconds < 60) return `${seconds}s ago`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
   return `${Math.floor(minutes / 60)}h ago`;
+};
+
+const parseBackendUtcTimestamp = (isoValue?: string | null): Date | null => {
+  if (!isoValue) return null;
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/.test(isoValue);
+  const normalized = hasTimezone ? isoValue : `${isoValue}Z`;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
+
+const sourceDataAge = (isoValue?: string | null) => {
+  const parsed = parseBackendUtcTimestamp(isoValue);
+  if (!parsed) return 'unknown';
+
+  const totalMinutes = Math.max(0, Math.floor((Date.now() - parsed.getTime()) / 60000));
+  if (totalMinutes < 1) return 'just now';
+  if (totalMinutes < 60) return `${totalMinutes}m ago`;
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes > 0 ? `${hours}h ${minutes}m ago` : `${hours}h ago`;
+};
+
+const formatDuration = (totalMinutes: number) => {
+  if (totalMinutes <= 0) return 'now';
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 };
 
 // ---
@@ -93,6 +124,16 @@ export default function DashboardPage() {
     placeholderData: (prev: any) => prev,
   });
 
+  const { mutateAsync: syncNow, isPending: syncingNow } = useMutation({
+    mutationFn: async () => (await ucSales.syncNow()).data,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['unicommerce-today'] });
+      queryClient.invalidateQueries({ queryKey: ['unicommerce-yesterday'] });
+      queryClient.invalidateQueries({ queryKey: ['unicommerce-last-7-days'] });
+      if (wsConnected) requestRefresh();
+    },
+  });
+
   // -- Derived Values --
   const todayOrders = todayData?.summary?.total_orders || 0;
   const todayRevenue = todayData?.summary?.total_revenue || 0;
@@ -114,8 +155,8 @@ export default function DashboardPage() {
 
     const lastSyncedAt = todayData.last_synced_at;
     if (lastSyncedAt) {
-      const parsed = new Date(lastSyncedAt);
-      if (!Number.isNaN(parsed.getTime())) {
+      const parsed = parseBackendUtcTimestamp(lastSyncedAt);
+      if (parsed) {
         const lagMinutes = (Date.now() - parsed.getTime()) / 60000;
         if (lagMinutes > 120) {
           return { label: 'Sync lag', dotClass: 'bg-rose-500 animate-pulse' };
@@ -125,6 +166,36 @@ export default function DashboardPage() {
 
     return { label: 'Healthy', dotClass: 'bg-emerald-500' };
   }, [todayData]);
+
+  const sourceAgeLabel = useMemo(
+    () => sourceDataAge(todayData?.last_synced_at),
+    [todayData?.last_synced_at],
+  );
+
+  const lastDbSyncAt = useMemo(
+    () => parseBackendUtcTimestamp(todayData?.last_synced_at),
+    [todayData?.last_synced_at],
+  );
+
+  const nextSyncLabel = useMemo(() => {
+    if (!lastDbSyncAt) {
+      return 'Next scheduled sync every 6h';
+    }
+
+    const nextSyncAt = new Date(lastDbSyncAt.getTime() + SALES_SYNC_INTERVAL_MINUTES * 60 * 1000);
+    const remainingMinutes = Math.max(0, Math.ceil((nextSyncAt.getTime() - Date.now()) / 60000));
+    const nextAt = nextSyncAt.toLocaleTimeString('en-IN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    });
+
+    if (remainingMinutes === 0) {
+      return `Next scheduled sync due now (${nextAt})`;
+    }
+
+    return `Next scheduled sync in ${formatDuration(remainingMinutes)} (${nextAt})`;
+  }, [lastDbSyncAt]);
 
   // Growth calculations
   const orderGrowth = yesterdayOrders > 0 ? ((todayOrders - yesterdayOrders) / yesterdayOrders) * 100 : 0;
@@ -242,6 +313,15 @@ export default function DashboardPage() {
     if (wsConnected) requestRefresh();
   };
 
+  const handleSyncNow = async () => {
+    try {
+      await syncNow();
+      handleRefresh();
+    } catch (error) {
+      console.error('Manual sync failed', error);
+    }
+  };
+
   const quickLinks = [
     { title: 'Master Data', desc: 'Product catalog & SKUs', href: '/dashboard/garments/master', icon: Package, color: 'from-blue-500 to-indigo-500' },
     { title: 'Inventory', desc: 'Stock levels by SKU', href: '/dashboard/garments/inventory', icon: Boxes, color: 'from-emerald-500 to-teal-500' },
@@ -325,14 +405,30 @@ export default function DashboardPage() {
             {updatedAt > 0 && (
               <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800">
                 <Clock className="w-3 h-3 text-slate-400" />
-                <span className="text-xs text-slate-500 dark:text-slate-400">{timeAgo(updatedAt)}</span>
+                <span className="text-xs text-slate-500 dark:text-slate-400">Last UI refresh {timeAgo(updatedAt)}</span>
               </div>
             )}
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800">
+              <Clock className="w-3 h-3 text-slate-400" />
+              <span className="text-xs text-slate-500 dark:text-slate-400">Last DB sync {sourceAgeLabel}</span>
+            </div>
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800">
+              <Clock className="w-3 h-3 text-slate-400" />
+              <span className="text-xs text-slate-500 dark:text-slate-400">{nextSyncLabel}</span>
+            </div>
           </div>
+          <button
+            onClick={handleSyncNow}
+            className="btn btn-secondary w-auto self-start sm:self-auto !px-3.5 !py-2 !text-sm"
+            disabled={syncingNow}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${syncingNow ? 'animate-spin' : ''}`} />
+            {syncingNow ? 'Syncing DB...' : 'Sync Now'}
+          </button>
           <button
             onClick={handleRefresh}
             className="btn btn-secondary w-auto self-start sm:self-auto !px-3.5 !py-2 !text-sm"
-            disabled={fetchingToday}
+            disabled={fetchingToday || syncingNow}
           >
             <RefreshCw className={`w-3.5 h-3.5 ${fetchingToday ? 'animate-spin' : ''}`} />
             {fetchingToday ? 'Refreshing...' : 'Refresh'}

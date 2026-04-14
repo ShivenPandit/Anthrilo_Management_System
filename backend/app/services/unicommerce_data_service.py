@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -80,6 +81,21 @@ class UnicommerceDataService:
             return float(str(value).replace(",", "").strip())
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _safe_decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
+        try:
+            if value is None or value == "":
+                return default
+            if isinstance(value, Decimal):
+                return value
+            return Decimal(str(value).replace(",", "").strip())
+        except (TypeError, ValueError, InvalidOperation):
+            return default
+
+    @staticmethod
+    def _to_money_float(value: Decimal) -> float:
+        return float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
     @staticmethod
     def _safe_bool(value: Any, default: bool = False) -> bool:
@@ -193,7 +209,7 @@ class UnicommerceDataService:
                         self._pick(payload, "Channel Name", "channel")
                     ).replace(" ", "_"),
                     "qty": qty,
-                    "selling_price": self._safe_float(
+                    "selling_price": self._safe_decimal(
                         self._pick(payload, "Selling Price", "sellingPrice")
                     ),
                     "order_date": order_date,
@@ -247,7 +263,7 @@ class UnicommerceDataService:
             if qty <= 0:
                 qty = 1
 
-            price = float(row.get("selling_price") or 0.0)
+            price = self._safe_decimal(row.get("selling_price"))
             sku = self._safe_str(row.get("sku"))
             name = self._safe_str(row.get("product_name")) or sku
 
@@ -256,8 +272,8 @@ class UnicommerceDataService:
                     "itemSku": sku,
                     "sku": sku,
                     "itemName": name,
-                    "sellingPrice": price,
-                    "selling_price": price,
+                    "sellingPrice": self._to_money_float(price),
+                    "selling_price": self._to_money_float(price),
                     "quantity": qty,
                     "size": "",
                 }
@@ -268,11 +284,12 @@ class UnicommerceDataService:
             items = order.get("items", [])
             total_qty = sum(int(item.get("quantity") or 0) for item in items)
             selling_total = sum(
-                float(item.get("sellingPrice") or 0.0) * int(item.get("quantity") or 0)
+                self._safe_decimal(item.get("sellingPrice") or item.get("selling_price"))
+                * Decimal(int(item.get("quantity") or 0))
                 for item in items
             )
             include_in_revenue = self._safe_str(order.get("status")).upper() not in self.EXCLUDED_STATUSES
-            net_revenue = selling_total if include_in_revenue else 0.0
+            net_revenue = selling_total if include_in_revenue else Decimal("0")
 
             created_dt = order.get("_created_dt")
             created_value = created_dt.isoformat() if isinstance(created_dt, datetime) else ""
@@ -283,9 +300,9 @@ class UnicommerceDataService:
                     "displayOrderCode": order.get("displayOrderCode"),
                     "status": order.get("status") or "",
                     "channel": order.get("channel") or "UNKNOWN",
-                    "selling_price": round(selling_total, 2),
-                    "total_selling_price": round(selling_total, 2),
-                    "net_revenue": round(net_revenue, 2),
+                    "selling_price": self._to_money_float(selling_total),
+                    "total_selling_price": self._to_money_float(selling_total),
+                    "net_revenue": self._to_money_float(net_revenue),
                     "created": created_value,
                     "displayOrderDateTime": created_value,
                     "item_count": len(items),
@@ -320,7 +337,7 @@ class UnicommerceDataService:
         for order in orders:
             sale_items: List[Dict[str, Any]] = []
             for item in order.get("items", []):
-                selling_price = float(item.get("sellingPrice") or item.get("selling_price") or 0.0)
+                selling_price = self._safe_decimal(item.get("sellingPrice") or item.get("selling_price"))
                 quantity = int(item.get("quantity") or 0)
                 if quantity <= 0:
                     quantity = 1
@@ -334,8 +351,8 @@ class UnicommerceDataService:
                         "itemTypeName": item_name,
                         "bundleSkuCodeNumber": "",
                         "quantity": quantity,
-                        "sellingPrice": round(selling_price, 2),
-                        "maxRetailPrice": round(selling_price, 2),
+                        "sellingPrice": self._to_money_float(selling_price),
+                        "maxRetailPrice": self._to_money_float(selling_price),
                         "size": self._safe_str(item.get("size")),
                     }
                 )
@@ -381,13 +398,10 @@ class UnicommerceDataService:
                 or record.product_name
                 or record.sku
             )
-            selling_price = round(float(record.selling_price or 0.0), 2)
-            mrp = round(
-                self._safe_float(
-                    self._pick(raw, "MRP", "Maximum Retail Price", "maxRetailPrice"),
-                    default=selling_price,
-                ),
-                2,
+            selling_price = self._safe_decimal(record.selling_price)
+            mrp = self._safe_decimal(
+                self._pick(raw, "MRP", "Maximum Retail Price", "maxRetailPrice"),
+                default=selling_price,
             )
 
             sale_items.append(
@@ -400,19 +414,16 @@ class UnicommerceDataService:
                         self._pick(raw, "bundleSkuCodeNumber", "Bundle SKU")
                     ),
                     "quantity": quantity,
-                    "sellingPrice": selling_price,
-                    "maxRetailPrice": mrp,
-                    "discount": round(
-                        self._safe_float(self._pick(raw, "Discount", "discount"), default=0.0),
-                        2,
+                    "sellingPrice": self._to_money_float(selling_price),
+                    "maxRetailPrice": self._to_money_float(mrp),
+                    "discount": self._to_money_float(
+                        self._safe_decimal(self._pick(raw, "Discount", "discount"))
                     ),
-                    "taxAmount": round(
-                        self._safe_float(self._pick(raw, "Tax Amount", "taxAmount"), default=0.0),
-                        2,
+                    "taxAmount": self._to_money_float(
+                        self._safe_decimal(self._pick(raw, "Tax Amount", "taxAmount"))
                     ),
-                    "refundAmount": round(
-                        self._safe_float(self._pick(raw, "Refund Amount", "refundAmount"), default=0.0),
-                        2,
+                    "refundAmount": self._to_money_float(
+                        self._safe_decimal(self._pick(raw, "Refund Amount", "refundAmount"))
                     ),
                     "size": self._safe_str(self._pick(raw, "Size", "size")),
                 }
@@ -454,7 +465,7 @@ class UnicommerceDataService:
                     "status": self._safe_str(row.get("status")).upper(),
                     "channel": self._safe_str(row.get("channel") or "UNKNOWN"),
                     "created": row.get("order_date"),
-                    "selling_price": 0.0,
+                    "selling_price": Decimal("0"),
                     "item_count": 0,
                     "quantity": 0,
                 },
@@ -464,8 +475,8 @@ class UnicommerceDataService:
             if qty <= 0:
                 qty = 1
 
-            item_price = float(row.get("selling_price") or 0.0)
-            order["selling_price"] += item_price * qty
+            item_price = self._safe_decimal(row.get("selling_price"))
+            order["selling_price"] += item_price * Decimal(qty)
             order["item_count"] += 1
             order["quantity"] += qty
 
@@ -480,7 +491,7 @@ class UnicommerceDataService:
         total_orders = len(order_list)
         valid_orders = 0
         excluded_orders = 0
-        total_revenue = 0.0
+        total_revenue = Decimal("0")
         total_items = 0
 
         channel_breakdown: Dict[str, Dict[str, Any]] = {}
@@ -490,7 +501,7 @@ class UnicommerceDataService:
         for order in order_list:
             status = self._safe_str(order.get("status")).upper()
             channel = self._safe_str(order.get("channel") or "UNKNOWN")
-            revenue = float(order.get("selling_price") or 0.0)
+            revenue = self._safe_decimal(order.get("selling_price"))
             qty = int(order.get("quantity") or 0)
             created = order.get("created")
 
@@ -503,7 +514,7 @@ class UnicommerceDataService:
                 total_items += qty
 
                 if channel not in channel_breakdown:
-                    channel_breakdown[channel] = {"orders": 0, "revenue": 0.0, "items": 0}
+                    channel_breakdown[channel] = {"orders": 0, "revenue": Decimal("0"), "items": 0}
                 channel_breakdown[channel]["orders"] += 1
                 channel_breakdown[channel]["revenue"] += revenue
                 channel_breakdown[channel]["items"] += qty
@@ -523,7 +534,7 @@ class UnicommerceDataService:
                         daily_map[date_key] = {
                             "date": date_key,
                             "orders": 0,
-                            "revenue": 0.0,
+                            "revenue": Decimal("0"),
                             "items": 0,
                         }
                     daily_map[date_key]["orders"] += 1
@@ -533,11 +544,11 @@ class UnicommerceDataService:
                 excluded_orders += 1
 
         for value in channel_breakdown.values():
-            value["revenue"] = round(float(value["revenue"]), 2)
+            value["revenue"] = self._to_money_float(self._safe_decimal(value["revenue"]))
 
         daily_breakdown = sorted(daily_map.values(), key=lambda x: x["date"])
         for day in daily_breakdown:
-            day["revenue"] = round(float(day["revenue"]), 2)
+            day["revenue"] = self._to_money_float(self._safe_decimal(day["revenue"]))
 
         def _sort_key(order: Dict[str, Any]) -> float:
             created_value = order.get("created")
@@ -554,8 +565,8 @@ class UnicommerceDataService:
                 "code": o["code"],
                 "status": o.get("status", ""),
                 "channel": o.get("channel", "UNKNOWN"),
-                "selling_price": round(float(o.get("selling_price") or 0.0), 2),
-                "net_revenue": round(float(o.get("selling_price") or 0.0), 2),
+                "selling_price": self._to_money_float(self._safe_decimal(o.get("selling_price"))),
+                "net_revenue": self._to_money_float(self._safe_decimal(o.get("selling_price"))),
                 "created": o.get("created").isoformat() if isinstance(o.get("created"), datetime) else self._safe_str(o.get("created")),
                 "item_count": int(o.get("item_count") or 0),
                 "quantity": int(o.get("quantity") or 0),
@@ -571,11 +582,11 @@ class UnicommerceDataService:
                 "valid_orders": valid_orders,
                 "excluded_orders": excluded_orders,
                 "total_items": total_items,
-                "total_revenue": round(total_revenue, 2),
+                "total_revenue": self._to_money_float(total_revenue),
                 "total_discount": 0.0,
                 "total_tax": 0.0,
                 "total_refund": 0.0,
-                "avg_order_value": round(total_revenue / valid_orders, 2) if valid_orders > 0 else 0,
+                "avg_order_value": self._to_money_float(total_revenue / Decimal(valid_orders)) if valid_orders > 0 else 0,
                 "channel_breakdown": channel_breakdown,
                 "daily_breakdown": daily_breakdown,
                 "status_breakdown": status_breakdown,
@@ -720,7 +731,7 @@ class UnicommerceDataService:
                             "status": r.status,
                             "channel": r.channel,
                             "qty": r.qty,
-                            "selling_price": float(r.selling_price or 0),
+                            "selling_price": self._safe_decimal(r.selling_price),
                             "order_date": self._normalize_dt(r.order_date or r.created_at),
                             "sku": r.sku,
                             "product_name": r.product_name,
@@ -741,7 +752,7 @@ class UnicommerceDataService:
                         "to_date": end.isoformat(),
                         "data_source": "normalized_sales_orders",
                         "fallback_used": False,
-                        "last_synced_at": last_synced.isoformat() if last_synced else None,
+                        "last_synced_at": self._normalize_dt(last_synced).isoformat() if last_synced else None,
                         "data_health": {
                             "coverage": "normalized",
                             "normalized_rows": len(normalized_records),
@@ -787,7 +798,7 @@ class UnicommerceDataService:
                             "status": r.status,
                             "channel": r.channel,
                             "qty": r.qty,
-                            "selling_price": float(r.selling_price or 0),
+                            "selling_price": self._safe_decimal(r.selling_price),
                             "order_date": self._normalize_dt(r.order_date or r.created_at),
                         }
                         for r in lightweight_records
@@ -802,7 +813,7 @@ class UnicommerceDataService:
                         "to_date": end.isoformat(),
                         "data_source": "normalized_sales_orders",
                         "fallback_used": False,
-                        "last_synced_at": last_synced.isoformat() if last_synced else None,
+                        "last_synced_at": self._normalize_dt(last_synced).isoformat() if last_synced else None,
                         "data_health": {
                             "coverage": "normalized",
                             "normalized_rows": len(lightweight_records),
@@ -889,7 +900,7 @@ class UnicommerceDataService:
                 "to_date": end.isoformat(),
                 "data_source": "raw_export_rows_fallback",
                 "fallback_used": True,
-                "last_synced_at": completed_at.isoformat() if completed_at else None,
+                "last_synced_at": self._normalize_dt(completed_at).isoformat() if completed_at else None,
                 "data_health": {
                     "coverage": "raw_fallback",
                     "normalized_rows": 0,

@@ -32,28 +32,6 @@ def _parse_date_boundary(value: str, end_of_day: bool = False) -> datetime:
     return parsed.replace(tzinfo=timezone.utc)
 
 
-def _resolve_sales_sync_window(
-    period: str,
-    parsed_from: Optional[datetime],
-    parsed_to: Optional[datetime],
-) -> Optional[tuple[datetime, datetime]]:
-    period_norm = str(period or "today").strip().lower()
-    uc_service = get_unicommerce_service()
-
-    if period_norm == "today":
-        return uc_service.get_today_range()
-    if period_norm == "yesterday":
-        return uc_service.get_yesterday_range()
-    if period_norm == "last_7_days":
-        return uc_service.get_last_n_days_range(7)
-    if period_norm == "last_30_days":
-        return uc_service.get_last_n_days_range(30)
-    if period_norm == "custom" and parsed_from and parsed_to:
-        return parsed_from, parsed_to
-
-    return None
-
-
 def _progress_cache_key(progress_id: str) -> str:
     return f"uc:report-progress:{progress_id}"
 
@@ -187,40 +165,6 @@ async def get_sales_data(
         not lightweight,
     )
 
-    summary = result.get("summary") or {}
-    total_orders = int(summary.get("total_orders", 0) or 0)
-    data_source = str(result.get("data_source") or "")
-
-    should_bootstrap = (
-        bool(lightweight)
-        and bool(result.get("success"))
-        and total_orders <= 0
-        and data_source in {"none", "raw_export_rows_fallback", "normalized_sales_orders"}
-    )
-
-    if should_bootstrap:
-        sync_window = _resolve_sales_sync_window(period, parsed_from, parsed_to)
-        if sync_window is not None:
-            orchestrator = get_unicommerce_sync_orchestrator()
-            sync_result = await orchestrator.sync_orders_window(sync_window[0], sync_window[1])
-
-            result = await run_in_threadpool(
-                service.get_sales_data,
-                period,
-                parsed_from,
-                parsed_to,
-                not lightweight,
-                not lightweight,
-            )
-            result["bootstrap_sync"] = {
-                "triggered": True,
-                "success": bool(sync_result.get("success")),
-                "total_records": int(sync_result.get("total_records", 0) or 0),
-                "normalized_rows": int(sync_result.get("normalized_rows", 0) or 0),
-                "total_time": float(sync_result.get("total_time", 0) or 0),
-                "message": sync_result.get("message"),
-            }
-
     return result
 
 
@@ -280,30 +224,7 @@ async def get_inventory_summary(
     warehouse: Optional[str] = Query(None, description="Warehouse/facility code"),
 ):
     service = get_unicommerce_data_service()
-    result = await run_in_threadpool(service.get_inventory_summary_db, warehouse)
-
-    if int(result.get("totalSKUs", 0) or 0) <= 0:
-        orchestrator = get_unicommerce_sync_orchestrator()
-        sync_result = await orchestrator.sync_inventory(
-            facility_code=(warehouse or "anthrilo"),
-        )
-        if bool(sync_result.get("success")) and int(sync_result.get("fetched_skus", 0) or 0) > 0:
-            refreshed = await run_in_threadpool(service.get_inventory_summary_db, warehouse)
-            refreshed["bootstrap_sync"] = {
-                "triggered": True,
-                "requested_skus": int(sync_result.get("requested_skus", 0) or 0),
-                "fetched_skus": int(sync_result.get("fetched_skus", 0) or 0),
-            }
-            return refreshed
-
-        result["bootstrap_sync"] = {
-            "triggered": True,
-            "requested_skus": int(sync_result.get("requested_skus", 0) or 0),
-            "fetched_skus": int(sync_result.get("fetched_skus", 0) or 0),
-            "success": bool(sync_result.get("success")),
-        }
-
-    return result
+    return await run_in_threadpool(service.get_inventory_summary_db, warehouse)
 
 
 @router.post("/catalog-search")
@@ -328,44 +249,6 @@ async def search_catalog_data(payload: Optional[Dict[str, Any]] = Body(None)):
         stock_filter,
         bool(body.get("getInventorySnapshot", False)),
     )
-
-    should_bootstrap = (
-        not body.get("keyword")
-        and not category
-        and str(stock_filter).lower() == "all"
-        and display_start == 0
-        and int(result.get("totalRecords", 0) or 0) <= 0
-    )
-
-    if should_bootstrap:
-        orchestrator = get_unicommerce_sync_orchestrator()
-        sync_result = await orchestrator.sync_inventory(
-            facility_code=(warehouse or "anthrilo"),
-        )
-        if bool(sync_result.get("success")) and int(sync_result.get("fetched_skus", 0) or 0) > 0:
-            refreshed = await run_in_threadpool(
-                service.get_inventory_catalog_search,
-                body.get("keyword"),
-                display_start,
-                display_length,
-                warehouse,
-                category,
-                stock_filter,
-                bool(body.get("getInventorySnapshot", False)),
-            )
-            refreshed["bootstrap_sync"] = {
-                "triggered": True,
-                "requested_skus": int(sync_result.get("requested_skus", 0) or 0),
-                "fetched_skus": int(sync_result.get("fetched_skus", 0) or 0),
-            }
-            return refreshed
-
-        result["bootstrap_sync"] = {
-            "triggered": True,
-            "requested_skus": int(sync_result.get("requested_skus", 0) or 0),
-            "fetched_skus": int(sync_result.get("fetched_skus", 0) or 0),
-            "success": bool(sync_result.get("success")),
-        }
 
     return result
 
