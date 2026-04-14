@@ -176,6 +176,12 @@ export const unicommerceApi = {
   getCacheStats: () => apiClient.get('/unicommerce-data/cache-stats'),
   checkCacheStatus: () => apiClient.get('/unicommerce-data/cache-check'),
 
+  // Manual ingestion trigger (runs incremental profile and waits for completion)
+  runIncrementalSyncNow: () =>
+    apiClient.post('/integrations/unicommerce/sync/profile/incremental', null, {
+      params: { run_in_background: false },
+    }),
+
   // Legacy endpoints (kept for backward compat)
   searchOrders: (params: { from_date: string; to_date: string; display_start?: number; display_length?: number }) =>
     apiClient.get('/unicommerce-data/search-orders', { params }),

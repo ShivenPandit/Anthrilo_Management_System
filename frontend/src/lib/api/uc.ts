@@ -53,6 +53,8 @@ export const ucSales = {
     getBundleSkus: unicommerceApi.getBundleSkus,
 
     getBundleSalesAnalysis: unicommerceApi.getBundleSalesAnalysis,
+
+    syncNow: unicommerceApi.runIncrementalSyncNow,
 };
 
 // Catalog-related
