@@ -675,6 +675,7 @@ class UnicommerceDataService:
         from_date: Optional[datetime] = None,
         to_date: Optional[datetime] = None,
         include_legacy_orders: bool = True,
+        include_orders: bool = True,
     ) -> Dict[str, Any]:
         start, end, resolved_period = self._resolve_range(period, from_date, to_date)
 
@@ -759,7 +760,7 @@ class UnicommerceDataService:
                             "reconciliation_passed": True,
                         },
                         "summary": aggregation["summary"],
-                        "orders": aggregation["orders"],
+                        "orders": aggregation["orders"] if include_orders else [],
                         "_orders": legacy_orders,
                         "revenue_method": "db_first_normalized",
                     }
@@ -820,7 +821,7 @@ class UnicommerceDataService:
                             "reconciliation_passed": True,
                         },
                         "summary": aggregation["summary"],
-                        "orders": aggregation["orders"],
+                        "orders": aggregation["orders"] if include_orders else [],
                         "_orders": [],
                         "revenue_method": "db_first_normalized",
                     }
@@ -907,7 +908,7 @@ class UnicommerceDataService:
                     "reconciliation_passed": True,
                 },
                 "summary": aggregation["summary"],
-                "orders": aggregation["orders"],
+                "orders": aggregation["orders"] if include_orders else [],
                 "_orders": legacy_orders,
                 "revenue_method": "db_first_normalized",
             }
