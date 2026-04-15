@@ -1963,15 +1963,31 @@ class UnicommerceDataService:
                     ch = ch.replace("__", "_")
                 return ch
 
+            def _derive_item_type_size(item_type_name: str, size: str) -> str:
+                size_norm = self._safe_str(size)
+                if size_norm and size_norm.upper() != "UNKNOWN":
+                    return size_norm
+
+                item_type_norm = self._safe_str(item_type_name)
+                if " - " in item_type_norm:
+                    tail = self._safe_str(item_type_norm.rsplit(" - ", 1)[-1])
+                    if tail:
+                        return tail
+                return "UNKNOWN"
+
             detail_map: Dict[Tuple[str, str, str], Dict[str, Any]] = defaultdict(
                 lambda: {
                     "item_sku_code": "",
                     "item_type_name": "",
+                    "item_type_size": "UNKNOWN",
                     "size": "",
                     "channel": "",
                     "total_sale_qty": 0,
                     "cancel_qty": 0,
                     "return_qty": 0,
+                    "sale_amount": Decimal("0"),
+                    "cancel_amount": Decimal("0"),
+                    "return_amount": Decimal("0"),
                 }
             )
 
@@ -1987,19 +2003,27 @@ class UnicommerceDataService:
                     if qty <= 0:
                         qty = 1
 
+                    selling_price = self._safe_decimal(item.get("sellingPrice"), default=Decimal("0"))
+                    line_amount = selling_price * Decimal(qty)
+
                     key = (sku, size, channel)
                     row = detail_map[key]
                     row["item_sku_code"] = sku
                     row["item_type_name"] = item_type
                     row["size"] = size
                     row["channel"] = channel
+                    if self._safe_str(row.get("item_type_size")).upper() == "UNKNOWN":
+                        row["item_type_size"] = _derive_item_type_size(item_type, size)
 
                     if status in {"CANCELLED", "CANCELED"}:
                         row["cancel_qty"] += qty
+                        row["cancel_amount"] += line_amount
                     elif status in {"RETURNED", "REFUNDED"}:
                         row["return_qty"] += qty
+                        row["return_amount"] += line_amount
                     else:
                         row["total_sale_qty"] += qty
+                        row["sale_amount"] += line_amount
 
             norm_key_to_detail_keys: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = defaultdict(list)
             order_sku_to_detail_keys: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = defaultdict(list)
@@ -2023,7 +2047,9 @@ class UnicommerceDataService:
                     if key in detail_map:
                         order_sku_to_detail_keys[(order_code_norm, _norm_sku(sku))].append(key)
 
-            return_map: Dict[Tuple[str, str], int] = defaultdict(int)
+            return_map: Dict[Tuple[str, str], Dict[str, Any]] = defaultdict(
+                lambda: {"qty": 0, "amount": Decimal("0")}
+            )
             return_report = self.get_return_report(
                 from_date=from_date,
                 to_date=to_date,
@@ -2039,12 +2065,14 @@ class UnicommerceDataService:
                     for it in list(ret.get("items") or []):
                         sku = _norm_sku(self._safe_str(it.get("sku")))
                         rqty = self._safe_int(it.get("quantity"), default=0)
+                        ramount = self._safe_decimal(it.get("price"), default=Decimal("0"))
                         if not sku or rqty <= 0:
                             continue
 
                         direct_keys = order_sku_to_detail_keys.get((so_code_norm, sku), []) if so_code_norm else []
                         if len(direct_keys) == 1:
                             detail_map[direct_keys[0]]["return_qty"] += rqty
+                            detail_map[direct_keys[0]]["return_amount"] += ramount
                             continue
 
                         if len(direct_keys) > 1:
@@ -2058,14 +2086,23 @@ class UnicommerceDataService:
                             unknown_row["item_sku_code"] = self._safe_str(sample_row.get("item_sku_code")) or sku
                             unknown_row["item_type_name"] = self._safe_str(sample_row.get("item_type_name"))
                             unknown_row["size"] = "UNKNOWN"
+                            unknown_row["item_type_size"] = _derive_item_type_size(
+                                self._safe_str(sample_row.get("item_type_name")),
+                                "UNKNOWN",
+                            )
                             unknown_row["channel"] = self._safe_str(sample_row.get("channel")) or ret_channel
                             unknown_row["return_qty"] += rqty
+                            unknown_row["return_amount"] += ramount
                             continue
 
-                        return_map[(sku, ret_channel)] += rqty
+                        pending = return_map[(sku, ret_channel)]
+                        pending["qty"] += rqty
+                        pending["amount"] += ramount
 
             if return_map:
-                for (sku, channel), qty in return_map.items():
+                for (sku, channel), payload in return_map.items():
+                    qty = int(payload.get("qty") or 0)
+                    amount = self._safe_decimal(payload.get("amount"), default=Decimal("0"))
                     matching_keys = norm_key_to_detail_keys.get((sku, channel), [])
                     if not matching_keys:
                         unknown_key = (sku, "UNKNOWN", channel)
@@ -2073,12 +2110,18 @@ class UnicommerceDataService:
                         unknown_row["item_sku_code"] = sku
                         unknown_row["item_type_name"] = self._safe_str(unknown_row.get("item_type_name"))
                         unknown_row["size"] = "UNKNOWN"
+                        unknown_row["item_type_size"] = _derive_item_type_size(
+                            self._safe_str(unknown_row.get("item_type_name")),
+                            "UNKNOWN",
+                        )
                         unknown_row["channel"] = channel
                         unknown_row["return_qty"] += qty
+                        unknown_row["return_amount"] += amount
                         continue
 
                     if len(matching_keys) == 1:
                         detail_map[matching_keys[0]]["return_qty"] += qty
+                        detail_map[matching_keys[0]]["return_amount"] += amount
                         continue
 
                     sample_row = detail_map[matching_keys[0]]
@@ -2091,8 +2134,13 @@ class UnicommerceDataService:
                     unknown_row["item_sku_code"] = self._safe_str(sample_row.get("item_sku_code")) or sku
                     unknown_row["item_type_name"] = self._safe_str(sample_row.get("item_type_name"))
                     unknown_row["size"] = "UNKNOWN"
+                    unknown_row["item_type_size"] = _derive_item_type_size(
+                        self._safe_str(sample_row.get("item_type_name")),
+                        "UNKNOWN",
+                    )
                     unknown_row["channel"] = self._safe_str(sample_row.get("channel")) or channel
                     unknown_row["return_qty"] += qty
+                    unknown_row["return_amount"] += amount
 
             items = list(detail_map.values())
             unique_skus = sorted(
@@ -2118,6 +2166,23 @@ class UnicommerceDataService:
 
             for row in items:
                 row["net_sale"] = int(row.get("total_sale_qty", 0) or 0) - int(row.get("cancel_qty", 0) or 0) - int(row.get("return_qty", 0) or 0)
+                sale_amount = self._safe_decimal(row.get("sale_amount"), default=Decimal("0"))
+                cancel_amount = self._safe_decimal(row.get("cancel_amount"), default=Decimal("0"))
+                return_amount = self._safe_decimal(row.get("return_amount"), default=Decimal("0"))
+                net_sale_amount = sale_amount - cancel_amount - return_amount
+
+                row["sale_amount"] = self._to_money_float(sale_amount)
+                row["cancel_amount"] = self._to_money_float(cancel_amount)
+                row["return_amount"] = self._to_money_float(return_amount)
+                row["net_sale_amount"] = self._to_money_float(net_sale_amount)
+
+                row["item_type_size"] = _derive_item_type_size(
+                    self._safe_str(row.get("item_type_name")),
+                    self._safe_str(row.get("size")),
+                )
+                if not self._safe_str(row.get("size")) or self._safe_str(row.get("size")).upper() == "UNKNOWN":
+                    row["size"] = self._safe_str(row.get("item_type_size"))
+
                 inv = inventory_map.get(self._safe_str(row.get("item_sku_code")), {})
                 row["stock_good"] = inv.get("good_inventory", 0)
                 row["stock_virtual"] = inv.get("virtual_inventory", 0)
