@@ -136,6 +136,17 @@ const REPORTS: ReportDef[] = [
     badge: 'New',
     popular: true,
   },
+  {
+    id: 'demo-report',
+    title: 'Demo Report',
+    description: 'Business-ready Item Type Size report with sale/return/cancel/net and current inventory',
+    href: '/dashboard/sales/reports/demo',
+    icon: FileText,
+    category: 'Sales',
+    frequency: 'Daily',
+    badge: 'New',
+    popular: true,
+  },
 
   // Returns
   {

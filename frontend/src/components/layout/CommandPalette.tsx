@@ -57,6 +57,15 @@ const BASE_SEARCH_ITEMS: SearchItem[] = [
     keywords: ['sales', 'daily', 'revenue', 'channel'],
   },
   {
+    id: 'demo-report',
+    title: 'Demo Report',
+    description: 'Item Type Size demo report with size-wise metrics and inventory snapshot',
+    href: '/dashboard/sales/reports/demo',
+    icon: FileText,
+    category: 'Reports',
+    keywords: ['demo', 'report', 'item type size', 'size wise', 'inventory'],
+  },
+  {
     id: 'return-report',
     title: 'Return Report',
     description: 'Returns & refunds summary',

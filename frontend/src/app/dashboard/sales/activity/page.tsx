@@ -8,6 +8,7 @@ import SizeWiseReportTable, { type SalesActivityRow } from '@/components/reports
 import ItemWiseReportTable from '@/components/reports/ItemWiseReportTable';
 import ChannelWiseReportTable from '@/components/reports/ChannelWiseReportTable';
 import ChannelSummaryTable from '@/components/reports/ChannelSummaryTable';
+import DemoReportTable from '@/components/reports/DemoReportTable';
 import { unicommerceApi } from '@/features/sales/api';
 import { resolveReportDateRange } from '@/lib/report-date-range';
 import { generateSalesActivityExcel } from '@/utils/exportSalesActivityExcel';
@@ -27,6 +28,7 @@ export default function SalesActivityPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [channelFilter, setChannelFilter] = useState('ALL');
   const [progress, setProgress] = useState(0);
   const progressRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -96,6 +98,7 @@ export default function SalesActivityPage() {
         to_date: effectiveRange.to,
       });
       const items: SalesActivityRow[] = res.data?.items ?? [];
+      setChannelFilter('ALL');
       if (items.length === 0) {
         setError('No data found for the selected date range.');
       }
@@ -118,15 +121,26 @@ export default function SalesActivityPage() {
   }, [data, effectiveRange.from, effectiveRange.to, reportType]);
 
   const filteredData = useMemo(() => data.filter(row => {
+    if (channelFilter !== 'ALL' && row.channel !== channelFilter) return false;
     if (!search.trim()) return true;
     const q = search.toLowerCase();
     return (
       row.item_sku_code.toLowerCase().includes(q) ||
       row.item_type_name.toLowerCase().includes(q) ||
+      (row.item_type_size || '').toLowerCase().includes(q) ||
       row.size.toLowerCase().includes(q) ||
       row.channel.toLowerCase().includes(q)
     );
-  }), [data, search]);
+  }), [data, search, channelFilter]);
+
+  const availableChannels = useMemo(() => {
+    const set = new Set<string>();
+    for (const row of data) {
+      const channel = (row.channel || '').trim();
+      if (channel) set.add(channel);
+    }
+    return ['ALL', ...Array.from(set).sort((a, b) => a.localeCompare(b))];
+  }, [data]);
 
   const renderTable = () => {
     if (filteredData.length === 0) return null;
@@ -229,15 +243,28 @@ export default function SalesActivityPage() {
       {/* Report table */}
       {!loading && data.length > 0 && (
         <>
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <input
-              type="text"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Search by SKU, item name, size or channel…"
-              className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500/40 focus:border-primary-400 transition"
-            />
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            <div className="relative lg:col-span-2">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <input
+                type="text"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Search by SKU, item name, item type size or channel…"
+                className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-primary-500/40 focus:border-primary-400 transition"
+              />
+            </div>
+            <select
+              value={channelFilter}
+              onChange={(e) => setChannelFilter(e.target.value)}
+              className="w-full px-3 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-primary-500/40 focus:border-primary-400 transition"
+            >
+              {availableChannels.map((ch) => (
+                <option key={ch} value={ch}>
+                  {ch === 'ALL' ? 'All Channels' : ch}
+                </option>
+              ))}
+            </select>
           </div>
           {filteredData.length === 0 ? (
             <div className="card py-10 text-center text-sm text-slate-500 dark:text-slate-400">
@@ -247,6 +274,12 @@ export default function SalesActivityPage() {
             renderTable()
           )}
         </>
+      )}
+
+      {!loading && (
+        <div className="card">
+          <DemoReportTable data={filteredData} selectedChannel={channelFilter} />
+        </div>
       )}
 
       {/* Empty state */}

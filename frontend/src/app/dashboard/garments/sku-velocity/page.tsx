@@ -178,14 +178,20 @@ export default function SkuVelocityPage() {
         }
     };
 
-    const fastMovers = (data?.fast_movers || []).map((s: any, i: number) => ({
-        ...s,
-        rank: i + 1,
-    }));
-    const slowMovers = (data?.slow_movers || []).map((s: any, i: number) => ({
-        ...s,
-        rank: i + 1,
-    }));
+    const hasPricing = (sku: any) => !sku?.unpriced && Number(sku?.revenue || 0) > 0;
+
+    const fastMovers = (data?.fast_movers || [])
+        .filter(hasPricing)
+        .map((s: any, i: number) => ({
+            ...s,
+            rank: i + 1,
+        }));
+    const slowMovers = (data?.slow_movers || [])
+        .filter(hasPricing)
+        .map((s: any, i: number) => ({
+            ...s,
+            rank: i + 1,
+        }));
 
     const isBusy = isLoading || isRefreshing;
 
