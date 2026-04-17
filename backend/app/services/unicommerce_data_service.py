@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, bindparam, func, or_, text
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
@@ -96,6 +96,64 @@ class UnicommerceDataService:
     @staticmethod
     def _to_money_float(value: Decimal) -> float:
         return float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+    @staticmethod
+    def _resolve_inventory_snapshot_table_name(db: Session) -> Optional[str]:
+        """Resolve the inventory snapshot source table, preferring the required singular name."""
+        try:
+            if db.execute(text("SELECT to_regclass('public.inventory_snapshot')")).scalar():
+                return "inventory_snapshot"
+            if db.execute(text("SELECT to_regclass('public.inventory_snapshots')")).scalar():
+                return "inventory_snapshots"
+        except Exception:
+            return None
+        return None
+
+    def _fetch_inventory_snapshot_map_by_sku(self, skus: List[str]) -> Dict[str, Dict[str, int]]:
+        """Load SKU inventory map using direct DB query from inventory snapshot table."""
+        clean_skus = [self._safe_str(sku) for sku in (skus or []) if self._safe_str(sku)]
+        if not clean_skus:
+            return {}
+
+        db = self._get_db()
+        try:
+            table_name = self._resolve_inventory_snapshot_table_name(db)
+            if not table_name:
+                return {}
+
+            # Required source query shape:
+            # SELECT sku, available_qty, reserved_qty FROM inventory_snapshot;
+            stmt = text(
+                f"""
+                SELECT
+                    sku,
+                    available_qty,
+                    reserved_qty
+                FROM {table_name}
+                WHERE sku IN :skus
+                """
+            ).bindparams(bindparam("skus", expanding=True))
+
+            rows = db.execute(stmt, {"skus": clean_skus}).mappings().all()
+            inventory_map: Dict[str, Dict[str, int]] = {}
+            for row in rows:
+                sku_code = self._safe_str(row.get("sku"))
+                if not sku_code:
+                    continue
+
+                bucket = inventory_map.setdefault(
+                    sku_code,
+                    {
+                        "good_inventory": 0,
+                        "virtual_inventory": 0,
+                    },
+                )
+                bucket["good_inventory"] += self._safe_int(row.get("available_qty"), default=0)
+                bucket["virtual_inventory"] += self._safe_int(row.get("reserved_qty"), default=0)
+
+            return inventory_map
+        finally:
+            db.close()
 
     @staticmethod
     def _safe_bool(value: Any, default: bool = False) -> bool:
@@ -687,6 +745,7 @@ class UnicommerceDataService:
         to_date: Optional[datetime] = None,
         include_legacy_orders: bool = True,
         include_orders: bool = True,
+        include_summary: bool = True,
     ) -> Dict[str, Any]:
         start, end, resolved_period = self._resolve_range(period, from_date, to_date)
 
@@ -717,7 +776,15 @@ class UnicommerceDataService:
                         SalesOrderRecord.created_at,
                         SalesOrderRecord.sku,
                         SalesOrderRecord.product_name,
-                        SalesOrderRecord.raw_data,
+                        SalesOrderRecord.raw_data["Item Details"].astext.label("raw_item_details"),
+                        SalesOrderRecord.raw_data["itemDetails"].astext.label("raw_item_details_alt"),
+                        SalesOrderRecord.raw_data["Item Type Name"].astext.label("raw_item_type_name"),
+                        SalesOrderRecord.raw_data["itemTypeName"].astext.label("raw_item_type_name_alt"),
+                        SalesOrderRecord.raw_data["Item Name"].astext.label("raw_item_name"),
+                        SalesOrderRecord.raw_data["itemName"].astext.label("raw_item_name_alt"),
+                        SalesOrderRecord.raw_data["Name"].astext.label("raw_name"),
+                        SalesOrderRecord.raw_data["COD"].astext.label("raw_cod"),
+                        SalesOrderRecord.raw_data["cod"].astext.label("raw_cod_alt"),
                         SalesOrderRecord.updated_at,
                     )
                     .filter(date_filter)
@@ -734,16 +801,27 @@ class UnicommerceDataService:
                             "selling_price": self._safe_decimal(r.selling_price),
                             "order_date": self._normalize_dt(r.order_date or r.created_at),
                             "sku": r.sku,
-                            "product_name": r.product_name,
-                            "cod": self._safe_bool((r.raw_data or {}).get("COD") or (r.raw_data or {}).get("cod"), default=False),
+                            "product_name": self._safe_str(
+                                r.raw_item_details
+                                or r.raw_item_details_alt
+                                or r.raw_item_type_name
+                                or r.raw_item_type_name_alt
+                                or r.raw_item_name
+                                or r.raw_item_name_alt
+                                or r.raw_name
+                            ) or self._safe_str(r.product_name),
+                            "cod": self._safe_bool(r.raw_cod or r.raw_cod_alt, default=False),
                         }
                         for r in normalized_records
                     ]
                     legacy_orders: List[Dict[str, Any]] = []
                     detailed_orders = self._orders_from_line_rows(rows)
                     legacy_orders = self._legacy_orders_from_orders(detailed_orders)
-                    aggregation = self._aggregate_sales_rows(rows)
+                    aggregation: Optional[Dict[str, Any]] = None
+                    if include_summary or include_orders:
+                        aggregation = self._aggregate_sales_rows(rows)
                     last_synced = max((r.updated_at for r in normalized_records if r.updated_at), default=None)
+                    order_count = int((aggregation or {}).get("order_count") or len(legacy_orders))
 
                     return {
                         "success": True,
@@ -759,8 +837,8 @@ class UnicommerceDataService:
                             "raw_rows": 0,
                         },
                         "fetch_info": {
-                            "total_available": aggregation["order_count"],
-                            "fetched_count": aggregation["order_count"],
+                            "total_available": order_count,
+                            "fetched_count": order_count,
                             "failed_codes": 0,
                             "phase1_time_seconds": 0,
                             "phase2_time_seconds": 0,
@@ -770,8 +848,8 @@ class UnicommerceDataService:
                             "phase2_dedup": 0,
                             "reconciliation_passed": True,
                         },
-                        "summary": aggregation["summary"],
-                        "orders": aggregation["orders"] if include_orders else [],
+                        "summary": (aggregation or {}).get("summary") if include_summary else {},
+                        "orders": (aggregation or {}).get("orders", []) if include_orders else [],
                         "_orders": legacy_orders,
                         "revenue_method": "db_first_normalized",
                     }
@@ -803,8 +881,11 @@ class UnicommerceDataService:
                         }
                         for r in lightweight_records
                     ]
-                    aggregation = self._aggregate_sales_rows(rows)
+                    aggregation: Optional[Dict[str, Any]] = None
+                    if include_summary or include_orders:
+                        aggregation = self._aggregate_sales_rows(rows)
                     last_synced = max((r.updated_at for r in lightweight_records if r.updated_at), default=None)
+                    order_count = int((aggregation or {}).get("order_count") or len(lightweight_records))
 
                     return {
                         "success": True,
@@ -820,8 +901,8 @@ class UnicommerceDataService:
                             "raw_rows": 0,
                         },
                         "fetch_info": {
-                            "total_available": aggregation["order_count"],
-                            "fetched_count": aggregation["order_count"],
+                            "total_available": order_count,
+                            "fetched_count": order_count,
                             "failed_codes": 0,
                             "phase1_time_seconds": 0,
                             "phase2_time_seconds": 0,
@@ -831,8 +912,8 @@ class UnicommerceDataService:
                             "phase2_dedup": 0,
                             "reconciliation_passed": True,
                         },
-                        "summary": aggregation["summary"],
-                        "orders": aggregation["orders"] if include_orders else [],
+                        "summary": (aggregation or {}).get("summary") if include_summary else {},
+                        "orders": (aggregation or {}).get("orders", []) if include_orders else [],
                         "_orders": [],
                         "revenue_method": "db_first_normalized",
                     }
@@ -1927,8 +2008,16 @@ class UnicommerceDataService:
                 "error": str(exc),
             }
 
-    def get_sales_activity_report(self, from_date: str, to_date: str) -> Dict[str, Any]:
+    def get_sales_activity_report(
+        self,
+        from_date: str,
+        to_date: str,
+        progress_cb: Optional[Callable[[int, str], None]] = None,
+    ) -> Dict[str, Any]:
         try:
+            report_started_at = datetime.now(timezone.utc)
+            self._emit_progress(progress_cb, 5, "Validating sales activity date range…")
+
             ist = timezone(timedelta(hours=5, minutes=30))
             from_dt = datetime.strptime(str(from_date), "%Y-%m-%d").replace(
                 hour=0,
@@ -1943,15 +2032,21 @@ class UnicommerceDataService:
                 tzinfo=ist,
             ).astimezone(timezone.utc)
 
+            sales_fetch_started_at = datetime.now(timezone.utc)
+            self._emit_progress(progress_cb, 18, "Fetching sales rows for selected range…")
             result = self.get_sales_data(
                 period="custom",
                 from_date=from_dt,
                 to_date=to_dt,
+                include_orders=False,
+                include_summary=False,
             )
+            sales_fetch_seconds = (datetime.now(timezone.utc) - sales_fetch_started_at).total_seconds()
             if not result.get("success"):
                 return result
 
             raw_orders = list(result.get("_orders") or [])
+            self._emit_progress(progress_cb, 40, "Aggregating SKU, channel and size rows…")
 
             def _norm_sku(v: str) -> str:
                 return self._safe_str(v).upper()
@@ -1975,13 +2070,55 @@ class UnicommerceDataService:
                         return tail
                 return "UNKNOWN"
 
+            def _derive_style_name(item_type_name: str, item_type_size: str) -> str:
+                name = self._safe_str(item_type_name)
+                size_norm = self._safe_str(item_type_size)
+                if not name:
+                    return "UNKNOWN"
+
+                if size_norm and size_norm.upper() != "UNKNOWN":
+                    suffix = f" - {size_norm}"
+                    if name.endswith(suffix):
+                        style = self._safe_str(name[: -len(suffix)])
+                        if style:
+                            return style
+
+                if " - " in name:
+                    style = self._safe_str(name.rsplit(" - ", 1)[0])
+                    if style:
+                        return style
+
+                return name
+
+            def _is_placeholder_item_name(value: str, sku: str = "") -> bool:
+                normalized = self._safe_str(value)
+                if not normalized:
+                    return True
+
+                upper_value = normalized.upper()
+                upper_sku = self._safe_str(sku).upper()
+
+                if upper_value == "UNKNOWN":
+                    return True
+                if upper_sku and upper_value == upper_sku:
+                    return True
+                if normalized.startswith("{") and normalized.endswith("}"):
+                    return True
+
+                return False
+
             detail_map: Dict[Tuple[str, str, str], Dict[str, Any]] = defaultdict(
                 lambda: {
                     "item_sku_code": "",
                     "item_type_name": "",
+                    "type": "UNKNOWN",
+                    "tags": "",
                     "item_type_size": "UNKNOWN",
+                    "style_name": "UNKNOWN",
                     "size": "",
                     "channel": "",
+                    "mrp": Decimal("0"),
+                    "cost": Decimal("0"),
                     "total_sale_qty": 0,
                     "cancel_qty": 0,
                     "return_qty": 0,
@@ -1997,11 +2134,16 @@ class UnicommerceDataService:
 
                 for item in list(order.get("saleOrderItems") or []):
                     sku = self._safe_str(item.get("itemSku"))
-                    item_type = self._safe_str(item.get("itemTypeName"))
+                    item_type = self._safe_str(item.get("itemTypeName") or item.get("itemName") or item.get("name"))
                     size = self._safe_str(item.get("size"))
                     qty = self._safe_int(item.get("quantity"), default=1)
                     if qty <= 0:
                         qty = 1
+
+                    if _is_placeholder_item_name(item_type, sku):
+                        fallback_item_name = self._safe_str(item.get("itemName") or item.get("name"))
+                        if not _is_placeholder_item_name(fallback_item_name, sku):
+                            item_type = fallback_item_name
 
                     selling_price = self._safe_decimal(item.get("sellingPrice"), default=Decimal("0"))
                     line_amount = selling_price * Decimal(qty)
@@ -2010,10 +2152,32 @@ class UnicommerceDataService:
                     row = detail_map[key]
                     row["item_sku_code"] = sku
                     row["item_type_name"] = item_type
+                    item_type_size = _derive_item_type_size(item_type, size)
+                    item_type_style = _derive_style_name(item_type, item_type_size)
+                    row["style_name"] = item_type_style
+                    if self._safe_str(row.get("type")).upper() in {"", "UNKNOWN"}:
+                        row["type"] = item_type_style
                     row["size"] = size
                     row["channel"] = channel
                     if self._safe_str(row.get("item_type_size")).upper() == "UNKNOWN":
-                        row["item_type_size"] = _derive_item_type_size(item_type, size)
+                        row["item_type_size"] = item_type_size
+
+                    unit_mrp = self._safe_decimal(
+                        self._pick(item, "maxRetailPrice", "MRP", "mrp"),
+                        default=Decimal("0"),
+                    )
+                    unit_cost = self._safe_decimal(
+                        self._pick(item, "costPrice", "Cost Price", "cost"),
+                        default=Decimal("0"),
+                    )
+                    if self._safe_decimal(row.get("mrp"), default=Decimal("0")) <= 0 and unit_mrp > 0:
+                        row["mrp"] = unit_mrp
+                    if self._safe_decimal(row.get("cost"), default=Decimal("0")) <= 0 and unit_cost > 0:
+                        row["cost"] = unit_cost
+
+                    tags_val = self._safe_str(self._pick(item, "Tags", "tags"))
+                    if not self._safe_str(row.get("tags")) and tags_val:
+                        row["tags"] = tags_val
 
                     if status in {"CANCELLED", "CANCELED"}:
                         row["cancel_qty"] += qty
@@ -2050,54 +2214,124 @@ class UnicommerceDataService:
             return_map: Dict[Tuple[str, str], Dict[str, Any]] = defaultdict(
                 lambda: {"qty": 0, "amount": Decimal("0")}
             )
-            return_report = self.get_return_report(
-                from_date=from_date,
-                to_date=to_date,
-                period="custom",
-                return_type="ALL",
-            )
 
-            if return_report.get("success"):
-                for ret in list(return_report.get("returns") or []):
-                    so_code_norm = self._safe_str(ret.get("saleOrderCode")).upper()
-                    ret_channel = _norm_channel(self._safe_str(ret.get("channel")) or "UNKNOWN")
+            return_reconcile_started_at = datetime.now(timezone.utc)
+            self._emit_progress(progress_cb, 58, "Reconciling return quantities…")
+            db = self._get_db()
+            try:
+                return_records = (
+                    db.query(
+                        SalesReturnRecord.order_id,
+                        SalesReturnRecord.sku,
+                        SalesReturnRecord.return_qty,
+                        SalesReturnRecord.refund_amount,
+                        SalesReturnRecord.raw_data["Sale Order Number"].astext.label("raw_sale_order_number"),
+                        SalesReturnRecord.raw_data["Sale Order Code"].astext.label("raw_sale_order_code"),
+                        SalesReturnRecord.raw_data["saleOrderCode"].astext.label("raw_sale_order_code_alt"),
+                        SalesReturnRecord.raw_data["Channel Name"].astext.label("raw_channel_name"),
+                        SalesReturnRecord.raw_data["channel"].astext.label("raw_channel"),
+                        SalesReturnRecord.raw_data["Product SKU Code"].astext.label("raw_product_sku_code"),
+                        SalesReturnRecord.raw_data["Product SKU"].astext.label("raw_product_sku"),
+                        SalesReturnRecord.raw_data["sku"].astext.label("raw_sku"),
+                        SalesReturnRecord.raw_data["Qty"].astext.label("raw_qty"),
+                        SalesReturnRecord.raw_data["QTY"].astext.label("raw_qty_alt"),
+                        SalesReturnRecord.raw_data["quantity"].astext.label("raw_quantity"),
+                        SalesReturnRecord.raw_data["Total"].astext.label("raw_total"),
+                        SalesReturnRecord.raw_data["refundAmount"].astext.label("raw_refund_amount"),
+                        SalesReturnRecord.raw_data["Refund Amount"].astext.label("raw_refund_amount_alt"),
+                    )
+                    .filter(
+                        or_(
+                            and_(
+                                SalesReturnRecord.updated_at >= from_dt,
+                                SalesReturnRecord.updated_at <= to_dt,
+                            ),
+                            and_(
+                                SalesReturnRecord.created_at >= from_dt,
+                                SalesReturnRecord.created_at <= to_dt,
+                            ),
+                        )
+                    )
+                    .all()
+                )
+            finally:
+                db.close()
 
-                    for it in list(ret.get("items") or []):
-                        sku = _norm_sku(self._safe_str(it.get("sku")))
-                        rqty = self._safe_int(it.get("quantity"), default=0)
-                        ramount = self._safe_decimal(it.get("price"), default=Decimal("0"))
-                        if not sku or rqty <= 0:
-                            continue
+            for ret_record in return_records:
+                so_code_norm = self._safe_str(
+                    ret_record.order_id
+                    or ret_record.raw_sale_order_number
+                    or ret_record.raw_sale_order_code
+                    or ret_record.raw_sale_order_code_alt
+                ).upper()
+                ret_channel = _norm_channel(
+                    self._safe_str(
+                        ret_record.raw_channel_name
+                        or ret_record.raw_channel
+                        or "UNKNOWN"
+                    )
+                )
+                sku = _norm_sku(
+                    self._safe_str(
+                        ret_record.sku
+                        or ret_record.raw_product_sku_code
+                        or ret_record.raw_product_sku
+                        or ret_record.raw_sku
+                    )
+                )
 
-                        direct_keys = order_sku_to_detail_keys.get((so_code_norm, sku), []) if so_code_norm else []
-                        if len(direct_keys) == 1:
-                            detail_map[direct_keys[0]]["return_qty"] += rqty
-                            detail_map[direct_keys[0]]["return_amount"] += ramount
-                            continue
+                rqty = int(ret_record.return_qty or 0)
+                if rqty <= 0:
+                    rqty = self._safe_int(
+                        ret_record.raw_qty
+                        or ret_record.raw_qty_alt
+                        or ret_record.raw_quantity,
+                        default=0,
+                    )
 
-                        if len(direct_keys) > 1:
-                            sample_row = detail_map[direct_keys[0]]
-                            unknown_key = (
-                                self._safe_str(sample_row.get("item_sku_code")) or sku,
-                                "UNKNOWN",
-                                self._safe_str(sample_row.get("channel")) or ret_channel,
-                            )
-                            unknown_row = detail_map[unknown_key]
-                            unknown_row["item_sku_code"] = self._safe_str(sample_row.get("item_sku_code")) or sku
-                            unknown_row["item_type_name"] = self._safe_str(sample_row.get("item_type_name"))
-                            unknown_row["size"] = "UNKNOWN"
-                            unknown_row["item_type_size"] = _derive_item_type_size(
-                                self._safe_str(sample_row.get("item_type_name")),
-                                "UNKNOWN",
-                            )
-                            unknown_row["channel"] = self._safe_str(sample_row.get("channel")) or ret_channel
-                            unknown_row["return_qty"] += rqty
-                            unknown_row["return_amount"] += ramount
-                            continue
+                ramount = self._safe_decimal(ret_record.refund_amount, default=Decimal("0"))
+                if ramount <= 0:
+                    ramount = self._safe_decimal(
+                        ret_record.raw_total
+                        or ret_record.raw_refund_amount
+                        or ret_record.raw_refund_amount_alt,
+                        default=Decimal("0"),
+                    )
 
-                        pending = return_map[(sku, ret_channel)]
-                        pending["qty"] += rqty
-                        pending["amount"] += ramount
+                if not sku or rqty <= 0:
+                    continue
+
+                direct_keys = order_sku_to_detail_keys.get((so_code_norm, sku), []) if so_code_norm else []
+                if len(direct_keys) == 1:
+                    detail_map[direct_keys[0]]["return_qty"] += rqty
+                    detail_map[direct_keys[0]]["return_amount"] += ramount
+                    continue
+
+                if len(direct_keys) > 1:
+                    sample_row = detail_map[direct_keys[0]]
+                    unknown_key = (
+                        self._safe_str(sample_row.get("item_sku_code")) or sku,
+                        "UNKNOWN",
+                        self._safe_str(sample_row.get("channel")) or ret_channel,
+                    )
+                    unknown_row = detail_map[unknown_key]
+                    unknown_row["item_sku_code"] = self._safe_str(sample_row.get("item_sku_code")) or sku
+                    unknown_row["item_type_name"] = self._safe_str(sample_row.get("item_type_name"))
+                    unknown_row["size"] = "UNKNOWN"
+                    unknown_row["item_type_size"] = _derive_item_type_size(
+                        self._safe_str(sample_row.get("item_type_name")),
+                        "UNKNOWN",
+                    )
+                    unknown_row["channel"] = self._safe_str(sample_row.get("channel")) or ret_channel
+                    unknown_row["return_qty"] += rqty
+                    unknown_row["return_amount"] += ramount
+                    continue
+
+                pending = return_map[(sku, ret_channel)]
+                pending["qty"] += rqty
+                pending["amount"] += ramount
+
+            return_reconcile_seconds = (datetime.now(timezone.utc) - return_reconcile_started_at).total_seconds()
 
             if return_map:
                 for (sku, channel), payload in return_map.items():
@@ -2143,6 +2377,13 @@ class UnicommerceDataService:
                     unknown_row["return_amount"] += amount
 
             items = list(detail_map.values())
+            sku_preferred_name: Dict[str, str] = {}
+            for rec in items:
+                sku_code = self._safe_str(rec.get("item_sku_code"))
+                item_name = self._safe_str(rec.get("item_type_name"))
+                if sku_code and not _is_placeholder_item_name(item_name, sku_code) and sku_code not in sku_preferred_name:
+                    sku_preferred_name[sku_code] = item_name
+
             unique_skus = sorted(
                 {
                     self._safe_str(r.get("item_sku_code"))
@@ -2152,18 +2393,247 @@ class UnicommerceDataService:
             )
 
             inventory_map: Dict[str, Dict[str, int]] = {}
+            inventory_lookup_seconds = 0.0
             if unique_skus:
-                inventory_result = self.get_inventory_data(skus=unique_skus)
-                if inventory_result.get("success"):
-                    for inventory_item in list(inventory_result.get("items") or []):
-                        sku_code = self._safe_str(inventory_item.get("sku"))
+                inventory_lookup_started_at = datetime.now(timezone.utc)
+                self._emit_progress(progress_cb, 80, "Loading current inventory snapshot…")
+                inventory_map = self._fetch_inventory_snapshot_map_by_sku(unique_skus)
+                inventory_lookup_seconds = (datetime.now(timezone.utc) - inventory_lookup_started_at).total_seconds()
+
+            sku_metadata_map: Dict[str, Dict[str, Any]] = {}
+            if unique_skus:
+                db = self._get_db()
+                try:
+                    def _meta_pick_text(meta_row: Any, *attrs: str) -> str:
+                        for attr in attrs:
+                            val = self._safe_str(getattr(meta_row, attr, ""))
+                            if val:
+                                return val
+                        return ""
+
+                    date_filter = or_(
+                        and_(
+                            SalesOrderRecord.order_date.isnot(None),
+                            SalesOrderRecord.order_date >= from_dt,
+                            SalesOrderRecord.order_date <= to_dt,
+                        ),
+                        and_(
+                            SalesOrderRecord.order_date.is_(None),
+                            SalesOrderRecord.created_at >= from_dt,
+                            SalesOrderRecord.created_at <= to_dt,
+                        ),
+                    )
+
+                    latest_ids_subquery = (
+                        db.query(
+                            SalesOrderRecord.sku.label("sku"),
+                            func.max(SalesOrderRecord.id).label("latest_id"),
+                        )
+                        .filter(SalesOrderRecord.sku.in_(unique_skus))
+                        .filter(date_filter)
+                        .group_by(SalesOrderRecord.sku)
+                        .subquery()
+                    )
+
+                    metadata_rows = (
+                        db.query(
+                            SalesOrderRecord.sku,
+                            SalesOrderRecord.product_name,
+                            SalesOrderRecord.selling_price,
+                            SalesOrderRecord.raw_data["Item Details"].astext.label("raw_item_details"),
+                            SalesOrderRecord.raw_data["itemDetails"].astext.label("raw_item_details_alt"),
+                            SalesOrderRecord.raw_data["Item Type Name"].astext.label("raw_item_type_name"),
+                            SalesOrderRecord.raw_data["itemTypeName"].astext.label("raw_item_type_name_alt"),
+                            SalesOrderRecord.raw_data["Item Name"].astext.label("raw_item_name"),
+                            SalesOrderRecord.raw_data["itemName"].astext.label("raw_item_name_alt"),
+                            SalesOrderRecord.raw_data["Name"].astext.label("raw_name"),
+                            SalesOrderRecord.raw_data["Type"].astext.label("raw_type"),
+                            SalesOrderRecord.raw_data["type"].astext.label("raw_type_alt"),
+                            SalesOrderRecord.raw_data["Item Type"].astext.label("raw_item_type"),
+                            SalesOrderRecord.raw_data["itemType"].astext.label("raw_item_type_alt"),
+                            SalesOrderRecord.raw_data["Tags"].astext.label("raw_tags"),
+                            SalesOrderRecord.raw_data["tags"].astext.label("raw_tags_alt"),
+                            SalesOrderRecord.raw_data["MRP"].astext.label("raw_mrp"),
+                            SalesOrderRecord.raw_data["Maximum Retail Price"].astext.label("raw_mrp_alt"),
+                            SalesOrderRecord.raw_data["maxRetailPrice"].astext.label("raw_mrp_alt2"),
+                            SalesOrderRecord.raw_data["Cost Price"].astext.label("raw_cost"),
+                            SalesOrderRecord.raw_data["costPrice"].astext.label("raw_cost_alt"),
+                            SalesOrderRecord.raw_data["cost"].astext.label("raw_cost_alt2"),
+                            SalesOrderRecord.updated_at,
+                            SalesOrderRecord.id,
+                        )
+                        .join(latest_ids_subquery, SalesOrderRecord.id == latest_ids_subquery.c.latest_id)
+                        .all()
+                    )
+
+                    for meta_row in metadata_rows:
+                        sku_code = self._safe_str(meta_row.sku)
                         if not sku_code:
                             continue
-                        inventory_map[sku_code] = {
-                            "good_inventory": int(inventory_item.get("available_qty", 0) or 0),
-                            "virtual_inventory": int(inventory_item.get("reserved_qty", 0) or 0),
-                        }
 
+                        metadata = sku_metadata_map.setdefault(
+                            sku_code,
+                            {
+                                "name": "",
+                                "type": "",
+                                "tags": "",
+                                "mrp": Decimal("0"),
+                                "cost": Decimal("0"),
+                            },
+                        )
+
+                        raw_name = _meta_pick_text(
+                            meta_row,
+                            "raw_item_details",
+                            "raw_item_details_alt",
+                            "raw_item_type_name",
+                            "raw_item_type_name_alt",
+                            "raw_item_name",
+                            "raw_item_name_alt",
+                            "raw_name",
+                        )
+                        raw_type = _meta_pick_text(meta_row, "raw_type", "raw_type_alt", "raw_item_type", "raw_item_type_alt")
+                        raw_tags = _meta_pick_text(meta_row, "raw_tags", "raw_tags_alt")
+                        raw_mrp = self._safe_decimal(
+                            _meta_pick_text(meta_row, "raw_mrp", "raw_mrp_alt", "raw_mrp_alt2"),
+                            default=Decimal("0"),
+                        )
+                        raw_cost = self._safe_decimal(
+                            _meta_pick_text(meta_row, "raw_cost", "raw_cost_alt", "raw_cost_alt2"),
+                            default=Decimal("0"),
+                        )
+                        raw_selling = self._safe_decimal(meta_row.selling_price, default=Decimal("0"))
+
+                        candidate_name = raw_name or self._safe_str(meta_row.product_name)
+                        if not metadata["name"] and not _is_placeholder_item_name(candidate_name, sku_code):
+                            metadata["name"] = candidate_name
+                        if not metadata["type"] and raw_type:
+                            metadata["type"] = raw_type
+                        if not metadata["tags"] and raw_tags:
+                            metadata["tags"] = raw_tags
+                        if metadata["mrp"] <= 0 and raw_mrp > 0:
+                            metadata["mrp"] = raw_mrp
+                        if metadata["cost"] <= 0 and raw_cost > 0:
+                            metadata["cost"] = raw_cost
+
+                        if metadata["mrp"] <= 0 and raw_selling > 0:
+                            metadata["mrp"] = raw_selling
+                        if metadata["cost"] <= 0 and metadata["mrp"] > 0:
+                            metadata["cost"] = metadata["mrp"]
+
+                    unresolved_name_skus = {
+                        sku
+                        for sku in unique_skus
+                        if _is_placeholder_item_name(
+                            self._safe_str((sku_metadata_map.get(sku) or {}).get("name")),
+                            sku,
+                        )
+                    }
+
+                    if unresolved_name_skus:
+                        fallback_latest_ids_subquery = (
+                            db.query(
+                                SalesOrderRecord.sku.label("sku"),
+                                func.max(SalesOrderRecord.id).label("latest_id"),
+                            )
+                            .filter(SalesOrderRecord.sku.in_(list(unresolved_name_skus)))
+                            .group_by(SalesOrderRecord.sku)
+                            .subquery()
+                        )
+
+                        fallback_rows = (
+                            db.query(
+                                SalesOrderRecord.sku,
+                                SalesOrderRecord.product_name,
+                                SalesOrderRecord.selling_price,
+                                SalesOrderRecord.raw_data["Item Details"].astext.label("raw_item_details"),
+                                SalesOrderRecord.raw_data["itemDetails"].astext.label("raw_item_details_alt"),
+                                SalesOrderRecord.raw_data["Item Type Name"].astext.label("raw_item_type_name"),
+                                SalesOrderRecord.raw_data["itemTypeName"].astext.label("raw_item_type_name_alt"),
+                                SalesOrderRecord.raw_data["Item Name"].astext.label("raw_item_name"),
+                                SalesOrderRecord.raw_data["itemName"].astext.label("raw_item_name_alt"),
+                                SalesOrderRecord.raw_data["Name"].astext.label("raw_name"),
+                                SalesOrderRecord.raw_data["Type"].astext.label("raw_type"),
+                                SalesOrderRecord.raw_data["type"].astext.label("raw_type_alt"),
+                                SalesOrderRecord.raw_data["Item Type"].astext.label("raw_item_type"),
+                                SalesOrderRecord.raw_data["itemType"].astext.label("raw_item_type_alt"),
+                                SalesOrderRecord.raw_data["Tags"].astext.label("raw_tags"),
+                                SalesOrderRecord.raw_data["tags"].astext.label("raw_tags_alt"),
+                                SalesOrderRecord.raw_data["MRP"].astext.label("raw_mrp"),
+                                SalesOrderRecord.raw_data["Maximum Retail Price"].astext.label("raw_mrp_alt"),
+                                SalesOrderRecord.raw_data["maxRetailPrice"].astext.label("raw_mrp_alt2"),
+                                SalesOrderRecord.raw_data["Cost Price"].astext.label("raw_cost"),
+                                SalesOrderRecord.raw_data["costPrice"].astext.label("raw_cost_alt"),
+                                SalesOrderRecord.raw_data["cost"].astext.label("raw_cost_alt2"),
+                                SalesOrderRecord.updated_at,
+                                SalesOrderRecord.id,
+                            )
+                            .join(
+                                fallback_latest_ids_subquery,
+                                SalesOrderRecord.id == fallback_latest_ids_subquery.c.latest_id,
+                            )
+                            .all()
+                        )
+
+                        for meta_row in fallback_rows:
+                            sku_code = self._safe_str(meta_row.sku)
+                            if not sku_code:
+                                continue
+
+                            metadata = sku_metadata_map.setdefault(
+                                sku_code,
+                                {
+                                    "name": "",
+                                    "type": "",
+                                    "tags": "",
+                                    "mrp": Decimal("0"),
+                                    "cost": Decimal("0"),
+                                },
+                            )
+
+                            raw_name = _meta_pick_text(
+                                meta_row,
+                                "raw_item_details",
+                                "raw_item_details_alt",
+                                "raw_item_type_name",
+                                "raw_item_type_name_alt",
+                                "raw_item_name",
+                                "raw_item_name_alt",
+                                "raw_name",
+                            )
+                            raw_type = _meta_pick_text(meta_row, "raw_type", "raw_type_alt", "raw_item_type", "raw_item_type_alt")
+                            raw_tags = _meta_pick_text(meta_row, "raw_tags", "raw_tags_alt")
+                            raw_mrp = self._safe_decimal(
+                                _meta_pick_text(meta_row, "raw_mrp", "raw_mrp_alt", "raw_mrp_alt2"),
+                                default=Decimal("0"),
+                            )
+                            raw_cost = self._safe_decimal(
+                                _meta_pick_text(meta_row, "raw_cost", "raw_cost_alt", "raw_cost_alt2"),
+                                default=Decimal("0"),
+                            )
+                            raw_selling = self._safe_decimal(meta_row.selling_price, default=Decimal("0"))
+
+                            candidate_name = raw_name or self._safe_str(meta_row.product_name)
+                            if _is_placeholder_item_name(metadata.get("name"), sku_code) and not _is_placeholder_item_name(candidate_name, sku_code):
+                                metadata["name"] = candidate_name
+
+                            if not metadata["type"] and raw_type:
+                                metadata["type"] = raw_type
+                            if not metadata["tags"] and raw_tags:
+                                metadata["tags"] = raw_tags
+                            if metadata["mrp"] <= 0 and raw_mrp > 0:
+                                metadata["mrp"] = raw_mrp
+                            if metadata["cost"] <= 0 and raw_cost > 0:
+                                metadata["cost"] = raw_cost
+
+                            if metadata["mrp"] <= 0 and raw_selling > 0:
+                                metadata["mrp"] = raw_selling
+                            if metadata["cost"] <= 0 and metadata["mrp"] > 0:
+                                metadata["cost"] = metadata["mrp"]
+                finally:
+                    db.close()
+
+            self._emit_progress(progress_cb, 92, "Preparing final rows and totals…")
             for row in items:
                 row["net_sale"] = int(row.get("total_sale_qty", 0) or 0) - int(row.get("cancel_qty", 0) or 0) - int(row.get("return_qty", 0) or 0)
                 sale_amount = self._safe_decimal(row.get("sale_amount"), default=Decimal("0"))
@@ -2176,12 +2646,66 @@ class UnicommerceDataService:
                 row["return_amount"] = self._to_money_float(return_amount)
                 row["net_sale_amount"] = self._to_money_float(net_sale_amount)
 
+                sku_code = self._safe_str(row.get("item_sku_code"))
+                metadata = sku_metadata_map.get(sku_code, {})
+
+                current_name = self._safe_str(row.get("item_type_name"))
+                metadata_name = self._safe_str(metadata.get("name"))
+                preferred_name = self._safe_str(sku_preferred_name.get(sku_code))
+                sku_upper = sku_code.upper()
+                metadata_upper = metadata_name.upper()
+
+                if _is_placeholder_item_name(current_name, sku_code) and preferred_name and not _is_placeholder_item_name(preferred_name, sku_code):
+                    row["item_type_name"] = preferred_name
+                    current_name = preferred_name
+
+                # Replace missing or SKU-like names with Item Type Name resolved from sales raw data.
+                if _is_placeholder_item_name(current_name, sku_code) and metadata_name and (not sku_upper or metadata_upper != sku_upper):
+                    row["item_type_name"] = metadata_name
+
+                if _is_placeholder_item_name(self._safe_str(row.get("item_type_name")), sku_code):
+                    row["item_type_name"] = "UNKNOWN"
+
                 row["item_type_size"] = _derive_item_type_size(
                     self._safe_str(row.get("item_type_name")),
                     self._safe_str(row.get("size")),
                 )
+                row["style_name"] = _derive_style_name(
+                    self._safe_str(row.get("item_type_name")),
+                    self._safe_str(row.get("item_type_size")),
+                )
                 if not self._safe_str(row.get("size")) or self._safe_str(row.get("size")).upper() == "UNKNOWN":
                     row["size"] = self._safe_str(row.get("item_type_size"))
+
+                if self._safe_str(row.get("type")).upper() in {"", "UNKNOWN"}:
+                    row["type"] = self._safe_str(metadata.get("type")) or self._safe_str(row.get("style_name")) or "UNKNOWN"
+                if not self._safe_str(row.get("tags")):
+                    row["tags"] = self._safe_str(metadata.get("tags"))
+
+                current_mrp = self._safe_decimal(row.get("mrp"), default=Decimal("0"))
+                current_cost = self._safe_decimal(row.get("cost"), default=Decimal("0"))
+                meta_mrp = self._safe_decimal(metadata.get("mrp"), default=Decimal("0"))
+                meta_cost = self._safe_decimal(metadata.get("cost"), default=Decimal("0"))
+
+                sale_qty = int(row.get("total_sale_qty", 0) or 0)
+                per_unit_from_sales = (sale_amount / Decimal(sale_qty)) if sale_qty > 0 else Decimal("0")
+
+                if current_mrp <= 0:
+                    if meta_mrp > 0:
+                        current_mrp = meta_mrp
+                    elif per_unit_from_sales > 0:
+                        current_mrp = per_unit_from_sales
+                    elif current_cost > 0:
+                        current_mrp = current_cost
+
+                if current_cost <= 0:
+                    if meta_cost > 0:
+                        current_cost = meta_cost
+                    elif current_mrp > 0:
+                        current_cost = current_mrp
+
+                row["mrp"] = self._to_money_float(current_mrp)
+                row["cost"] = self._to_money_float(current_cost)
 
                 inv = inventory_map.get(self._safe_str(row.get("item_sku_code")), {})
                 row["stock_good"] = inv.get("good_inventory", 0)
@@ -2195,6 +2719,9 @@ class UnicommerceDataService:
                 )
             )
 
+            total_elapsed_seconds = (datetime.now(timezone.utc) - report_started_at).total_seconds()
+            self._emit_progress(progress_cb, 98, "Finalizing sales activity response…")
+
             return {
                 "success": True,
                 "from_date": str(from_date),
@@ -2204,6 +2731,14 @@ class UnicommerceDataService:
                 "data_source": result.get("data_source", "db_first"),
                 "fallback_used": bool(result.get("fallback_used")),
                 "last_synced_at": result.get("last_synced_at"),
+                "diagnostics": {
+                    "raw_orders_count": len(raw_orders),
+                    "unique_skus_count": len(unique_skus),
+                    "sales_fetch_seconds": round(sales_fetch_seconds, 2),
+                    "return_reconcile_seconds": round(return_reconcile_seconds, 2),
+                    "inventory_lookup_seconds": round(inventory_lookup_seconds, 2),
+                    "total_elapsed_seconds": round(total_elapsed_seconds, 2),
+                },
             }
         except ValueError as exc:
             return {

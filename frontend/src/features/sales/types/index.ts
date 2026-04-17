@@ -4,8 +4,13 @@ export type { Sale, Discount, PaginatedResponse } from '@/types';
 export interface SalesActivityRow {
   item_sku_code: string;
   item_type_name: string;
+  type?: string;
+  tags?: string;
   size: string;
   item_type_size?: string;
+  style_name?: string;
+  mrp?: number;
+  cost?: number;
   channel: string;
   total_sale_qty: number;
   cancel_qty: number;

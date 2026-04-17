@@ -145,7 +145,7 @@ export const unicommerceApi = {
     apiClient.get('/unicommerce-data/channel-revenue', { params: { period } }),
 
   // Sales Activity Report
-  getSalesActivity: (params: { from_date: string; to_date: string }) =>
+  getSalesActivity: (params: { from_date: string; to_date: string; progress_id?: string }) =>
     apiClient.get('/unicommerce-data/sales-activity', { params }),
 
   // SKU sales breakdown
