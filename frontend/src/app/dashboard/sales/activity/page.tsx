@@ -278,7 +278,10 @@ export default function SalesActivityPage() {
 
       {!loading && (
         <div className="card">
-          <DemoReportTable data={filteredData} selectedChannel={channelFilter} />
+          <DemoReportTable
+            data={filteredData}
+            selectedChannelLabel={channelFilter === 'ALL' ? 'All Channels' : channelFilter}
+          />
         </div>
       )}
 

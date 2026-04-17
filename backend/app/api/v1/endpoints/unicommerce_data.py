@@ -383,12 +383,31 @@ def get_report_progress(progress_id: str):
 def get_sales_activity_report(
     from_date: str = Query(..., description="YYYY-MM-DD"),
     to_date: str = Query(..., description="YYYY-MM-DD"),
+    progress_id: Optional[str] = Query(None, description="Client-generated progress tracker ID"),
 ):
+    cache_key = f"uc:sales-activity:{from_date}:{to_date}"
+    cached_payload = CacheService.get(cache_key)
+    if isinstance(cached_payload, dict):
+        _finish_report_progress(progress_id, success=bool(cached_payload.get("success", True)))
+        return cached_payload
+
     service = get_unicommerce_data_service()
-    return service.get_sales_activity_report(
+    progress_cb = _build_progress_callback(progress_id)
+    result = service.get_sales_activity_report(
         from_date=from_date,
         to_date=to_date,
+        progress_cb=progress_cb,
     )
+
+    if bool(result.get("success")):
+        CacheService.set(cache_key, result, ttl=CacheService.TTL_SHORT)
+
+    _finish_report_progress(
+        progress_id,
+        success=bool(result.get("success")),
+        error=result.get("error") if not result.get("success") else None,
+    )
+    return result
 
 
 @router.get("/best-skus-monthly")

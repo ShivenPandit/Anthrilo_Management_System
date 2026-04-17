@@ -6,8 +6,13 @@ import { ChevronUp, ChevronDown } from 'lucide-react';
 export interface SalesActivityRow {
   item_sku_code: string;
   item_type_name: string;
+  type?: string;
+  tags?: string;
   size: string;
   item_type_size?: string;
+  style_name?: string;
+  mrp?: number;
+  cost?: number;
   channel: string;
   total_sale_qty: number;
   cancel_qty: number;
@@ -191,8 +196,8 @@ export default function SizeWiseReportTable({ data }: Props) {
                 ? <span key={`e${i}`} className="px-1">…</span>
                 : <button key={p} onClick={() => setPage(p)}
                   className={`px-2.5 py-1 rounded-md border transition-colors ${p === page
-                      ? 'bg-primary-600 text-white border-primary-600'
-                      : 'border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    ? 'bg-primary-600 text-white border-primary-600'
+                    : 'border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800'
                     }`}>{p}</button>
             )}
           <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page >= totalPages}
