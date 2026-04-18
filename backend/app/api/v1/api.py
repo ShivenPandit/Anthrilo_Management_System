@@ -9,6 +9,7 @@ from app.api.v1.endpoints import (
 )
 from app.api.v1.endpoints import product_master
 from app.api.v1.endpoints import fabric_yarn_master
+from app.api.v1.endpoints import shopify_master_data
 # Unicommerce API modules
 from app.api.v1.endpoints import (
     uc_vendors, uc_grn, uc_catalog, uc_inventory,
@@ -62,6 +63,11 @@ api_router.include_router(
     fabric_yarn_master.router,
     prefix="/procurement/fabric-yarn-master",
     tags=["Fabric & Yarn Master"],
+)
+api_router.include_router(
+    shopify_master_data.router,
+    prefix="/shopify-master-data",
+    tags=["Shopify Master Data"],
 )
 
 # Manufacturing Module

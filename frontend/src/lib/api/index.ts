@@ -317,6 +317,18 @@ export const productMasterApi = {
   getFilterOptions: () => apiClient.get('/products/meta/filter-options'),
 };
 
+export const shopifyMasterDataApi = {
+  getAll: (params?: { skip?: number; limit?: number; search?: string }) =>
+    apiClient.get('/shopify-master-data', { params }),
+  import: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return apiClient.post('/shopify-master-data/import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+};
+
 // Garment Production
 
 export const garmentProductionApi = {

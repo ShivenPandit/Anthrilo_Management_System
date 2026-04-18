@@ -162,6 +162,20 @@ class InventorySnapshotRecord(Base):
     )
 
 
+class ShopifyMasterData(Base):
+    __tablename__ = "shopify_master_data"
+
+    id = Column(Integer, primary_key=True, index=True)
+    variant_sku = Column(String(120), nullable=False, unique=True, index=True)
+    title = Column(String(255), nullable=True, index=True)
+    type = Column(String(120), nullable=True, index=True)
+    tags = Column(Text, nullable=True)
+    option1_value = Column(String(120), nullable=True)
+    cost_per_item = Column(Numeric(12, 2), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 class SalesReturnRecord(Base):
     __tablename__ = "sales_returns"
 

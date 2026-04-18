@@ -16,6 +16,7 @@ from app.db.export_models import (
     ExportJob,
     ExportRow,
     InventorySnapshotRecord,
+    ShopifyMasterData,
     SalesOrderRecord,
     SalesReturnRecord,
 )
@@ -2117,6 +2118,7 @@ class UnicommerceDataService:
                     "style_name": "UNKNOWN",
                     "size": "",
                     "channel": "",
+                    "selling_price": Decimal("0"),
                     "mrp": Decimal("0"),
                     "cost": Decimal("0"),
                     "total_sale_qty": 0,
@@ -2161,6 +2163,8 @@ class UnicommerceDataService:
                     row["channel"] = channel
                     if self._safe_str(row.get("item_type_size")).upper() == "UNKNOWN":
                         row["item_type_size"] = item_type_size
+                    if self._safe_decimal(row.get("selling_price"), default=Decimal("0")) <= 0 and selling_price > 0:
+                        row["selling_price"] = selling_price
 
                     unit_mrp = self._safe_decimal(
                         self._pick(item, "maxRetailPrice", "MRP", "mrp"),
@@ -2219,6 +2223,27 @@ class UnicommerceDataService:
             self._emit_progress(progress_cb, 58, "Reconciling return quantities…")
             db = self._get_db()
             try:
+                return_date_text = func.nullif(SalesReturnRecord.raw_data["Date"].astext, "")
+                return_event_date = func.to_date(return_date_text, "DD-MM-YYYY")
+                return_event_filter = and_(
+                    return_event_date.isnot(None),
+                    return_event_date >= from_dt.date(),
+                    return_event_date <= to_dt.date(),
+                )
+                return_timestamp_fallback_filter = and_(
+                    return_event_date.is_(None),
+                    or_(
+                        and_(
+                            SalesReturnRecord.updated_at >= from_dt,
+                            SalesReturnRecord.updated_at <= to_dt,
+                        ),
+                        and_(
+                            SalesReturnRecord.created_at >= from_dt,
+                            SalesReturnRecord.created_at <= to_dt,
+                        ),
+                    ),
+                )
+
                 return_records = (
                     db.query(
                         SalesReturnRecord.order_id,
@@ -2240,18 +2265,7 @@ class UnicommerceDataService:
                         SalesReturnRecord.raw_data["refundAmount"].astext.label("raw_refund_amount"),
                         SalesReturnRecord.raw_data["Refund Amount"].astext.label("raw_refund_amount_alt"),
                     )
-                    .filter(
-                        or_(
-                            and_(
-                                SalesReturnRecord.updated_at >= from_dt,
-                                SalesReturnRecord.updated_at <= to_dt,
-                            ),
-                            and_(
-                                SalesReturnRecord.created_at >= from_dt,
-                                SalesReturnRecord.created_at <= to_dt,
-                            ),
-                        )
-                    )
+                    .filter(or_(return_event_filter, return_timestamp_fallback_filter))
                     .all()
                 )
             finally:
@@ -2401,9 +2415,35 @@ class UnicommerceDataService:
                 inventory_lookup_seconds = (datetime.now(timezone.utc) - inventory_lookup_started_at).total_seconds()
 
             sku_metadata_map: Dict[str, Dict[str, Any]] = {}
+            shopify_master_map: Dict[str, Dict[str, Any]] = {}
             if unique_skus:
                 db = self._get_db()
                 try:
+                    shopify_rows = (
+                        db.query(
+                            ShopifyMasterData.variant_sku,
+                            ShopifyMasterData.title,
+                            ShopifyMasterData.type,
+                            ShopifyMasterData.tags,
+                            ShopifyMasterData.option1_value,
+                            ShopifyMasterData.cost_per_item,
+                        )
+                        .filter(ShopifyMasterData.variant_sku.in_(unique_skus))
+                        .all()
+                    )
+
+                    for shopify_row in shopify_rows:
+                        sku_code = self._safe_str(shopify_row.variant_sku)
+                        if not sku_code:
+                            continue
+                        shopify_master_map[sku_code] = {
+                            "title": self._safe_str(shopify_row.title),
+                            "type": self._safe_str(shopify_row.type),
+                            "tags": self._safe_str(shopify_row.tags),
+                            "option1_value": self._safe_str(shopify_row.option1_value),
+                            "cost_per_item": self._safe_decimal(shopify_row.cost_per_item, default=Decimal("0")),
+                        }
+
                     def _meta_pick_text(meta_row: Any, *attrs: str) -> str:
                         for attr in attrs:
                             val = self._safe_str(getattr(meta_row, attr, ""))
@@ -2477,6 +2517,7 @@ class UnicommerceDataService:
                                 "name": "",
                                 "type": "",
                                 "tags": "",
+                                "selling_price": Decimal("0"),
                                 "mrp": Decimal("0"),
                                 "cost": Decimal("0"),
                             },
@@ -2511,6 +2552,8 @@ class UnicommerceDataService:
                             metadata["type"] = raw_type
                         if not metadata["tags"] and raw_tags:
                             metadata["tags"] = raw_tags
+                        if metadata["selling_price"] <= 0 and raw_selling > 0:
+                            metadata["selling_price"] = raw_selling
                         if metadata["mrp"] <= 0 and raw_mrp > 0:
                             metadata["mrp"] = raw_mrp
                         if metadata["cost"] <= 0 and raw_cost > 0:
@@ -2586,6 +2629,7 @@ class UnicommerceDataService:
                                     "name": "",
                                     "type": "",
                                     "tags": "",
+                                    "selling_price": Decimal("0"),
                                     "mrp": Decimal("0"),
                                     "cost": Decimal("0"),
                                 },
@@ -2621,6 +2665,8 @@ class UnicommerceDataService:
                                 metadata["type"] = raw_type
                             if not metadata["tags"] and raw_tags:
                                 metadata["tags"] = raw_tags
+                            if metadata["selling_price"] <= 0 and raw_selling > 0:
+                                metadata["selling_price"] = raw_selling
                             if metadata["mrp"] <= 0 and raw_mrp > 0:
                                 metadata["mrp"] = raw_mrp
                             if metadata["cost"] <= 0 and raw_cost > 0:
@@ -2648,6 +2694,7 @@ class UnicommerceDataService:
 
                 sku_code = self._safe_str(row.get("item_sku_code"))
                 metadata = sku_metadata_map.get(sku_code, {})
+                shopify_master = shopify_master_map.get(sku_code, {})
 
                 current_name = self._safe_str(row.get("item_type_name"))
                 metadata_name = self._safe_str(metadata.get("name"))
@@ -2666,6 +2713,11 @@ class UnicommerceDataService:
                 if _is_placeholder_item_name(self._safe_str(row.get("item_type_name")), sku_code):
                     row["item_type_name"] = "UNKNOWN"
 
+                if _is_placeholder_item_name(self._safe_str(row.get("item_type_name")), sku_code):
+                    shopify_title = self._safe_str(shopify_master.get("title"))
+                    if shopify_title and not _is_placeholder_item_name(shopify_title, sku_code):
+                        row["item_type_name"] = shopify_title
+
                 row["item_type_size"] = _derive_item_type_size(
                     self._safe_str(row.get("item_type_name")),
                     self._safe_str(row.get("size")),
@@ -2677,18 +2729,34 @@ class UnicommerceDataService:
                 if not self._safe_str(row.get("size")) or self._safe_str(row.get("size")).upper() == "UNKNOWN":
                     row["size"] = self._safe_str(row.get("item_type_size"))
 
-                if self._safe_str(row.get("type")).upper() in {"", "UNKNOWN"}:
-                    row["type"] = self._safe_str(metadata.get("type")) or self._safe_str(row.get("style_name")) or "UNKNOWN"
+                shopify_type = self._safe_str(shopify_master.get("type"))
+                if shopify_type:
+                    row["type"] = shopify_type
+                elif self._safe_str(row.get("type")).upper() in {"", "UNKNOWN"}:
+                    row["type"] = (
+                        self._safe_str(metadata.get("type"))
+                        or self._safe_str(row.get("style_name"))
+                        or "UNKNOWN"
+                    )
                 if not self._safe_str(row.get("tags")):
-                    row["tags"] = self._safe_str(metadata.get("tags"))
+                    row["tags"] = self._safe_str(shopify_master.get("tags")) or self._safe_str(metadata.get("tags"))
 
                 current_mrp = self._safe_decimal(row.get("mrp"), default=Decimal("0"))
                 current_cost = self._safe_decimal(row.get("cost"), default=Decimal("0"))
+                current_selling_price = self._safe_decimal(row.get("selling_price"), default=Decimal("0"))
+                meta_selling_price = self._safe_decimal(metadata.get("selling_price"), default=Decimal("0"))
                 meta_mrp = self._safe_decimal(metadata.get("mrp"), default=Decimal("0"))
                 meta_cost = self._safe_decimal(metadata.get("cost"), default=Decimal("0"))
+                shopify_cost = self._safe_decimal(shopify_master.get("cost_per_item"), default=Decimal("0"))
 
                 sale_qty = int(row.get("total_sale_qty", 0) or 0)
                 per_unit_from_sales = (sale_amount / Decimal(sale_qty)) if sale_qty > 0 else Decimal("0")
+
+                if current_selling_price <= 0:
+                    if per_unit_from_sales > 0:
+                        current_selling_price = per_unit_from_sales
+                    elif meta_selling_price > 0:
+                        current_selling_price = meta_selling_price
 
                 if current_mrp <= 0:
                     if meta_mrp > 0:
@@ -2698,12 +2766,22 @@ class UnicommerceDataService:
                     elif current_cost > 0:
                         current_mrp = current_cost
 
+                # Business requirement for this report: MRP and selling price must match.
+                # Use selling price as the primary display value, with MRP as fallback when needed.
+                display_price = current_selling_price if current_selling_price > 0 else current_mrp
+                if display_price > 0:
+                    current_selling_price = display_price
+                    current_mrp = display_price
+
                 if current_cost <= 0:
-                    if meta_cost > 0:
+                    if shopify_cost > 0:
+                        current_cost = shopify_cost
+                    elif meta_cost > 0:
                         current_cost = meta_cost
                     elif current_mrp > 0:
                         current_cost = current_mrp
 
+                row["selling_price"] = self._to_money_float(current_selling_price)
                 row["mrp"] = self._to_money_float(current_mrp)
                 row["cost"] = self._to_money_float(current_cost)
 
