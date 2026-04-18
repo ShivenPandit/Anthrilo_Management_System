@@ -94,6 +94,7 @@ export const NAVIGATION_ITEMS: NavItem[] = [
       { name: 'Transactions', href: '/dashboard/sales/transactions', icon: Receipt },
       { name: 'Panels', href: '/dashboard/sales/panels', icon: PieChart },
       { name: 'Sales Activity', href: '/dashboard/sales/activity', icon: BarChart3 },
+      { name: 'Shopify Master Data', href: '/dashboard/sales/shopify-master-data', icon: BookOpen },
       { name: 'COD vs Prepaid', href: '/dashboard/sales/cod-prepaid', icon: ShoppingCart },
       { name: 'Top Sellers', href: '/dashboard/sales/top-sellers', icon: TrendingUp },
     ],

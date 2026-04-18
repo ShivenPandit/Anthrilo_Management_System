@@ -80,6 +80,31 @@ function deriveStyleKey(itemTypeName: string, itemTypeSize: string): string {
     return name;
 }
 
+function normalizeSizeDisplay(value: unknown): string {
+    const raw = normalizeText(value);
+    if (!raw) return 'UNKNOWN';
+
+    const compact = raw.replace(/\s*-\s*/g, '-');
+    const parts = compact.split('-').map((p) => p.trim()).filter(Boolean);
+
+    if (parts.length >= 2) {
+        const head = parts[0];
+        const tail = parts.slice(1).join('-').trim();
+        const headHasDigit = /\d/.test(head);
+        const tailHasDigit = /\d/.test(tail);
+        if (!headHasDigit && tailHasDigit) {
+            return tail || raw;
+        }
+    }
+
+    return raw;
+}
+
+function escapeCsvCell(value: string): string {
+    const escaped = value.replace(/"/g, '""');
+    return /[",\n]/.test(escaped) ? `"${escaped}"` : escaped;
+}
+
 export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
     const [sortKey, setSortKey] = useState<SortKey>('item_sku_code');
     const [sortDir, setSortDir] = useState<SortDir>('asc');
@@ -93,7 +118,7 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
             const sku = normalizeText(row.item_sku_code) || 'UNKNOWN';
             const itemTypeName = normalizeText(row.item_type_name);
             const name = itemTypeName || 'UNKNOWN';
-            const size = normalizeText(row.item_type_size) || 'UNKNOWN';
+            const size = normalizeSizeDisplay(row.item_type_size || row.size) || 'UNKNOWN';
             const styleName = normalizeText((row as any).style_name);
             const titleGroupKey = !isPlaceholder(styleName)
                 ? styleName
@@ -141,7 +166,8 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
 
             const rowMrp = toNum((row as any).mrp);
             if (target.mrp <= 0 && rowMrp > 0) target.mrp = rowMrp;
-            target.cost = 0;
+            const rowCost = toNum((row as any).cost);
+            if (rowCost > 0) target.cost = rowCost;
             if (!target.tags) {
                 target.tags = String((row as any).tags || '').trim();
             }
@@ -211,7 +237,6 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
             row.net_sale_amount_style_wise = style.netAmount;
             row.good_inventory_style_wise = style.goodInv;
             row.virtual_inventory_style_wise = style.virtualInv;
-            row.cost = 0;
         }
 
         return sizeRows;
@@ -243,6 +268,40 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
         ] as Array<{ key: SortKey; label: string; numeric?: boolean }>,
         []
     );
+
+    const downloadCsv = () => {
+        const headers = columns.map((col) => col.label);
+        const moneyCols = new Set<SortKey>([
+            'net_sale_amount_size_wise',
+            'net_sale_amount_style_wise',
+            'mrp',
+            'cost',
+        ]);
+
+        const lines = [headers.map(escapeCsvCell).join(',')];
+        for (const row of sorted) {
+            const values = columns.map((col) => {
+                const raw = row[col.key];
+                if (raw === null || raw === undefined) return '';
+                if (typeof raw === 'number') {
+                    const formatted = moneyCols.has(col.key) ? toNum(raw).toFixed(2) : String(toNum(raw));
+                    return escapeCsvCell(formatted);
+                }
+                return escapeCsvCell(String(raw));
+            });
+            lines.push(values.join(','));
+        }
+
+        const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `sales-activity-report-${new Date().toISOString().slice(0, 10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    };
 
     const sorted = useMemo(() => {
         return [...rows].sort((a, b) => {
@@ -354,13 +413,22 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
 
     return (
         <div className="space-y-3">
-            <div className="flex flex-col gap-1">
-                <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">
-                    Demo Report <span className="text-primary-500">{'->'}</span>
-                </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                    Channel: {selectedChannelLabel} | Inventory shown from current snapshot
-                </p>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-col gap-1">
+                    <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">
+                        Demo Report <span className="text-primary-500">{'->'}</span>
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Channel: {selectedChannelLabel} | Inventory shown from current snapshot
+                    </p>
+                </div>
+                <button
+                    type="button"
+                    onClick={downloadCsv}
+                    className="px-3 py-2 rounded-lg text-xs font-medium bg-slate-900 text-white hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200"
+                >
+                    Download CSV
+                </button>
             </div>
 
             <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-700">

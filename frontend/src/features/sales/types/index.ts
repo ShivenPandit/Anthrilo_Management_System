@@ -6,6 +6,7 @@ export interface SalesActivityRow {
   item_type_name: string;
   type?: string;
   tags?: string;
+  selling_price?: number;
   size: string;
   item_type_size?: string;
   style_name?: string;
