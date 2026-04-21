@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
-import { Calendar, Search, FileBarChart } from 'lucide-react';
+import { Search, FileBarChart } from 'lucide-react';
 import DemoReportTable from '@/components/reports/DemoReportTable';
 import { ProgressLoader } from '@/components/ui/Common';
 import { unicommerceApi } from '@/features/sales/api';
@@ -63,9 +63,11 @@ export default function DemoSalesReportPage() {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [data, setData] = useState<SalesActivityRow[]>([]);
+    const [availableChannels, setAvailableChannels] = useState<string[]>([]);
     const [activeProgressId, setActiveProgressId] = useState<string | null>(null);
     const [backendPercent, setBackendPercent] = useState(0);
     const [backendLabel, setBackendLabel] = useState('');
+    const [reportMeta, setReportMeta] = useState<{ fromDate: string; toDate: string; generatedAt: string } | null>(null);
     const channelMenuRef = useRef<HTMLDivElement | null>(null);
 
     const progressStages = useMemo(() => ([
@@ -145,19 +147,59 @@ export default function DemoSalesReportPage() {
     }, [dateMode, anchorDate, fromDate, toDate]);
 
     const channels = useMemo(() => {
-        const set = new Set<string>();
+        const set = new Set<string>((availableChannels || []).map((ch) => String(ch || '').trim()).filter(Boolean));
         for (const row of data) {
             const channel = String(row.channel || '').trim();
             if (channel) set.add(channel);
         }
         return Array.from(set).sort((a, b) => a.localeCompare(b));
-    }, [data]);
+    }, [data, availableChannels]);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const loadChannels = async () => {
+            try {
+                const res = await unicommerceApi.getSalesActivityChannels({
+                    from_date: effectiveRange.fromDate,
+                    to_date: effectiveRange.toDate,
+                });
+                if (cancelled) return;
+
+                const rawChannels: unknown[] = Array.isArray(res.data?.channels)
+                    ? (res.data.channels as unknown[])
+                    : [];
+                const fetchedChannels: string[] = rawChannels
+                    .map((ch) => String(ch || '').trim())
+                    .filter((ch): ch is string => ch.length > 0);
+                setAvailableChannels(Array.from(new Set(fetchedChannels)).sort((a, b) => a.localeCompare(b)));
+            } catch {
+                if (!cancelled) {
+                    setAvailableChannels([]);
+                }
+            }
+        };
+
+        loadChannels();
+        return () => {
+            cancelled = true;
+        };
+    }, [effectiveRange.fromDate, effectiveRange.toDate]);
+
+    useEffect(() => {
+        setSelectedChannels((prev) => {
+            if (!prev.length || !channels.length) return prev;
+            const allowed = new Set(channels);
+            const next = prev.filter((ch) => allowed.has(ch));
+            return next.length === prev.length ? prev : next;
+        });
+    }, [channels]);
 
     const allChannelsSelected = selectedChannels.length === 0 || selectedChannels.length === channels.length;
     const channelSummary = allChannelsSelected
         ? 'All Channels'
-        : selectedChannels.length === 1
-            ? selectedChannels[0]
+        : selectedChannels.length <= 3
+            ? selectedChannels.join(', ')
             : `${selectedChannels.length} Channels Selected`;
 
     const filteredData = useMemo(() => {
@@ -226,14 +268,19 @@ export default function DemoSalesReportPage() {
             const res = await unicommerceApi.getSalesActivity({
                 from_date: effectiveRange.fromDate,
                 to_date: effectiveRange.toDate,
+                channels: allChannelsSelected ? undefined : selectedChannels,
                 progress_id: progressId,
             });
             const items = res.data?.items || [];
             setData(items);
-            setSelectedChannels([]);
             if (!items.length) {
                 setError('No data found for the selected range. Try a different date range.');
             }
+            setReportMeta({
+                fromDate: effectiveRange.fromDate,
+                toDate: effectiveRange.toDate,
+                generatedAt: new Date().toISOString(),
+            });
             setBackendPercent(100);
             setBackendLabel('Report ready');
         } catch (err: any) {
@@ -245,13 +292,14 @@ export default function DemoSalesReportPage() {
             setLoading(false);
             setActiveProgressId(null);
         }
-    }, [effectiveRange.fromDate, effectiveRange.toDate]);
+    }, [effectiveRange.fromDate, effectiveRange.toDate, allChannelsSelected, selectedChannels]);
 
     const handleToggleChannel = (channel: string) => {
         if (!channels.length) return;
 
         if (allChannelsSelected) {
-            setSelectedChannels(channels.filter((ch) => ch !== channel));
+            // When all channels are active by default, first click should select only that channel.
+            setSelectedChannels([channel]);
             return;
         }
 
@@ -273,7 +321,7 @@ export default function DemoSalesReportPage() {
                     <div className="p-2 rounded-xl bg-primary-50 dark:bg-primary-950/40">
                         <FileBarChart className="w-5 h-5 text-primary-600 dark:text-primary-400" />
                     </div>
-                    <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Demo Report</h1>
+                    <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Sales + Inventory + return combined report</h1>
                 </div>
                 <p className="text-sm text-slate-500 dark:text-slate-400 ml-12">
                     Sales activity report with size-wise and style-wise metrics in one combined table and current inventory snapshot.
@@ -301,21 +349,6 @@ export default function DemoSalesReportPage() {
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
-                    {dateMode !== 'custom' && (
-                        <div>
-                            <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1.5">Reference Date</label>
-                            <div className="relative">
-                                <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                                <input
-                                    type="date"
-                                    value={anchorDate}
-                                    onChange={(e) => setAnchorDate(e.target.value)}
-                                    className="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm"
-                                />
-                            </div>
-                        </div>
-                    )}
-
                     {dateMode === 'custom' && (
                         <>
                             <div>
@@ -415,7 +448,7 @@ export default function DemoSalesReportPage() {
 
                                 {!channels.length && (
                                     <div className="px-2 py-2 text-xs text-slate-500 dark:text-slate-400">
-                                        Generate report to load channels.
+                                        No channels found for selected date range.
                                     </div>
                                 )}
                             </div>
@@ -450,6 +483,9 @@ export default function DemoSalesReportPage() {
                 <DemoReportTable
                     data={filteredData}
                     selectedChannelLabel={channelSummary}
+                    reportFromDate={reportMeta?.fromDate}
+                    reportToDate={reportMeta?.toDate}
+                    generatedAt={reportMeta?.generatedAt}
                 />
             </div>
         </div>

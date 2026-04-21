@@ -6,6 +6,7 @@ import { ChevronUp, ChevronDown } from 'lucide-react';
 export interface SalesActivityRow {
   item_sku_code: string;
   item_type_name: string;
+  bundle_sku_code_number?: string;
   type?: string;
   tags?: string;
   selling_price?: number;

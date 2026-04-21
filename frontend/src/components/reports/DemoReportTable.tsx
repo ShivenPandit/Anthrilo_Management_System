@@ -7,31 +7,41 @@ import type { SalesActivityRow } from './SizeWiseReportTable';
 interface DemoReportRow {
     item_sku_code: string;
     name: string;
+    channel: string;
+    bundle_sku_code_number: string;
     type: string;
     title_group_key: string;
     tags: string;
     size: string;
     mrp: number;
     cost: number;
+    cost_blank: string;
     sale_size_wise: number;
     return_size_wise: number;
     cancelled_size_wise: number;
     net_sale_size_wise: number;
     net_sale_amount_size_wise: number;
+    asp_size_wise: number;
     sale_style_wise: number;
     return_style_wise: number;
     cancelled_style_wise: number;
     net_sale_style_wise: number;
     net_sale_amount_style_wise: number;
+    asp_style_wise: number;
     good_inventory_size_wise: number;
     good_inventory_style_wise: number;
     virtual_inventory_size_wise: number;
     virtual_inventory_style_wise: number;
+    total_inventory_size_wise: number;
+    total_inventory_style_wise: number;
 }
 
 interface Props {
     data: SalesActivityRow[];
     selectedChannelLabel: string;
+    reportFromDate?: string;
+    reportToDate?: string;
+    generatedAt?: string;
 }
 
 type SortKey = keyof DemoReportRow;
@@ -105,11 +115,24 @@ function escapeCsvCell(value: string): string {
     return /[",\n]/.test(escaped) ? `"${escaped}"` : escaped;
 }
 
-export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
+function formatGeneratedAt(value?: string): string {
+    if (!value) return '';
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    return parsed.toLocaleString('en-IN', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
+}
+
+export default function DemoReportTable({ data, selectedChannelLabel, reportFromDate, reportToDate, generatedAt }: Props) {
     const [sortKey, setSortKey] = useState<SortKey>('item_sku_code');
     const [sortDir, setSortDir] = useState<SortDir>('asc');
     const [page, setPage] = useState(1);
-    const PAGE_SIZE = 50;
+    const [pageSize, setPageSize] = useState<number>(20);
 
     const rows = useMemo(() => {
         const sizeMap: Record<string, DemoReportRow> = {};
@@ -118,6 +141,8 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
             const sku = normalizeText(row.item_sku_code) || 'UNKNOWN';
             const itemTypeName = normalizeText(row.item_type_name);
             const name = itemTypeName || 'UNKNOWN';
+            const channel = normalizeText((row as any).channel) || 'UNKNOWN';
+            const sizeKey = normalizeText((row as any).size) || normalizeText(row.item_type_size) || 'UNKNOWN';
             const size = normalizeSizeDisplay(row.item_type_size || row.size) || 'UNKNOWN';
             const styleName = normalizeText((row as any).style_name);
             const titleGroupKey = !isPlaceholder(styleName)
@@ -125,33 +150,40 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
                 : !isPlaceholder(name)
                     ? deriveStyleKey(name, size)
                     : 'UNKNOWN';
-            const key = `${sku}||${size}`;
+            const key = `${sku}||${sizeKey}||${channel}`;
 
             if (!sizeMap[key]) {
                 const mrp = toNum((row as any).mrp);
                 sizeMap[key] = {
                     item_sku_code: sku,
                     name,
+                    channel,
+                    bundle_sku_code_number: normalizeText((row as any).bundle_sku_code_number),
                     type: normalizeText((row as any).type) || 'UNKNOWN',
                     title_group_key: titleGroupKey,
                     tags: String((row as any).tags || '').trim(),
                     size,
                     mrp,
                     cost: 0,
+                    cost_blank: '',
                     sale_size_wise: 0,
                     return_size_wise: 0,
                     cancelled_size_wise: 0,
                     net_sale_size_wise: 0,
                     net_sale_amount_size_wise: 0,
+                    asp_size_wise: 0,
                     sale_style_wise: 0,
                     return_style_wise: 0,
                     cancelled_style_wise: 0,
                     net_sale_style_wise: 0,
                     net_sale_amount_style_wise: 0,
+                    asp_style_wise: 0,
                     good_inventory_size_wise: 0,
                     good_inventory_style_wise: 0,
                     virtual_inventory_size_wise: 0,
                     virtual_inventory_style_wise: 0,
+                    total_inventory_size_wise: 0,
+                    total_inventory_style_wise: 0,
                 };
             }
 
@@ -170,6 +202,9 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
             if (rowCost > 0) target.cost = rowCost;
             if (!target.tags) {
                 target.tags = String((row as any).tags || '').trim();
+            }
+            if (!target.bundle_sku_code_number) {
+                target.bundle_sku_code_number = normalizeText((row as any).bundle_sku_code_number);
             }
             if (!target.name || target.name === 'UNKNOWN') {
                 target.name = name;
@@ -200,7 +235,9 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
         const styleInventorySkuSeen: Record<string, Set<string>> = {};
 
         for (const row of sizeRows) {
-            const styleKey = row.title_group_key || 'UNKNOWN';
+            const styleName = row.title_group_key || 'UNKNOWN';
+            const rowChannel = row.channel || 'UNKNOWN';
+            const styleKey = `${styleName}||${rowChannel}`;
             if (!styleMap[styleKey]) {
                 styleMap[styleKey] = {
                     sale: 0,
@@ -229,7 +266,9 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
         }
 
         for (const row of sizeRows) {
-            const style = styleMap[row.title_group_key || 'UNKNOWN'];
+            const styleName = row.title_group_key || 'UNKNOWN';
+            const rowChannel = row.channel || 'UNKNOWN';
+            const style = styleMap[`${styleName}||${rowChannel}`];
             row.sale_style_wise = style.sale;
             row.return_style_wise = style.ret;
             row.cancelled_style_wise = style.cancelled;
@@ -237,6 +276,15 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
             row.net_sale_amount_style_wise = style.netAmount;
             row.good_inventory_style_wise = style.goodInv;
             row.virtual_inventory_style_wise = style.virtualInv;
+            row.total_inventory_size_wise = row.good_inventory_size_wise + row.virtual_inventory_size_wise;
+            row.total_inventory_style_wise = row.good_inventory_style_wise + row.virtual_inventory_style_wise;
+            row.asp_size_wise = row.net_sale_size_wise > 0
+                ? row.net_sale_amount_size_wise / row.net_sale_size_wise
+                : 0;
+            row.asp_style_wise = row.net_sale_style_wise > 0
+                ? row.net_sale_amount_style_wise / row.net_sale_style_wise
+                : 0;
+            row.cost_blank = '';
         }
 
         return sizeRows;
@@ -246,25 +294,32 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
         () => [
             { key: 'item_sku_code', label: 'Item SKU' },
             { key: 'name', label: 'Name' },
+            { key: 'channel', label: 'Channel' },
+            { key: 'bundle_sku_code_number', label: 'Bundle SKU Code Number' },
             { key: 'type', label: 'Type' },
             { key: 'tags', label: 'Tags' },
             { key: 'size', label: 'Size' },
-            { key: 'mrp', label: 'MRP', numeric: true },
-            { key: 'cost', label: 'COST', numeric: true },
+            { key: 'mrp', label: 'Selling Price', numeric: true },
+            { key: 'cost', label: 'MRP', numeric: true },
+            { key: 'cost_blank', label: 'COST' },
             { key: 'sale_size_wise', label: 'Sale (Size-wise)', numeric: true },
             { key: 'return_size_wise', label: 'Return (Size-wise)', numeric: true },
             { key: 'cancelled_size_wise', label: 'Cancelled (Size-wise)', numeric: true },
             { key: 'net_sale_size_wise', label: 'Net Sale (Size-wise)', numeric: true },
             { key: 'net_sale_amount_size_wise', label: 'Net Sale in Amount (Size-wise)', numeric: true },
+            { key: 'asp_size_wise', label: 'ASP (Size-wise)', numeric: true },
             { key: 'sale_style_wise', label: 'Sale (Style-wise)', numeric: true },
             { key: 'return_style_wise', label: 'Return (Style-wise)', numeric: true },
             { key: 'cancelled_style_wise', label: 'Cancelled (Style-wise)', numeric: true },
             { key: 'net_sale_style_wise', label: 'Net Sale (Style-wise)', numeric: true },
             { key: 'net_sale_amount_style_wise', label: 'Net Sale in Amount (Style-wise)', numeric: true },
+            { key: 'asp_style_wise', label: 'ASP (Style-wise)', numeric: true },
             { key: 'good_inventory_size_wise', label: 'Good Inventory (Size-wise)', numeric: true },
             { key: 'good_inventory_style_wise', label: 'Good Inventory (Style-wise)', numeric: true },
             { key: 'virtual_inventory_size_wise', label: 'Virtual Inventory (Size-wise)', numeric: true },
             { key: 'virtual_inventory_style_wise', label: 'Virtual Inventory (Style-wise)', numeric: true },
+            { key: 'total_inventory_size_wise', label: 'Total Inventory (Size-wise)', numeric: true },
+            { key: 'total_inventory_style_wise', label: 'Total Inventory (Style-wise)', numeric: true },
         ] as Array<{ key: SortKey; label: string; numeric?: boolean }>,
         []
     );
@@ -274,6 +329,8 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
         const moneyCols = new Set<SortKey>([
             'net_sale_amount_size_wise',
             'net_sale_amount_style_wise',
+            'asp_size_wise',
+            'asp_style_wise',
             'mrp',
             'cost',
         ]);
@@ -318,12 +375,21 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
         });
     }, [rows, sortKey, sortDir]);
 
-    const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
-    const paged = useMemo(() => sorted.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [sorted, page]);
+    const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
+    const paged = useMemo(
+        () => sorted.slice((page - 1) * pageSize, page * pageSize),
+        [sorted, page, pageSize]
+    );
 
     useEffect(() => {
         setPage(1);
-    }, [data, sortKey, sortDir]);
+    }, [data, sortKey, sortDir, pageSize]);
+
+    useEffect(() => {
+        if (page > totalPages) {
+            setPage(totalPages);
+        }
+    }, [page, totalPages]);
 
     const totals = useMemo(() => {
         let sale = 0;
@@ -355,8 +421,9 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
         const styleSeen = new Set<string>();
         for (const row of sorted) {
             const style = row.title_group_key || 'UNKNOWN';
-            if (styleSeen.has(style)) continue;
-            styleSeen.add(style);
+            const styleChannelKey = `${style}||${row.channel || 'UNKNOWN'}`;
+            if (styleSeen.has(styleChannelKey)) continue;
+            styleSeen.add(styleChannelKey);
             saleStyle += row.sale_style_wise;
             retStyle += row.return_style_wise;
             cancelledStyle += row.cancelled_style_wise;
@@ -366,21 +433,30 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
             virtualInvStyle += row.virtual_inventory_style_wise;
         }
 
+        const totalInvSize = goodInv + virtualInv;
+        const totalInvStyle = goodInvStyle + virtualInvStyle;
+        const aspSize = net > 0 ? netAmount / net : 0;
+        const aspStyle = netStyle > 0 ? netAmountStyle / netStyle : 0;
+
         return {
             saleSize: sale,
             retSize: ret,
             cancelledSize: cancelled,
             netSize: net,
             netAmountSize: netAmount,
+            aspSize,
             saleStyle,
             retStyle,
             cancelledStyle,
             netStyle,
             netAmountStyle,
+            aspStyle,
             goodInvSize: goodInv,
             goodInvStyle,
             virtualInvSize: virtualInv,
             virtualInvStyle,
+            totalInvSize,
+            totalInvStyle,
         };
     }, [sorted]);
 
@@ -398,11 +474,25 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
             <div className="space-y-3">
                 <div className="flex flex-col gap-1">
                     <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">
-                        Demo Report <span className="text-primary-500">{'->'}</span>
+                        Sales + Inventory + return combined report <span className="text-primary-500">{'->'}</span>
                     </h3>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
                         Channel: {selectedChannelLabel} | Inventory shown from current snapshot
                     </p>
+                    {(reportFromDate || reportToDate || generatedAt) && (
+                        <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-600 dark:text-slate-300">
+                            {(reportFromDate || reportToDate) && (
+                                <span className="px-2 py-1 rounded-full bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                                    Timeline: {reportFromDate || '-'} to {reportToDate || '-'}
+                                </span>
+                            )}
+                            {generatedAt && (
+                                <span className="px-2 py-1 rounded-full bg-primary-50 dark:bg-primary-950/40 border border-primary-200 dark:border-primary-800 text-primary-700 dark:text-primary-300">
+                                    Generated: {formatGeneratedAt(generatedAt)}
+                                </span>
+                            )}
+                        </div>
+                    )}
                 </div>
                 <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-6 text-sm text-slate-500 dark:text-slate-400 text-center">
                     No demo report rows yet. Select date/channel and click Generate Report.
@@ -416,11 +506,25 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex flex-col gap-1">
                     <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-100">
-                        Demo Report <span className="text-primary-500">{'->'}</span>
+                        Sales + Inventory + return combined report <span className="text-primary-500">{'->'}</span>
                     </h3>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
                         Channel: {selectedChannelLabel} | Inventory shown from current snapshot
                     </p>
+                    {(reportFromDate || reportToDate || generatedAt) && (
+                        <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-600 dark:text-slate-300">
+                            {(reportFromDate || reportToDate) && (
+                                <span className="px-2 py-1 rounded-full bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                                    Timeline: {reportFromDate || '-'} to {reportToDate || '-'}
+                                </span>
+                            )}
+                            {generatedAt && (
+                                <span className="px-2 py-1 rounded-full bg-primary-50 dark:bg-primary-950/40 border border-primary-200 dark:border-primary-800 text-primary-700 dark:text-primary-300">
+                                    Generated: {formatGeneratedAt(generatedAt)}
+                                </span>
+                            )}
+                        </div>
+                    )}
                 </div>
                 <button
                     type="button"
@@ -454,7 +558,7 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
 
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                         {paged.map((row) => (
-                            <tr key={`${row.item_sku_code}||${row.size}`} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/40 transition-colors">
+                            <tr key={`${row.item_sku_code}||${row.size}||${row.channel}`} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/40 transition-colors">
                                 {columns.map((col) => {
                                     const value = row[col.key];
                                     const numeric = !!col.numeric;
@@ -493,28 +597,45 @@ export default function DemoReportTable({ data, selectedChannelLabel }: Props) {
 
                     <tfoot>
                         <tr className="bg-slate-50 dark:bg-slate-800/80 font-semibold text-sm">
-                            <td className="px-4 py-3" colSpan={6}>Total</td>
+                            <td className="px-4 py-3" colSpan={10}>Total</td>
                             <td className="px-4 py-3 text-right">{totals.saleSize.toLocaleString('en-IN')}</td>
                             <td className="px-4 py-3 text-right">{totals.retSize.toLocaleString('en-IN')}</td>
                             <td className="px-4 py-3 text-right">{totals.cancelledSize.toLocaleString('en-IN')}</td>
                             <td className="px-4 py-3 text-right">{totals.netSize.toLocaleString('en-IN')}</td>
                             <td className="px-4 py-3 text-right">{formatCurrency(totals.netAmountSize)}</td>
+                            <td className="px-4 py-3 text-right">{formatCurrency(totals.aspSize)}</td>
                             <td className="px-4 py-3 text-right">{totals.saleStyle.toLocaleString('en-IN')}</td>
                             <td className="px-4 py-3 text-right">{totals.retStyle.toLocaleString('en-IN')}</td>
                             <td className="px-4 py-3 text-right">{totals.cancelledStyle.toLocaleString('en-IN')}</td>
                             <td className="px-4 py-3 text-right">{totals.netStyle.toLocaleString('en-IN')}</td>
                             <td className="px-4 py-3 text-right">{formatCurrency(totals.netAmountStyle)}</td>
+                            <td className="px-4 py-3 text-right">{formatCurrency(totals.aspStyle)}</td>
                             <td className="px-4 py-3 text-right">{totals.goodInvSize.toLocaleString('en-IN')}</td>
                             <td className="px-4 py-3 text-right">{totals.goodInvStyle.toLocaleString('en-IN')}</td>
                             <td className="px-4 py-3 text-right">{totals.virtualInvSize.toLocaleString('en-IN')}</td>
                             <td className="px-4 py-3 text-right">{totals.virtualInvStyle.toLocaleString('en-IN')}</td>
+                            <td className="px-4 py-3 text-right">{totals.totalInvSize.toLocaleString('en-IN')}</td>
+                            <td className="px-4 py-3 text-right">{totals.totalInvStyle.toLocaleString('en-IN')}</td>
                         </tr>
                     </tfoot>
                 </table>
             </div>
 
-            <div className="flex items-center justify-between mt-2 text-xs text-slate-500 dark:text-slate-400">
-                <span>{sorted.length} rows | Page {page} of {totalPages}</span>
+            <div className="flex flex-wrap items-center justify-between gap-2 mt-2 text-xs text-slate-500 dark:text-slate-400">
+                <div className="flex items-center gap-2">
+                    <span>{sorted.length} grouped rows (SKU+Size+Channel) | Page {page} of {totalPages}</span>
+                    <label className="inline-flex items-center gap-1">
+                        <span>Rows/Page</span>
+                        <select
+                            value={pageSize}
+                            onChange={(e) => setPageSize(Number(e.target.value) || 20)}
+                            className="px-1.5 py-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"
+                        >
+                            <option value={15}>15</option>
+                            <option value={20}>20</option>
+                        </select>
+                    </label>
+                </div>
                 <div className="flex items-center gap-1">
                     <button
                         onClick={() => setPage((p) => Math.max(1, p - 1))}

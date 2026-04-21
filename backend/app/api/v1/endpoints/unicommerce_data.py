@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
 from threading import Lock
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Query
 from fastapi.concurrency import run_in_threadpool
@@ -383,9 +383,12 @@ def get_report_progress(progress_id: str):
 def get_sales_activity_report(
     from_date: str = Query(..., description="YYYY-MM-DD"),
     to_date: str = Query(..., description="YYYY-MM-DD"),
+    channels: Optional[List[str]] = Query(None, description="Optional channel filters"),
     progress_id: Optional[str] = Query(None, description="Client-generated progress tracker ID"),
 ):
-    cache_key = f"uc:sales-activity:{from_date}:{to_date}"
+    normalized_channels = sorted({str(ch).strip().upper() for ch in (channels or []) if str(ch).strip()})
+    channel_key = "all" if not normalized_channels else ",".join(normalized_channels)
+    cache_key = f"uc:sales-activity:{from_date}:{to_date}:{channel_key}"
     cached_payload = CacheService.get(cache_key)
     if isinstance(cached_payload, dict):
         _finish_report_progress(progress_id, success=bool(cached_payload.get("success", True)))
@@ -396,6 +399,7 @@ def get_sales_activity_report(
     result = service.get_sales_activity_report(
         from_date=from_date,
         to_date=to_date,
+        channels=normalized_channels,
         progress_cb=progress_cb,
     )
 
@@ -407,6 +411,28 @@ def get_sales_activity_report(
         success=bool(result.get("success")),
         error=result.get("error") if not result.get("success") else None,
     )
+    return result
+
+
+@router.get("/sales-activity/channels")
+def get_sales_activity_channels(
+    from_date: str = Query(..., description="YYYY-MM-DD"),
+    to_date: str = Query(..., description="YYYY-MM-DD"),
+):
+    cache_key = f"uc:sales-activity:channels:{from_date}:{to_date}"
+    cached_payload = CacheService.get(cache_key)
+    if isinstance(cached_payload, dict):
+        return cached_payload
+
+    service = get_unicommerce_data_service()
+    result = service.get_sales_activity_channels(
+        from_date=from_date,
+        to_date=to_date,
+    )
+
+    if bool(result.get("success")):
+        CacheService.set(cache_key, result, ttl=CacheService.TTL_SHORT)
+
     return result
 
 

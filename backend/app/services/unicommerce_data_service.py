@@ -328,9 +328,11 @@ class UnicommerceDataService:
 
             order["items"].append(
                 {
+                    "code": self._safe_str(row.get("sale_order_item_code")),
                     "itemSku": sku,
                     "sku": sku,
                     "itemName": name,
+                    "bundle_sku_code_number": self._safe_str(row.get("bundle_sku_code_number")),
                     "sellingPrice": self._to_money_float(price),
                     "selling_price": self._to_money_float(price),
                     "quantity": qty,
@@ -408,7 +410,9 @@ class UnicommerceDataService:
                         "itemSku": self._safe_str(item.get("itemSku") or item.get("sku")),
                         "itemName": item_name,
                         "itemTypeName": item_name,
-                        "bundleSkuCodeNumber": "",
+                        "bundleSkuCodeNumber": self._safe_str(
+                            item.get("bundle_sku_code_number") or item.get("bundleSkuCodeNumber")
+                        ),
                         "quantity": quantity,
                         "sellingPrice": self._to_money_float(selling_price),
                         "maxRetailPrice": self._to_money_float(selling_price),
@@ -769,6 +773,7 @@ class UnicommerceDataService:
                 normalized_records = (
                     db.query(
                         SalesOrderRecord.order_id,
+                        SalesOrderRecord.sale_order_item_code,
                         SalesOrderRecord.status,
                         SalesOrderRecord.channel,
                         SalesOrderRecord.qty,
@@ -784,6 +789,9 @@ class UnicommerceDataService:
                         SalesOrderRecord.raw_data["Item Name"].astext.label("raw_item_name"),
                         SalesOrderRecord.raw_data["itemName"].astext.label("raw_item_name_alt"),
                         SalesOrderRecord.raw_data["Name"].astext.label("raw_name"),
+                        SalesOrderRecord.raw_data["Bundle SKU Code Number"].astext.label("raw_bundle_sku_code_number"),
+                        SalesOrderRecord.raw_data["bundleSkuCodeNumber"].astext.label("raw_bundle_sku_code_number_alt"),
+                        SalesOrderRecord.raw_data["Bundle SKU"].astext.label("raw_bundle_sku"),
                         SalesOrderRecord.raw_data["COD"].astext.label("raw_cod"),
                         SalesOrderRecord.raw_data["cod"].astext.label("raw_cod_alt"),
                         SalesOrderRecord.updated_at,
@@ -796,6 +804,7 @@ class UnicommerceDataService:
                     rows = [
                         {
                             "order_id": r.order_id,
+                            "sale_order_item_code": r.sale_order_item_code,
                             "status": r.status,
                             "channel": r.channel,
                             "qty": r.qty,
@@ -811,6 +820,11 @@ class UnicommerceDataService:
                                 or r.raw_item_name_alt
                                 or r.raw_name
                             ) or self._safe_str(r.product_name),
+                            "bundle_sku_code_number": self._safe_str(
+                                r.raw_bundle_sku_code_number
+                                or r.raw_bundle_sku_code_number_alt
+                                or r.raw_bundle_sku
+                            ),
                             "cod": self._safe_bool(r.raw_cod or r.raw_cod_alt, default=False),
                         }
                         for r in normalized_records
@@ -2013,6 +2027,7 @@ class UnicommerceDataService:
         self,
         from_date: str,
         to_date: str,
+        channels: Optional[List[str]] = None,
         progress_cb: Optional[Callable[[int, str], None]] = None,
     ) -> Dict[str, Any]:
         try:
@@ -2047,6 +2062,24 @@ class UnicommerceDataService:
                 return result
 
             raw_orders = list(result.get("_orders") or [])
+
+            def _normalize_channel_filter(value: str) -> str:
+                channel = (self._safe_str(value) or "UNKNOWN").upper()
+                channel = channel.replace("-", "_").replace(" ", "_")
+                while "__" in channel:
+                    channel = channel.replace("__", "_")
+                return channel
+
+            selected_channels_norm = {
+                _normalize_channel_filter(ch) for ch in (channels or []) if self._safe_str(ch)
+            }
+            if selected_channels_norm:
+                raw_orders = [
+                    order
+                    for order in raw_orders
+                    if _normalize_channel_filter(order.get("channel")) in selected_channels_norm
+                ]
+
             self._emit_progress(progress_cb, 40, "Aggregating SKU, channel and size rows…")
 
             def _norm_sku(v: str) -> str:
@@ -2063,7 +2096,6 @@ class UnicommerceDataService:
                 size_norm = self._safe_str(size)
                 if size_norm and size_norm.upper() != "UNKNOWN":
                     return size_norm
-
                 item_type_norm = self._safe_str(item_type_name)
                 if " - " in item_type_norm:
                     tail = self._safe_str(item_type_norm.rsplit(" - ", 1)[-1])
@@ -2112,6 +2144,7 @@ class UnicommerceDataService:
                 lambda: {
                     "item_sku_code": "",
                     "item_type_name": "",
+                    "bundle_sku_code_number": "",
                     "type": "UNKNOWN",
                     "tags": "",
                     "item_type_size": "UNKNOWN",
@@ -2137,6 +2170,9 @@ class UnicommerceDataService:
                 for item in list(order.get("saleOrderItems") or []):
                     sku = self._safe_str(item.get("itemSku"))
                     item_type = self._safe_str(item.get("itemTypeName") or item.get("itemName") or item.get("name"))
+                    bundle_sku_code_number = self._safe_str(
+                        item.get("bundleSkuCodeNumber") or item.get("bundle_sku_code_number")
+                    )
                     size = self._safe_str(item.get("size"))
                     qty = self._safe_int(item.get("quantity"), default=1)
                     if qty <= 0:
@@ -2157,6 +2193,8 @@ class UnicommerceDataService:
                     item_type_size = _derive_item_type_size(item_type, size)
                     item_type_style = _derive_style_name(item_type, item_type_size)
                     row["style_name"] = item_type_style
+                    if not self._safe_str(row.get("bundle_sku_code_number")) and bundle_sku_code_number:
+                        row["bundle_sku_code_number"] = bundle_sku_code_number
                     if self._safe_str(row.get("type")).upper() in {"", "UNKNOWN"}:
                         row["type"] = item_type_style
                     row["size"] = size
@@ -2195,10 +2233,27 @@ class UnicommerceDataService:
 
             norm_key_to_detail_keys: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = defaultdict(list)
             order_sku_to_detail_keys: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = defaultdict(list)
+            order_code_to_channels: Dict[str, set[str]] = defaultdict(set)
+            sku_to_channels: Dict[str, set[str]] = defaultdict(set)
+            sku_channel_qty_in_range: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+            def _pick_top_channel(channel_counts: Dict[str, int]) -> str:
+                ranked = sorted(
+                    [
+                        (self._safe_str(ch).upper(), int(cnt or 0))
+                        for ch, cnt in (channel_counts or {}).items()
+                        if self._safe_str(ch).upper() not in {"", "UNKNOWN"}
+                    ],
+                    key=lambda item: (-item[1], item[0]),
+                )
+                return ranked[0][0] if ranked else "UNKNOWN"
 
             for key in detail_map.keys():
                 sku_key, _, channel_key = key
-                norm_key_to_detail_keys[(_norm_sku(sku_key), _norm_channel(channel_key))].append(key)
+                norm_sku = _norm_sku(sku_key)
+                norm_channel = _norm_channel(channel_key)
+                norm_key_to_detail_keys[(norm_sku, norm_channel)].append(key)
+                sku_to_channels[norm_sku].add(norm_channel)
 
             for order in raw_orders:
                 order_code = self._safe_str(order.get("code"))
@@ -2207,13 +2262,22 @@ class UnicommerceDataService:
 
                 order_code_norm = order_code.upper()
                 order_channel = self._safe_str(order.get("channel")) or "UNKNOWN"
+                order_code_to_channels[order_code_norm].add(_norm_channel(order_channel))
 
                 for item in list(order.get("saleOrderItems") or []):
                     sku = self._safe_str(item.get("itemSku"))
                     size = self._safe_str(item.get("size"))
+                    qty = self._safe_int(item.get("quantity"), default=1)
+                    if qty <= 0:
+                        qty = 1
                     key = (sku, size, order_channel)
                     if key in detail_map:
                         order_sku_to_detail_keys[(order_code_norm, _norm_sku(sku))].append(key)
+
+                    norm_sku = _norm_sku(sku)
+                    norm_order_channel = _norm_channel(order_channel)
+                    if norm_sku and norm_order_channel != "UNKNOWN":
+                        sku_channel_qty_in_range[norm_sku][norm_order_channel] += qty
 
             return_map: Dict[Tuple[str, str], Dict[str, Any]] = defaultdict(
                 lambda: {"qty": 0, "amount": Decimal("0")}
@@ -2222,6 +2286,11 @@ class UnicommerceDataService:
             return_reconcile_started_at = datetime.now(timezone.utc)
             self._emit_progress(progress_cb, 58, "Reconciling return quantities…")
             db = self._get_db()
+            return_order_channel_map: Dict[str, set[str]] = defaultdict(set)
+            return_order_channel_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+            return_sku_channel_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+            sku_global_channel_pref: Dict[str, str] = {}
+            default_return_channel = "UNKNOWN"
             try:
                 return_date_text = func.nullif(SalesReturnRecord.raw_data["Date"].astext, "")
                 return_event_date = func.to_date(return_date_text, "DD-MM-YYYY")
@@ -2268,6 +2337,97 @@ class UnicommerceDataService:
                     .filter(or_(return_event_filter, return_timestamp_fallback_filter))
                     .all()
                 )
+
+                return_skus = set()
+                unknown_return_order_ids = set()
+                unknown_return_skus = set()
+                for row in return_records:
+                    row_order_code = self._safe_str(
+                        row.order_id
+                        or row.raw_sale_order_number
+                        or row.raw_sale_order_code
+                        or row.raw_sale_order_code_alt
+                    ).upper()
+                    row_sku = _norm_sku(
+                        self._safe_str(
+                            row.sku
+                            or row.raw_product_sku_code
+                            or row.raw_product_sku
+                            or row.raw_sku
+                        )
+                    )
+                    row_channel = _norm_channel(self._safe_str(row.raw_channel_name or row.raw_channel))
+                    row_qty = int(row.return_qty or 0)
+                    if row_qty <= 0:
+                        row_qty = self._safe_int(
+                            row.raw_qty
+                            or row.raw_qty_alt
+                            or row.raw_quantity,
+                            default=1,
+                        )
+                    if row_qty <= 0:
+                        row_qty = 1
+
+                    if row_sku:
+                        return_skus.add(row_sku)
+                    if row_channel != "UNKNOWN":
+                        if row_order_code:
+                            return_order_channel_counts[row_order_code][row_channel] += row_qty
+                        if row_sku:
+                            return_sku_channel_counts[row_sku][row_channel] += row_qty
+                    else:
+                        if row_order_code:
+                            unknown_return_order_ids.add(row_order_code)
+                        if row_sku:
+                            unknown_return_skus.add(row_sku)
+
+                return_order_ids = sorted(unknown_return_order_ids)
+                if return_order_ids:
+                    order_channel_rows = (
+                        db.query(
+                            SalesOrderRecord.order_id,
+                            SalesOrderRecord.channel,
+                        )
+                        .filter(SalesOrderRecord.order_id.in_(return_order_ids))
+                        .all()
+                    )
+                    for order_row in order_channel_rows:
+                        mapped_order_id = self._safe_str(order_row.order_id).upper()
+                        if mapped_order_id:
+                            return_order_channel_map[mapped_order_id].add(
+                                _norm_channel(order_row.channel)
+                            )
+
+                if unknown_return_skus:
+                    global_channel_rows = (
+                        db.query(
+                            SalesOrderRecord.sku,
+                            SalesOrderRecord.channel,
+                            func.count(SalesOrderRecord.id).label("row_count"),
+                        )
+                        .filter(SalesOrderRecord.sku.in_(sorted(unknown_return_skus)))
+                        .group_by(SalesOrderRecord.sku, SalesOrderRecord.channel)
+                        .all()
+                    )
+
+                    sku_global_channel_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+                    global_channel_counts: Dict[str, int] = defaultdict(int)
+                    for g_row in global_channel_rows:
+                        g_sku = _norm_sku(g_row.sku)
+                        g_channel = _norm_channel(g_row.channel)
+                        g_count = int(g_row.row_count or 0)
+                        if g_channel == "UNKNOWN" or g_count <= 0:
+                            continue
+                        if g_sku:
+                            sku_global_channel_counts[g_sku][g_channel] += g_count
+                        global_channel_counts[g_channel] += g_count
+
+                    for g_sku, counts in sku_global_channel_counts.items():
+                        top_channel = _pick_top_channel(counts)
+                        if top_channel != "UNKNOWN":
+                            sku_global_channel_pref[g_sku] = top_channel
+
+                    default_return_channel = _pick_top_channel(global_channel_counts)
             finally:
                 db.close()
 
@@ -2293,6 +2453,53 @@ class UnicommerceDataService:
                         or ret_record.raw_sku
                     )
                 )
+
+                # Returns feed often misses channel; infer only when unambiguous.
+                if ret_channel == "UNKNOWN":
+                    mapped_channels = return_order_channel_map.get(so_code_norm) or set()
+                    if len(mapped_channels) == 1:
+                        ret_channel = next(iter(mapped_channels))
+
+                if ret_channel == "UNKNOWN":
+                    order_return_counts = return_order_channel_counts.get(so_code_norm) or {}
+                    top_order_return_channel = _pick_top_channel(order_return_counts)
+                    if top_order_return_channel != "UNKNOWN":
+                        ret_channel = top_order_return_channel
+
+                if ret_channel == "UNKNOWN":
+                    order_channels = order_code_to_channels.get(so_code_norm) or set()
+                    if order_channels:
+                        in_range_counts = sku_channel_qty_in_range.get(sku) or {}
+                        filtered_counts = {
+                            ch: int(in_range_counts.get(ch, 0))
+                            for ch in order_channels
+                            if self._safe_str(ch).upper() != "UNKNOWN"
+                        }
+                        top_order_channel = _pick_top_channel(filtered_counts)
+                        if top_order_channel != "UNKNOWN":
+                            ret_channel = top_order_channel
+                        elif len(order_channels) == 1:
+                            ret_channel = next(iter(order_channels))
+                        else:
+                            ret_channel = sorted(order_channels)[0]
+
+                if ret_channel == "UNKNOWN":
+                    top_return_sku_channel = _pick_top_channel(return_sku_channel_counts.get(sku) or {})
+                    if top_return_sku_channel != "UNKNOWN":
+                        ret_channel = top_return_sku_channel
+
+                if ret_channel == "UNKNOWN":
+                    top_in_range_sku_channel = _pick_top_channel(sku_channel_qty_in_range.get(sku) or {})
+                    if top_in_range_sku_channel != "UNKNOWN":
+                        ret_channel = top_in_range_sku_channel
+
+                if ret_channel == "UNKNOWN":
+                    global_pref_channel = sku_global_channel_pref.get(sku) or "UNKNOWN"
+                    if global_pref_channel != "UNKNOWN":
+                        ret_channel = global_pref_channel
+
+                if ret_channel == "UNKNOWN" and default_return_channel != "UNKNOWN":
+                    ret_channel = default_return_channel
 
                 rqty = int(ret_record.return_qty or 0)
                 if rqty <= 0:
@@ -2351,9 +2558,35 @@ class UnicommerceDataService:
                 for (sku, channel), payload in return_map.items():
                     qty = int(payload.get("qty") or 0)
                     amount = self._safe_decimal(payload.get("amount"), default=Decimal("0"))
-                    matching_keys = norm_key_to_detail_keys.get((sku, channel), [])
+
+                    # If channel remains unknown, infer only for SKUs that map to a single channel.
+                    effective_channel = channel
+                    if effective_channel == "UNKNOWN":
+                        top_return_sku_channel = _pick_top_channel(return_sku_channel_counts.get(sku) or {})
+                        if top_return_sku_channel != "UNKNOWN":
+                            effective_channel = top_return_sku_channel
+
+                    if effective_channel == "UNKNOWN":
+                        top_in_range_sku_channel = _pick_top_channel(sku_channel_qty_in_range.get(sku) or {})
+                        if top_in_range_sku_channel != "UNKNOWN":
+                            effective_channel = top_in_range_sku_channel
+
+                    if effective_channel == "UNKNOWN":
+                        sku_channels = [ch for ch in (sku_to_channels.get(sku) or set()) if ch != "UNKNOWN"]
+                        if sku_channels:
+                            effective_channel = sorted(sku_channels)[0]
+
+                    if effective_channel == "UNKNOWN":
+                        global_pref_channel = sku_global_channel_pref.get(sku) or "UNKNOWN"
+                        if global_pref_channel != "UNKNOWN":
+                            effective_channel = global_pref_channel
+
+                    if effective_channel == "UNKNOWN" and default_return_channel != "UNKNOWN":
+                        effective_channel = default_return_channel
+
+                    matching_keys = norm_key_to_detail_keys.get((sku, effective_channel), [])
                     if not matching_keys:
-                        unknown_key = (sku, "UNKNOWN", channel)
+                        unknown_key = (sku, "UNKNOWN", effective_channel)
                         unknown_row = detail_map[unknown_key]
                         unknown_row["item_sku_code"] = sku
                         unknown_row["item_type_name"] = self._safe_str(unknown_row.get("item_type_name"))
@@ -2362,7 +2595,7 @@ class UnicommerceDataService:
                             self._safe_str(unknown_row.get("item_type_name")),
                             "UNKNOWN",
                         )
-                        unknown_row["channel"] = channel
+                        unknown_row["channel"] = effective_channel
                         unknown_row["return_qty"] += qty
                         unknown_row["return_amount"] += amount
                         continue
@@ -2376,7 +2609,7 @@ class UnicommerceDataService:
                     unknown_key = (
                         self._safe_str(sample_row.get("item_sku_code")) or sku,
                         "UNKNOWN",
-                        self._safe_str(sample_row.get("channel")) or channel,
+                        self._safe_str(sample_row.get("channel")) or effective_channel,
                     )
                     unknown_row = detail_map[unknown_key]
                     unknown_row["item_sku_code"] = self._safe_str(sample_row.get("item_sku_code")) or sku
@@ -2386,11 +2619,17 @@ class UnicommerceDataService:
                         self._safe_str(sample_row.get("item_type_name")),
                         "UNKNOWN",
                     )
-                    unknown_row["channel"] = self._safe_str(sample_row.get("channel")) or channel
+                    unknown_row["channel"] = self._safe_str(sample_row.get("channel")) or effective_channel
                     unknown_row["return_qty"] += qty
                     unknown_row["return_amount"] += amount
 
             items = list(detail_map.values())
+            if selected_channels_norm:
+                items = [
+                    rec for rec in items
+                    if _norm_channel(self._safe_str(rec.get("channel"))) in selected_channels_norm
+                ]
+
             sku_preferred_name: Dict[str, str] = {}
             for rec in items:
                 sku_code = self._safe_str(rec.get("item_sku_code"))
@@ -2826,6 +3065,71 @@ class UnicommerceDataService:
         except Exception as exc:
             return {
                 "success": False,
+                "error": str(exc),
+            }
+
+    def get_sales_activity_channels(self, from_date: str, to_date: str) -> Dict[str, Any]:
+        """Return distinct channel names for a sales activity date range."""
+        try:
+            ist = timezone(timedelta(hours=5, minutes=30))
+            from_dt = datetime.strptime(str(from_date), "%Y-%m-%d").replace(
+                hour=0,
+                minute=0,
+                second=0,
+                tzinfo=ist,
+            ).astimezone(timezone.utc)
+            to_dt = datetime.strptime(str(to_date), "%Y-%m-%d").replace(
+                hour=23,
+                minute=59,
+                second=59,
+                tzinfo=ist,
+            ).astimezone(timezone.utc)
+
+            db = self._get_db()
+            try:
+                date_filter = or_(
+                    and_(
+                        SalesOrderRecord.order_date.isnot(None),
+                        SalesOrderRecord.order_date >= from_dt,
+                        SalesOrderRecord.order_date <= to_dt,
+                    ),
+                    and_(
+                        SalesOrderRecord.order_date.is_(None),
+                        SalesOrderRecord.created_at >= from_dt,
+                        SalesOrderRecord.created_at <= to_dt,
+                    ),
+                )
+
+                rows = (
+                    db.query(SalesOrderRecord.channel)
+                    .filter(date_filter)
+                    .distinct()
+                    .all()
+                )
+            finally:
+                db.close()
+
+            channels = sorted(
+                {
+                    self._safe_str(row.channel)
+                    for row in rows
+                    if self._safe_str(row.channel)
+                }
+            )
+
+            return {
+                "success": True,
+                "from_date": from_date,
+                "to_date": to_date,
+                "channels": channels,
+            }
+        except Exception as exc:
+            logger.error("Error fetching sales activity channels: %s", exc, exc_info=True)
+            return {
+                "success": False,
+                "from_date": from_date,
+                "to_date": to_date,
+                "channels": [],
                 "error": str(exc),
             }
 
