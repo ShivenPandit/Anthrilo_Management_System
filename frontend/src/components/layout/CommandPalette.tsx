@@ -58,8 +58,8 @@ const BASE_SEARCH_ITEMS: SearchItem[] = [
   },
   {
     id: 'demo-report',
-    title: 'Demo Report',
-    description: 'Item Type Size demo report with size-wise metrics and inventory snapshot',
+    title: 'Sales + Inventory + return combined report',
+    description: 'Combined sales, returns and inventory report with channel and bundle SKU details',
     href: '/dashboard/sales/reports/demo',
     icon: FileText,
     category: 'Reports',

@@ -145,8 +145,24 @@ export const unicommerceApi = {
     apiClient.get('/unicommerce-data/channel-revenue', { params: { period } }),
 
   // Sales Activity Report
-  getSalesActivity: (params: { from_date: string; to_date: string; progress_id?: string }) =>
-    apiClient.get('/unicommerce-data/sales-activity', { params }),
+  getSalesActivity: (params: { from_date: string; to_date: string; channels?: string[]; progress_id?: string }) => {
+    const query = new URLSearchParams();
+    query.set('from_date', params.from_date);
+    query.set('to_date', params.to_date);
+    if (params.progress_id) {
+      query.set('progress_id', params.progress_id);
+    }
+    for (const channel of params.channels || []) {
+      if (channel) {
+        query.append('channels', channel);
+      }
+    }
+    return apiClient.get(`/unicommerce-data/sales-activity?${query.toString()}`);
+  },
+
+  // Sales Activity selectable channels for date range
+  getSalesActivityChannels: (params: { from_date: string; to_date: string }) =>
+    apiClient.get('/unicommerce-data/sales-activity/channels', { params }),
 
   // SKU sales breakdown
   getSalesBySku: (params: { period: string; from_date?: string; to_date?: string }) =>

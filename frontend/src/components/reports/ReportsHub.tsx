@@ -138,8 +138,8 @@ const REPORTS: ReportDef[] = [
   },
   {
     id: 'demo-report',
-    title: 'Demo Report',
-    description: 'Business-ready Item Type Size report with sale/return/cancel/net and current inventory',
+    title: 'Sales + Inventory + return combined report',
+    description: 'Combined sales, returns and inventory report with channel and bundle SKU details',
     href: '/dashboard/sales/reports/demo',
     icon: FileText,
     category: 'Sales',

@@ -177,12 +177,14 @@ export function ProgressLoader({
           transition={{ duration: 0.4, ease: 'easeOut' }}
         />
       </div>
-      <div className="space-y-2 pt-1">
-        {Array.from({ length: skeletonRows }).map((_, i) => (
-          <div key={i} className="h-8 bg-slate-100 dark:bg-slate-800/60 rounded animate-pulse"
-            style={{ opacity: 1 - i * 0.14 }} />
-        ))}
-      </div>
+      {loading && skeletonRows > 0 && (
+        <div className="space-y-2 pt-1">
+          {Array.from({ length: skeletonRows }).map((_, i) => (
+            <div key={i} className="h-8 bg-slate-100 dark:bg-slate-800/60 rounded animate-pulse"
+              style={{ opacity: 1 - i * 0.14 }} />
+          ))}
+        </div>
+      )}
     </motion.div>
   );
 }
