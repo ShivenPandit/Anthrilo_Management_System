@@ -34,30 +34,58 @@ export default function SalesTransactionsPage() {
   const [search, setSearch] = useState('');
   const [paymentFilter, setPaymentFilter] = useState('all');
   const [channelFilter, setChannelFilter] = useState('');
-  const [customFrom, setCustomFrom] = useState('');
-  const [customTo, setCustomTo] = useState('');
-
-  /* Summary (today + 7 days) */
-  const { data: summaryData, isLoading: loadingSummary } = useQuery({
-    queryKey: ['unicommerce-today'],
-    queryFn: async () => (await ucSales.getToday()).data,
-    staleTime: 2 * 60_000,
+  const [customFrom, setCustomFrom] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 7);
+    return d.toISOString().split('T')[0];
   });
-  const { data: weekData, isLoading: loadingWeek } = useQuery({
-    queryKey: ['unicommerce-last-7-days'],
-    queryFn: async () => (await ucSales.getLast7Days()).data,
-    staleTime: 5 * 60_000,
+  const [customTo, setCustomTo] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return d.toISOString().split('T')[0];
+  });
+  const [appliedCustomFrom, setAppliedCustomFrom] = useState('');
+  const [appliedCustomTo, setAppliedCustomTo] = useState('');
+
+  const customRangeValid = !!customFrom && !!customTo && customFrom <= customTo;
+  const customRangeApplied = period !== 'custom' || (!!appliedCustomFrom && !!appliedCustomTo);
+  const customRangeDirty = customFrom !== appliedCustomFrom || customTo !== appliedCustomTo;
+
+  /* Summary aligned to selected period */
+  const { data: selectedSummaryData, isLoading: loadingSummary } = useQuery({
+    queryKey: ['uc-transactions-summary', period, appliedCustomFrom, appliedCustomTo],
+    queryFn: async () => {
+      if (period === 'custom') {
+        return (await ucSales.getSalesReport({
+          period: 'custom',
+          from_date: appliedCustomFrom,
+          to_date: appliedCustomTo,
+        })).data;
+      }
+
+      const fn = period === 'today' ? ucSales.getToday : ucSales.getYesterday;
+      return (await fn()).data;
+    },
+    enabled: customRangeApplied,
+    staleTime: 2 * 60_000,
   });
 
   /* Orders (paginated) */
   const { data: ordersData, isLoading, error, isFetching } = useQuery({
-    queryKey: ['uc-transactions', period, page, customFrom, customTo],
+    queryKey: ['uc-transactions', period, page, appliedCustomFrom, appliedCustomTo],
     queryFn: async () => {
-      if (period === 'custom' && customFrom && customTo)
-        return (await ucSales.getOrders({ period: 'custom', from_date: customFrom, to_date: customTo, page, page_size: 100 })).data;
+      if (period === 'custom') {
+        return (await ucSales.getOrders({
+          period: 'custom',
+          from_date: appliedCustomFrom,
+          to_date: appliedCustomTo,
+          page,
+          page_size: 100,
+        })).data;
+      }
       return (await ucSales.getOrders({ period, page, page_size: 100 })).data;
     },
-    enabled: period !== 'custom' || (!!customFrom && !!customTo),
+    enabled: customRangeApplied,
     staleTime: 60_000,
     placeholderData: (prev: any) => prev,
   });
@@ -94,8 +122,7 @@ export default function SalesTransactionsPage() {
   const safePage = Math.min(page, totalPages);
   const paginated = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
-  const todayS = summaryData?.summary || {};
-  const weekS = weekData?.summary || {};
+  const selectedS = selectedSummaryData?.summary || {};
 
   /* quick stats from current filtered data */
   const filteredRevenue = useMemo(() => filtered.reduce((s, r) => s + (r.price || 0), 0), [filtered]);
@@ -137,13 +164,32 @@ export default function SalesTransactionsPage() {
         <div className="rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 p-4 shadow-sm">
           <div className="flex gap-3 items-center flex-wrap">
             <span className="text-sm text-slate-500 dark:text-slate-400">From</span>
-            <input type="date" value={customFrom} onChange={(e) => { setCustomFrom(e.target.value); setPage(1); }}
+            <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)}
               max={new Date().toISOString().split('T')[0]}
               className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/40 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500/40" />
             <span className="text-sm text-slate-500 dark:text-slate-400">to</span>
-            <input type="date" value={customTo} onChange={(e) => { setCustomTo(e.target.value); setPage(1); }}
+            <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)}
               max={new Date().toISOString().split('T')[0]}
               className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50 dark:bg-slate-700/40 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500/40" />
+            <button
+              type="button"
+              onClick={() => {
+                if (!customRangeValid) return;
+                setAppliedCustomFrom(customFrom);
+                setAppliedCustomTo(customTo);
+                setPage(1);
+              }}
+              disabled={!customRangeValid || !customRangeDirty}
+              className="px-3 py-1.5 rounded-lg text-sm font-medium bg-blue-600 text-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-blue-700 transition-colors"
+            >
+              Fetch Data
+            </button>
+            {!customRangeApplied && (
+              <span className="text-xs text-amber-600 dark:text-amber-300">Choose dates and click Fetch Data.</span>
+            )}
+            {customRangeApplied && customRangeDirty && (
+              <span className="text-xs text-slate-500 dark:text-slate-400">Date changed. Click Fetch Data to refresh.</span>
+            )}
           </div>
         </div>
       )}
@@ -151,10 +197,10 @@ export default function SalesTransactionsPage() {
       {/* KPI cards */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
         {([
-          { label: "Today's Orders", value: todayS.total_orders, loading: loadingSummary, icon: '🛒', gradient: 'from-blue-500 to-blue-600' },
-          { label: "Today's Revenue", value: todayS.total_revenue, loading: loadingSummary, icon: '💰', gradient: 'from-emerald-500 to-emerald-600', isCur: true },
-          { label: '7-Day Orders', value: weekS.total_orders, loading: loadingWeek, icon: '📊', gradient: 'from-violet-500 to-violet-600' },
-          { label: '7-Day Revenue', value: weekS.total_revenue, loading: loadingWeek, icon: '💵', gradient: 'from-green-500 to-green-600', isCur: true },
+          { label: 'Revenue Orders', value: selectedS.valid_orders ?? selectedS.total_orders, loading: loadingSummary, icon: '🛒', gradient: 'from-blue-500 to-blue-600' },
+          { label: 'All Orders', value: selectedS.total_orders, loading: loadingSummary, icon: '📊', gradient: 'from-violet-500 to-violet-600' },
+          { label: 'Selected Revenue', value: selectedS.total_revenue, loading: loadingSummary, icon: '💰', gradient: 'from-emerald-500 to-emerald-600', isCur: true },
+          { label: 'Items Sold', value: selectedS.total_items, loading: loadingSummary, icon: '📦', gradient: 'from-indigo-500 to-indigo-600' },
           { label: 'Filtered Revenue', value: filteredRevenue, loading: false, icon: '🔍', gradient: 'from-amber-500 to-amber-600', isCur: true },
           { label: 'Items Shown', value: filtered.length, loading: false, icon: '📋', gradient: 'from-rose-500 to-rose-600' },
         ] as const).map((c) => (

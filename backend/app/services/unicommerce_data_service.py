@@ -1039,8 +1039,9 @@ class UnicommerceDataService:
             normalized_records = (
                 db.query(SalesReturnRecord)
                 .filter(
-                    SalesReturnRecord.updated_at >= (from_date - timedelta(days=45)),
-                    SalesReturnRecord.updated_at <= (to_date + timedelta(days=1)),
+                    SalesReturnRecord.updated_at >= from_date,
+                    SalesReturnRecord.updated_at <= to_date,
+                    #SalesReturnRecord.updated_at <= (to_date + timedelta(days=1)),
                 )
                 .all()
             )
@@ -4614,11 +4615,15 @@ class UnicommerceDataService:
         db = self._get_db()
         try:
             normalized_records = (
-                db.query(SalesOrderRecord)
-                .filter(SalesOrderRecord.order_id == code)
-                .order_by(SalesOrderRecord.order_date.desc(), SalesOrderRecord.id.desc())
-                .all()
-            )
+                db.query(SalesReturnRecord)
+                .filter(
+                        SalesReturnRecord.updated_at >= from_date,
+                        SalesReturnRecord.updated_at <= to_date,
+                     )
+                    .order_by(SalesReturnRecord.updated_at.desc())
+                    .limit(5000)
+                    .all()
+)
 
             if normalized_records:
                 order_dto = self._order_detail_from_normalized_rows(code, normalized_records)

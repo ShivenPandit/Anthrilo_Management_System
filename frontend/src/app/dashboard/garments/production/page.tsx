@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { ucSales } from '@/features/sales/api';
 
 const PAGE_SIZE = 15;
+type OrdersPeriod = 'today' | 'yesterday' | 'last_7_days' | 'last_30_days' | 'last_month';
 
 /* helpers */
 const fmt = (v: number) =>
@@ -35,15 +36,43 @@ const statusStyle: Record<string, { bg: string; dot: string }> = {
 };
 const defaultStatus = { bg: 'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300', dot: 'bg-slate-400' };
 
+const getLastMonthRange = () => {
+  const now = new Date();
+  const firstOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const monthStart = new Date(firstOfCurrentMonth.getFullYear(), firstOfCurrentMonth.getMonth() - 1, 1);
+  const monthEnd = new Date(firstOfCurrentMonth.getFullYear(), firstOfCurrentMonth.getMonth(), 0);
+
+  const toYmd = (d: Date) => {
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  return {
+    from: toYmd(monthStart),
+    to: toYmd(monthEnd),
+  };
+};
+
 export default function OrdersPage() {
-  const [period, setPeriod] = useState('today');
+  const [period, setPeriod] = useState<OrdersPeriod>('today');
   const [page, setPage] = useState(1);
   const [channelFilter, setChannelFilter] = useState<string | null>(null);
+  const lastMonthRange = useMemo(() => getLastMonthRange(), []);
 
   /* Summary data (includes channel_breakdown, status_breakdown) */
   const { data: summaryRaw, isLoading: summaryLoading } = useQuery({
-    queryKey: ['uc-orders-summary', period],
+    queryKey: ['uc-orders-summary', period, lastMonthRange.from, lastMonthRange.to],
     queryFn: async () => {
+      if (period === 'last_month') {
+        return (await ucSales.getSalesReport({
+          period: 'custom',
+          from_date: lastMonthRange.from,
+          to_date: lastMonthRange.to,
+        })).data;
+      }
+
       const fn = period === 'today' ? ucSales.getToday
         : period === 'yesterday' ? ucSales.getYesterday
           : period === 'last_7_days' ? ucSales.getLast7Days
@@ -65,6 +94,7 @@ export default function OrdersPage() {
   }, [summary]);
 
   const totalRevenue = summary.total_revenue || 0;
+  const revenueOrders = summary.valid_orders ?? summary.total_orders ?? 0;
 
   /* statuses from status_breakdown */
   const statuses = useMemo(() => {
@@ -76,8 +106,19 @@ export default function OrdersPage() {
 
   /* Paginated Orders */
   const { data: ordersData, isLoading, error, isFetching } = useQuery({
-    queryKey: ['uc-orders-page', period, page],
-    queryFn: async () => (await ucSales.getOrders({ period, page, page_size: PAGE_SIZE })).data,
+    queryKey: ['uc-orders-page', period, page, lastMonthRange.from, lastMonthRange.to],
+    queryFn: async () => {
+      if (period === 'last_month') {
+        return (await ucSales.getOrders({
+          period: 'custom',
+          from_date: lastMonthRange.from,
+          to_date: lastMonthRange.to,
+          page,
+          page_size: PAGE_SIZE,
+        })).data;
+      }
+      return (await ucSales.getOrders({ period, page, page_size: PAGE_SIZE })).data;
+    },
     staleTime: 60_000,
     placeholderData: (prev: any) => prev,
   });
@@ -122,9 +163,12 @@ export default function OrdersPage() {
         <div>
           <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Orders &amp; Channels</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-            {summary.total_orders != null
-              ? `${summary.total_orders.toLocaleString()} orders · ${fmt(totalRevenue)} revenue · ${channels.length} channels`
+            {revenueOrders != null
+              ? `${Number(revenueOrders).toLocaleString()} revenue orders · ${fmt(totalRevenue)} revenue · ${channels.length} channels`
               : 'Loading…'}
+          </p>
+          <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
+            30-day view is rolling last 30 complete days. Use Last Month to match month-wise reports.
           </p>
         </div>
         <div className="flex gap-1.5 bg-slate-100 dark:bg-slate-700/60 rounded-xl p-1 self-start">
@@ -132,8 +176,9 @@ export default function OrdersPage() {
             { key: 'today', label: 'Today' },
             { key: 'yesterday', label: 'Yesterday' },
             { key: 'last_7_days', label: '7 Days' },
-            { key: 'last_30_days', label: '30 Days' },
-          ]).map((p) => (
+            { key: 'last_30_days', label: 'Last 30 Days' },
+            { key: 'last_month', label: 'Last Month' },
+          ] as Array<{ key: OrdersPeriod; label: string }>).map((p) => (
             <button key={p.key} onClick={() => { setPeriod(p.key); setPage(1); setChannelFilter(null); }}
               className={`px-3.5 py-1.5 rounded-lg text-sm font-medium transition-all ${period === p.key
                   ? 'bg-white dark:bg-slate-600 text-slate-900 dark:text-white shadow-sm'
@@ -148,7 +193,7 @@ export default function OrdersPage() {
       {/* KPI cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         {([
-          { label: 'Total Orders', value: summary.total_orders, icon: '🛒', gradient: 'from-blue-500 to-blue-600', suffix: '' },
+          { label: 'Revenue Orders', value: revenueOrders, icon: '🛒', gradient: 'from-blue-500 to-blue-600', suffix: '' },
           { label: 'Revenue', value: totalRevenue, icon: '💰', gradient: 'from-emerald-500 to-emerald-600', fmt: true },
           { label: 'Avg Order', value: summary.avg_order_value, icon: '📊', gradient: 'from-violet-500 to-violet-600', fmt: true },
           { label: 'Channels', value: channels.length, icon: '🏪', gradient: 'from-amber-500 to-amber-600', suffix: '' },
