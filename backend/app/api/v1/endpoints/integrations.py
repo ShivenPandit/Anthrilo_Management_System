@@ -260,11 +260,11 @@ async def get_custom_orders_paginated(
     """Get orders for custom date range with pagination."""
     try:
         from_dt = datetime.strptime(from_date, "%Y-%m-%d").replace(
-            hour=0, minute=0, second=0, tzinfo=timezone.utc
-        )
+            hour=0, minute=0, second=0, tzinfo=IST
+        ).astimezone(timezone.utc)
         to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(
-            hour=23, minute=59, second=59, tzinfo=timezone.utc
-        )
+            hour=23, minute=59, second=59, tzinfo=IST
+        ).astimezone(timezone.utc)
 
         data_service = get_unicommerce_data_service()
         return data_service.get_orders_paginated(
@@ -310,11 +310,11 @@ async def get_sales_report(
             result = data_service.get_sales_data(period="last_7_days")
         elif period == "custom" and from_date and to_date:
             from_dt = datetime.strptime(from_date, "%Y-%m-%d").replace(
-                hour=0, minute=0, second=0, tzinfo=timezone.utc
-            )
+                hour=0, minute=0, second=0, tzinfo=IST
+            ).astimezone(timezone.utc)
             to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(
-                hour=23, minute=59, second=59, tzinfo=timezone.utc
-            )
+                hour=23, minute=59, second=59, tzinfo=IST
+            ).astimezone(timezone.utc)
             result = data_service.get_sales_data(
                 period="custom",
                 from_date=from_dt,
@@ -369,11 +369,11 @@ async def get_daily_sales_report(
 
         if is_range:
             from_dt = datetime.strptime(from_date, "%Y-%m-%d").replace(
-                hour=0, minute=0, second=0, tzinfo=timezone.utc
-            )
+                hour=0, minute=0, second=0, tzinfo=IST
+            ).astimezone(timezone.utc)
             to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(
-                hour=23, minute=59, second=59, tzinfo=timezone.utc
-            )
+                hour=23, minute=59, second=59, tzinfo=IST
+            ).astimezone(timezone.utc)
             result = data_service.get_sales_data(
                 period="custom",
                 from_date=from_dt,
@@ -383,7 +383,7 @@ async def get_daily_sales_report(
         else:
             # Single date mode (existing logic)
             report_date = datetime.strptime(date, "%Y-%m-%d").date()
-            today = datetime.now(timezone.utc).date()
+            today = datetime.now(IST).date()
             yesterday = today - timedelta(days=1)
 
             result = None
@@ -393,11 +393,11 @@ async def get_daily_sales_report(
                 result = data_service.get_sales_data(period="yesterday")
             else:
                 from_dt = datetime.strptime(date, "%Y-%m-%d").replace(
-                    hour=0, minute=0, second=0, tzinfo=timezone.utc
-                )
+                    hour=0, minute=0, second=0, tzinfo=IST
+                ).astimezone(timezone.utc)
                 to_dt = datetime.strptime(date, "%Y-%m-%d").replace(
-                    hour=23, minute=59, second=59, tzinfo=timezone.utc
-                )
+                    hour=23, minute=59, second=59, tzinfo=IST
+                ).astimezone(timezone.utc)
                 result = data_service.get_sales_data(
                     period="custom",
                     from_date=from_dt,
@@ -533,15 +533,15 @@ async def get_daily_sales_report(
         try:
             if not is_range and date:
                 comp_date = (datetime.strptime(date, "%Y-%m-%d") - timedelta(days=1)).date()
-                comp_today = datetime.now(timezone.utc).date()
+                comp_today = datetime.now(IST).date()
                 comp_yesterday = comp_today - timedelta(days=1)
                 if comp_date == comp_today:
                     comp_result = data_service.get_sales_data(period="today")
                 elif comp_date == comp_yesterday:
                     comp_result = data_service.get_sales_data(period="yesterday")
                 else:
-                    comp_from = datetime.combine(comp_date, datetime.min.time()).replace(tzinfo=timezone.utc)
-                    comp_to = datetime.combine(comp_date, datetime.max.time()).replace(tzinfo=timezone.utc)
+                    comp_from = datetime.combine(comp_date, datetime.min.time()).replace(tzinfo=IST).astimezone(timezone.utc)
+                    comp_to = datetime.combine(comp_date, datetime.max.time().replace(microsecond=0)).replace(tzinfo=IST).astimezone(timezone.utc)
                     comp_result = data_service.get_sales_data(
                         period="custom",
                         from_date=comp_from,

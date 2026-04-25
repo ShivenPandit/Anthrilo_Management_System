@@ -529,17 +529,31 @@ class UnicommerceDataService:
                     "channel": self._safe_str(row.get("channel") or "UNKNOWN"),
                     "created": row.get("order_date"),
                     "selling_price": Decimal("0"),
+                    "discount": Decimal("0"),
+                    "tax": Decimal("0"),
+                    "refund": Decimal("0"),
                     "item_count": 0,
                     "quantity": 0,
                 },
             )
+
+            # Skip FABRIC category items (non-product entries)
+            category_val = self._safe_str(row.get("category") or "").upper()
+            if category_val == "FABRIC":
+                continue
 
             qty = int(row.get("qty") or 1)
             if qty <= 0:
                 qty = 1
 
             item_price = self._safe_decimal(row.get("selling_price"))
+            item_discount = self._safe_decimal(row.get("discount"))
+            item_tax = self._safe_decimal(row.get("tax"))
+            item_refund = self._safe_decimal(row.get("refund"))
             order["selling_price"] += item_price * Decimal(qty)
+            order["discount"] += item_discount * Decimal(qty)
+            order["tax"] += item_tax * Decimal(qty)
+            order["refund"] += item_refund * Decimal(qty)
             order["item_count"] += 1
             order["quantity"] += qty
 
@@ -557,6 +571,10 @@ class UnicommerceDataService:
         total_revenue = Decimal("0")
         total_items = 0
 
+        total_discount = Decimal("0")
+        total_tax = Decimal("0")
+        total_refund = Decimal("0")
+
         channel_breakdown: Dict[str, Dict[str, Any]] = {}
         status_breakdown: Dict[str, int] = {}
         daily_map: Dict[str, Dict[str, Any]] = {}
@@ -565,6 +583,9 @@ class UnicommerceDataService:
             status = self._safe_str(order.get("status")).upper()
             channel = self._safe_str(order.get("channel") or "UNKNOWN")
             revenue = self._safe_decimal(order.get("selling_price"))
+            discount = self._safe_decimal(order.get("discount"))
+            tax = self._safe_decimal(order.get("tax"))
+            refund = self._safe_decimal(order.get("refund"))
             qty = int(order.get("quantity") or 0)
             created = order.get("created")
 
@@ -574,6 +595,9 @@ class UnicommerceDataService:
             if include:
                 valid_orders += 1
                 total_revenue += revenue
+                total_discount += discount
+                total_tax += tax
+                total_refund += refund
                 total_items += qty
 
                 if channel not in channel_breakdown:
@@ -646,9 +670,9 @@ class UnicommerceDataService:
                 "excluded_orders": excluded_orders,
                 "total_items": total_items,
                 "total_revenue": self._to_money_float(total_revenue),
-                "total_discount": 0.0,
-                "total_tax": 0.0,
-                "total_refund": 0.0,
+                "total_discount": self._to_money_float(total_discount),
+                "total_tax": self._to_money_float(total_tax),
+                "total_refund": self._to_money_float(total_refund),
                 "avg_order_value": self._to_money_float(total_revenue / Decimal(valid_orders)) if valid_orders > 0 else 0,
                 "channel_breakdown": channel_breakdown,
                 "daily_breakdown": daily_breakdown,
@@ -778,6 +802,10 @@ class UnicommerceDataService:
                         SalesOrderRecord.channel,
                         SalesOrderRecord.qty,
                         SalesOrderRecord.selling_price,
+                        SalesOrderRecord.discount,
+                        SalesOrderRecord.tax,
+                        SalesOrderRecord.refund,
+                        SalesOrderRecord.category,
                         SalesOrderRecord.order_date,
                         SalesOrderRecord.created_at,
                         SalesOrderRecord.sku,
@@ -809,6 +837,10 @@ class UnicommerceDataService:
                             "channel": r.channel,
                             "qty": r.qty,
                             "selling_price": self._safe_decimal(r.selling_price),
+                            "discount": self._safe_decimal(r.discount),
+                            "tax": self._safe_decimal(r.tax),
+                            "refund": self._safe_decimal(r.refund),
+                            "category": self._safe_str(r.category) if hasattr(r, 'category') else "",
                             "order_date": self._normalize_dt(r.order_date or r.created_at),
                             "sku": r.sku,
                             "product_name": self._safe_str(
@@ -876,6 +908,10 @@ class UnicommerceDataService:
                         SalesOrderRecord.channel,
                         SalesOrderRecord.qty,
                         SalesOrderRecord.selling_price,
+                        SalesOrderRecord.discount,
+                        SalesOrderRecord.tax,
+                        SalesOrderRecord.refund,
+                        SalesOrderRecord.category,
                         SalesOrderRecord.order_date,
                         SalesOrderRecord.created_at,
                         SalesOrderRecord.updated_at,
@@ -892,6 +928,10 @@ class UnicommerceDataService:
                             "channel": r.channel,
                             "qty": r.qty,
                             "selling_price": self._safe_decimal(r.selling_price),
+                            "discount": self._safe_decimal(r.discount) if hasattr(r, 'discount') else Decimal("0"),
+                            "tax": self._safe_decimal(r.tax) if hasattr(r, 'tax') else Decimal("0"),
+                            "refund": self._safe_decimal(r.refund) if hasattr(r, 'refund') else Decimal("0"),
+                            "category": self._safe_str(r.category) if hasattr(r, 'category') else "",
                             "order_date": self._normalize_dt(r.order_date or r.created_at),
                         }
                         for r in lightweight_records
@@ -1036,12 +1076,19 @@ class UnicommerceDataService:
         try:
             items: List[Dict[str, Any]] = []
 
+            # Use created_at as a coarse date filter with extra buffer,
+            # then rely on the parsed event date post-filter (below) for
+            # precision.  Filtering on updated_at is WRONG because re-sync
+            # operations update it, causing old returns to appear in recent
+            # reports.  A 30-day buffer on created_at ensures we don't miss
+            # records that were created slightly outside the window but whose
+            # actual return event date falls within range.
+            coarse_from = from_date - timedelta(days=30)
             normalized_records = (
                 db.query(SalesReturnRecord)
                 .filter(
-                    SalesReturnRecord.updated_at >= from_date,
-                    SalesReturnRecord.updated_at <= to_date,
-                    #SalesReturnRecord.updated_at <= (to_date + timedelta(days=1)),
+                    SalesReturnRecord.created_at >= coarse_from,
+                    SalesReturnRecord.created_at <= to_date + timedelta(days=1),
                 )
                 .all()
             )
