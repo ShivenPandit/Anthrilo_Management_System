@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from typing import List, Optional
 import io
 import csv
@@ -118,11 +118,18 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
 @router.post("/", response_model=ProductMasterSchema, status_code=status.HTTP_201_CREATED)
 def create_product(product: ProductMasterCreate, db: Session = Depends(get_db)):
     """Create a new product."""
-    existing = db.query(ProductMaster).filter(ProductMaster.sku == product.sku).first()
+    sku_clean = (product.sku or "").strip()
+    existing = (
+        db.query(ProductMaster)
+        .filter(func.lower(ProductMaster.sku) == sku_clean.lower())
+        .first()
+    )
     if existing:
         raise HTTPException(status_code=400, detail="SKU already exists")
 
-    db_product = ProductMaster(**product.model_dump())
+    payload = product.model_dump()
+    payload["sku"] = sku_clean
+    db_product = ProductMaster(**payload)
     db.add(db_product)
     db.commit()
     db.refresh(db_product)
@@ -144,9 +151,15 @@ def update_product(product_id: int, product_update: ProductMasterUpdate, db: Ses
 
     # Check SKU uniqueness if being updated
     if "sku" in update_data and update_data["sku"] != db_product.sku:
-        conflict = db.query(ProductMaster).filter(ProductMaster.sku == update_data["sku"]).first()
+        next_sku = (update_data["sku"] or "").strip()
+        conflict = (
+            db.query(ProductMaster)
+            .filter(func.lower(ProductMaster.sku) == next_sku.lower())
+            .first()
+        )
         if conflict:
             raise HTTPException(status_code=400, detail="SKU already exists")
+        update_data["sku"] = next_sku
 
     for field, value in update_data.items():
         setattr(db_product, field, value)
@@ -271,7 +284,8 @@ def import_products(file: UploadFile = File(...), db: Session = Depends(get_db))
         )
 
     # Pre-fetch existing SKUs for dedup
-    existing_skus = {s[0] for s in db.query(ProductMaster.sku).all()}
+    existing_skus = {((s[0] or "").strip().lower()) for s in db.query(ProductMaster.sku).all()}
+    seen_skus_in_file: set[str] = set()
 
     inserted = 0
     skipped = 0
@@ -279,6 +293,7 @@ def import_products(file: UploadFile = File(...), db: Session = Depends(get_db))
 
     for idx, row in enumerate(rows, start=2):  # start=2 because row 1 is header
         sku = (row.get("sku") or "").strip()
+        sku_key = sku.lower()
         name = (row.get("name") or "").strip()
 
         if not sku:
@@ -288,7 +303,11 @@ def import_products(file: UploadFile = File(...), db: Session = Depends(get_db))
             errors.append({"row": idx, "error": "Name is required"})
             continue
 
-        if sku in existing_skus:
+        if sku_key in seen_skus_in_file:
+            skipped += 1
+            continue
+
+        if sku_key in existing_skus:
             skipped += 1
             continue
 
@@ -324,7 +343,8 @@ def import_products(file: UploadFile = File(...), db: Session = Depends(get_db))
             production_time=production_time,
         )
         db.add(db_product)
-        existing_skus.add(sku)
+        seen_skus_in_file.add(sku_key)
+        existing_skus.add(sku_key)
         inserted += 1
 
     db.commit()

@@ -67,6 +67,8 @@ class UnicommerceService:
         "sellingPrice",
         "maxRetailPrice",
         "discount",
+        "taxAmount",
+        "refundAmount",
         "totalPrice",
         "channelProductId",
         "bundleSkuCode",
@@ -547,11 +549,34 @@ class UnicommerceService:
 
             channel_raw = self._safe_str(row.get("Channel Name") or row.get("channel") or "UNKNOWN")
             order_date = self._parse_datetime(row.get("Created") or row.get("created"))
+
+            # Normalize status and channel to prevent case/whitespace fragmentation
+            status_raw = self._safe_str(
+                row.get("Sale Order Status") or row.get("status") or "CREATED"
+            ).upper()
+            channel_normalized = channel_raw.replace(" ", "_")
+
+            # Extract financial fields from CSV data
+            discount_val = self._safe_float(
+                row.get("Discount") or row.get("discount") or 0
+            )
+            tax_val = self._safe_float(
+                row.get("Tax Amount") or row.get("taxAmount")
+                or row.get("Tax") or row.get("tax") or 0
+            )
+            refund_val = self._safe_float(
+                row.get("Refund Amount") or row.get("refundAmount")
+                or row.get("Refund") or row.get("refund") or 0
+            )
+            category_val = self._safe_str(
+                row.get("Category") or row.get("category") or ""
+            )
+
             payloads.append(
                 {
                     "order_id": order_id,
                     "sale_order_item_code": sale_order_item_code,
-                    "channel": channel_raw.replace(" ", "_"),
+                    "channel": channel_normalized,
                     "sku": self._safe_str(
                         row.get("Item SKU Code")
                         or row.get("skuCode")
@@ -564,7 +589,11 @@ class UnicommerceService:
                     ),
                     "qty": qty,
                     "selling_price": self._safe_float(row.get("Selling Price") or row.get("sellingPrice") or 0),
-                    "status": self._safe_str(row.get("Sale Order Status") or row.get("status") or "CREATED"),
+                    "discount": discount_val,
+                    "tax": tax_val,
+                    "refund": refund_val,
+                    "category": category_val or None,
+                    "status": status_raw,
                     "order_date": order_date,
                     "dispatch_date": self._parse_datetime(row.get("Dispatch Date") or row.get("dispatchdate")),
                     "delivery_date": self._parse_datetime(row.get("Delivery Date") or row.get("deliverydate")),
@@ -607,6 +636,10 @@ class UnicommerceService:
                         "product_name": stmt.excluded.product_name,
                         "qty": stmt.excluded.qty,
                         "selling_price": stmt.excluded.selling_price,
+                        "discount": stmt.excluded.discount,
+                        "tax": stmt.excluded.tax,
+                        "refund": stmt.excluded.refund,
+                        "category": stmt.excluded.category,
                         "status": stmt.excluded.status,
                         "order_date": stmt.excluded.order_date,
                         "dispatch_date": stmt.excluded.dispatch_date,

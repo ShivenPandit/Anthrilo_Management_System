@@ -9,10 +9,32 @@ import { shopifyMasterDataApi } from '@/lib/api';
 interface ShopifyMasterDataItem {
     id: number;
     variant_sku: string;
+    style_code?: string | null;
     title?: string | null;
     type?: string | null;
+    gender?: string | null;
     tags?: string | null;
     option1_value?: string | null;
+    collection?: string | null;
+    subtype?: string | null;
+    season?: string | null;
+    fabric_type?: string | null;
+    print_name?: string | null;
+    net_weight?: string | null;
+    production_time?: string | null;
+    simple_bundle?: string | null;
+    mrp?: number | null;
+    gross_weights_1?: string | null;
+    garment_1?: string | null;
+    gross_weights_2?: string | null;
+    garment_2?: string | null;
+    amazon_asin?: string | null;
+    amazon_flex_sku?: string | null;
+    amazon_fba_sku?: string | null;
+    amazon_mfn_sku?: string | null;
+    myntra_style_id?: string | null;
+    myntra_sku?: string | null;
+    fc?: string | null;
     cost_per_item?: number | null;
     created_at: string;
     updated_at: string;
@@ -34,6 +56,36 @@ interface ImportSummary {
 }
 
 const PAGE_SIZE = 50;
+
+const TABLE_COLUMNS: Array<{ key: keyof ShopifyMasterDataItem; label: string; right?: boolean; mono?: boolean }> = [
+    { key: 'variant_sku', label: 'SKU', mono: true },
+    { key: 'style_code', label: 'STYLE CODE' },
+    { key: 'title', label: 'NAME' },
+    { key: 'type', label: 'TYPE' },
+    { key: 'gender', label: 'GENDER' },
+    { key: 'tags', label: 'TAG' },
+    { key: 'option1_value', label: 'SIZE' },
+    { key: 'collection', label: 'COLLECTION' },
+    { key: 'subtype', label: 'SUBTYPE' },
+    { key: 'season', label: 'SEASON' },
+    { key: 'fabric_type', label: 'FABRIC TYPE' },
+    { key: 'print_name', label: 'PRINT' },
+    { key: 'net_weight', label: 'NET WEIGHT' },
+    { key: 'production_time', label: 'PRODUCTION TIME' },
+    { key: 'simple_bundle', label: 'SIMPLE/BUNDLE' },
+    { key: 'mrp', label: 'MRP', right: true },
+    { key: 'gross_weights_1', label: 'GROSS WEIGHTS 1' },
+    { key: 'garment_1', label: 'GARMENT 1' },
+    { key: 'gross_weights_2', label: 'GROSS WEIGHTS 2' },
+    { key: 'garment_2', label: 'GARMENT 2' },
+    { key: 'amazon_asin', label: 'AMAZON ASIN' },
+    { key: 'amazon_flex_sku', label: 'AMAZON FLEX SKU' },
+    { key: 'amazon_fba_sku', label: 'AMAZON FBA SKU' },
+    { key: 'amazon_mfn_sku', label: 'AMAZON MFN SKU' },
+    { key: 'myntra_style_id', label: 'MYNTRA STYLE ID' },
+    { key: 'myntra_sku', label: 'MYNTRA SKU' },
+    { key: 'fc', label: 'FC' },
+];
 
 export default function ShopifyMasterDataPage() {
     const qc = useQueryClient();
@@ -123,7 +175,7 @@ export default function ShopifyMasterDataPage() {
                 <div>
                     <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Shopify Master Data</h1>
                     <p className="text-sm text-slate-500 dark:text-slate-400">
-                        Upload and manage Variant SKU master data for Type, Tags and Cost enrichment.
+                        Upload and manage SKU catalog master data using the latest CSV structure.
                     </p>
                 </div>
 
@@ -162,12 +214,9 @@ export default function ShopifyMasterDataPage() {
                             type="text"
                             value={search}
                             onChange={(e) => onSearchChange(e.target.value)}
-                            placeholder="Search by SKU, title, type, tags or option value"
+                            placeholder="Search by SKU, style code, name, type, tags, marketplace IDs"
                             className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-9 pr-3 py-2 text-sm"
                         />
-                    </div>
-                    <div className="text-xs text-slate-500 dark:text-slate-400 flex items-center lg:justify-end">
-                        Required column: Variant SKU. Optional: Title, Type, Tags, Option1 Value, Cost per item.
                     </div>
                 </div>
 
@@ -191,36 +240,47 @@ export default function ShopifyMasterDataPage() {
                     <table className="min-w-full text-sm">
                         <thead>
                             <tr className="bg-slate-50 dark:bg-slate-800/60">
-                                <th className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300">Variant SKU</th>
-                                <th className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300">Title</th>
-                                <th className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300">Type</th>
-                                <th className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300">Tags</th>
-                                <th className="px-4 py-3 text-left font-semibold text-slate-600 dark:text-slate-300">Option1 Value</th>
-                                <th className="px-4 py-3 text-right font-semibold text-slate-600 dark:text-slate-300">Cost per item</th>
+                                {TABLE_COLUMNS.map((col) => (
+                                    <th
+                                        key={String(col.key)}
+                                        className={`px-4 py-3 font-semibold text-slate-600 dark:text-slate-300 whitespace-nowrap ${col.right ? 'text-right' : 'text-left'}`}
+                                    >
+                                        {col.label}
+                                    </th>
+                                ))}
                             </tr>
                         </thead>
                         <tbody>
                             {loading ? (
                                 <tr>
-                                    <td colSpan={6} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
+                                    <td colSpan={TABLE_COLUMNS.length} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
                                         <span className="inline-flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> Loading...</span>
                                     </td>
                                 </tr>
                             ) : rows.length === 0 ? (
                                 <tr>
-                                    <td colSpan={6} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
+                                    <td colSpan={TABLE_COLUMNS.length} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
                                         <span className="inline-flex items-center gap-2"><FileSpreadsheet className="h-4 w-4" /> No Shopify master data found.</span>
                                     </td>
                                 </tr>
                             ) : (
                                 rows.map((r) => (
                                     <tr key={r.id} className="border-t border-slate-100 dark:border-slate-800">
-                                        <td className="px-4 py-3 font-mono text-xs text-slate-700 dark:text-slate-300">{r.variant_sku}</td>
-                                        <td className="px-4 py-3 text-slate-700 dark:text-slate-300">{r.title || '-'}</td>
-                                        <td className="px-4 py-3 text-slate-700 dark:text-slate-300">{r.type || '-'}</td>
-                                        <td className="px-4 py-3 text-slate-700 dark:text-slate-300 max-w-[520px] truncate" title={r.tags || ''}>{r.tags || '-'}</td>
-                                        <td className="px-4 py-3 text-slate-700 dark:text-slate-300">{r.option1_value || '-'}</td>
-                                        <td className="px-4 py-3 text-right text-slate-700 dark:text-slate-300">{r.cost_per_item == null ? '-' : Number(r.cost_per_item).toFixed(2)}</td>
+                                        {TABLE_COLUMNS.map((col) => {
+                                            const val = r[col.key];
+                                            const display = (col.key === 'mrp' || col.key === 'cost_per_item')
+                                                ? (val == null ? '-' : Number(val).toFixed(2))
+                                                : (val == null || val === '' ? '-' : String(val));
+                                            return (
+                                                <td
+                                                    key={`${r.id}-${String(col.key)}`}
+                                                    className={`px-4 py-3 text-slate-700 dark:text-slate-300 whitespace-nowrap ${col.right ? 'text-right' : 'text-left'} ${col.mono ? 'font-mono text-xs' : ''}`}
+                                                    title={typeof val === 'string' ? val : undefined}
+                                                >
+                                                    {display}
+                                                </td>
+                                            );
+                                        })}
                                     </tr>
                                 ))
                             )}
