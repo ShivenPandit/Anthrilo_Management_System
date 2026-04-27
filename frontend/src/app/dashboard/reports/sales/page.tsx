@@ -2,7 +2,7 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { unicommerceApi } from '@/features/sales/api';
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
     ReportDateMode,
     resolveReportDateRange,
@@ -150,11 +150,36 @@ export default function SalesReportsPage() {
         date.setDate(date.getDate() - 1);
         return date.toISOString().split('T')[0];
     });
+    const [latestAnchorApplied, setLatestAnchorApplied] = useState(false);
     const [currentPage, setCurrentPage] = useState(1);
     const [customDates, setCustomDates] = useState({
         from: new Date().toISOString().split('T')[0],
         to: new Date().toISOString().split('T')[0]
     });
+
+    const { data: recentSalesData } = useQuery({
+        queryKey: ['salesReports-recent-sales'],
+        queryFn: async () => (await unicommerceApi.getLast7Days()).data,
+        staleTime: 10 * 60 * 1000,
+    });
+
+    const latestAvailableDate = useMemo(() => {
+        const breakdown = recentSalesData?.summary?.daily_breakdown;
+        if (!Array.isArray(breakdown) || breakdown.length === 0) return '';
+        for (let index = breakdown.length - 1; index >= 0; index -= 1) {
+            const day = breakdown[index];
+            if ((day?.orders || 0) > 0 || (day?.revenue || 0) > 0) {
+                return String(day.date || '');
+            }
+        }
+        return '';
+    }, [recentSalesData]);
+
+    useEffect(() => {
+        if (dateMode !== 'daily' || latestAnchorApplied || !latestAvailableDate) return;
+        setAnchorDate(latestAvailableDate);
+        setLatestAnchorApplied(true);
+    }, [dateMode, latestAnchorApplied, latestAvailableDate]);
 
     const effectiveRange = useMemo(() => resolveReportDateRange({
         mode: dateMode,

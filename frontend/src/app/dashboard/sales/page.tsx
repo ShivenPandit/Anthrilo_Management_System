@@ -3,6 +3,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { ucSales } from '@/features/sales/api';
 import Link from 'next/link';
+import { useMemo } from 'react';
 
 export default function SalesPage() {
   const { data: todayData, isLoading } = useQuery({
@@ -14,10 +15,32 @@ export default function SalesPage() {
     staleTime: 2 * 60 * 1000,
   });
 
-  const todayOrders = todayData?.summary?.total_orders || 0;
-  const todayRevenue = todayData?.summary?.total_revenue || 0;
-  const todayItems = todayData?.summary?.total_items || 0;
-  const avgOrderValue = todayOrders > 0 ? todayRevenue / todayOrders : 0;
+  const { data: last7DaysData } = useQuery({
+    queryKey: ['unicommerce-last-7-days'],
+    queryFn: async () => {
+      const response = await ucSales.getLast7Days();
+      return response.data;
+    },
+    staleTime: 10 * 60 * 1000,
+  });
+
+  const latestAvailableDay = useMemo(() => {
+    const breakdown = last7DaysData?.summary?.daily_breakdown;
+    if (!Array.isArray(breakdown) || breakdown.length === 0) return null;
+    for (let index = breakdown.length - 1; index >= 0; index -= 1) {
+      const day = breakdown[index];
+      if ((day?.orders || 0) > 0 || (day?.revenue || 0) > 0) {
+        return day;
+      }
+    }
+    return null;
+  }, [last7DaysData]);
+
+  const summarySource = (todayData?.summary?.total_orders || 0) > 0 ? todayData?.summary : undefined;
+  const todayOrders = summarySource?.total_orders || latestAvailableDay?.orders || 0;
+  const todayRevenue = summarySource?.total_revenue || latestAvailableDay?.revenue || 0;
+  const todayItems = summarySource?.total_items || latestAvailableDay?.items || 0;
+  const avgOrderValue = summarySource?.avg_order_value || (todayOrders > 0 ? todayRevenue / todayOrders : 0);
 
   const modules = [
     {
