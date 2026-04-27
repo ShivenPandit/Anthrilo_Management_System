@@ -9,33 +9,26 @@ import { shopifyMasterDataApi } from '@/lib/api';
 interface ShopifyMasterDataItem {
     id: number;
     variant_sku: string;
-    style_code?: string | null;
-    title?: string | null;
-    type?: string | null;
+    style_code: string;
+    title: string;
+    type: string;
     gender?: string | null;
     tags?: string | null;
-    option1_value?: string | null;
+    size?: string | null;
     collection?: string | null;
     subtype?: string | null;
     season?: string | null;
     fabric_type?: string | null;
     print_name?: string | null;
-    net_weight?: string | null;
-    production_time?: string | null;
+    net_weight: string;
+    buffer?: string |null;
     simple_bundle?: string | null;
     mrp?: number | null;
-    gross_weights_1?: string | null;
-    garment_1?: string | null;
-    gross_weights_2?: string | null;
-    garment_2?: string | null;
-    amazon_asin?: string | null;
-    amazon_flex_sku?: string | null;
-    amazon_fba_sku?: string | null;
-    amazon_mfn_sku?: string | null;
-    myntra_style_id?: string | null;
-    myntra_sku?: string | null;
-    fc?: string | null;
-    cost_per_item?: number | null;
+    lifecycle?: string | null;
+    summer_factor?: number | null;
+    winter_factor?: number | null;
+    style_factor?: number | null;
+    lead_time?: number | null;
     created_at: string;
     updated_at: string;
 }
@@ -64,27 +57,21 @@ const TABLE_COLUMNS: Array<{ key: keyof ShopifyMasterDataItem; label: string; ri
     { key: 'type', label: 'TYPE' },
     { key: 'gender', label: 'GENDER' },
     { key: 'tags', label: 'TAG' },
-    { key: 'option1_value', label: 'SIZE' },
+    { key: 'size', label: 'SIZE' },
     { key: 'collection', label: 'COLLECTION' },
     { key: 'subtype', label: 'SUBTYPE' },
     { key: 'season', label: 'SEASON' },
     { key: 'fabric_type', label: 'FABRIC TYPE' },
     { key: 'print_name', label: 'PRINT' },
     { key: 'net_weight', label: 'NET WEIGHT' },
-    { key: 'production_time', label: 'PRODUCTION TIME' },
+    { key: 'buffer', label: 'BUFFER' },
     { key: 'simple_bundle', label: 'SIMPLE/BUNDLE' },
     { key: 'mrp', label: 'MRP', right: true },
-    { key: 'gross_weights_1', label: 'GROSS WEIGHTS 1' },
-    { key: 'garment_1', label: 'GARMENT 1' },
-    { key: 'gross_weights_2', label: 'GROSS WEIGHTS 2' },
-    { key: 'garment_2', label: 'GARMENT 2' },
-    { key: 'amazon_asin', label: 'AMAZON ASIN' },
-    { key: 'amazon_flex_sku', label: 'AMAZON FLEX SKU' },
-    { key: 'amazon_fba_sku', label: 'AMAZON FBA SKU' },
-    { key: 'amazon_mfn_sku', label: 'AMAZON MFN SKU' },
-    { key: 'myntra_style_id', label: 'MYNTRA STYLE ID' },
-    { key: 'myntra_sku', label: 'MYNTRA SKU' },
-    { key: 'fc', label: 'FC' },
+    { key: 'lifecycle', label: 'LIFECYCLE' },
+    { key: 'summer_factor', label: 'SUMMER FACTOR', right: true },
+    { key: 'winter_factor', label: 'WINTER FACTOR', right: true },
+    { key: 'style_factor', label: 'STYLE FACTOR', right: true },
+    { key: 'lead_time', label: 'LEAD TIME', right: true },
 ];
 
 export default function ShopifyMasterDataPage() {
@@ -214,7 +201,7 @@ export default function ShopifyMasterDataPage() {
                             type="text"
                             value={search}
                             onChange={(e) => onSearchChange(e.target.value)}
-                            placeholder="Search by SKU, style code, name, type, tags, marketplace IDs"
+                            placeholder="Search by SKU, style code, name, type, tags, lifecycle"
                             className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 pl-9 pr-3 py-2 text-sm"
                         />
                     </div>
@@ -268,7 +255,7 @@ export default function ShopifyMasterDataPage() {
                                     <tr key={r.id} className="border-t border-slate-100 dark:border-slate-800">
                                         {TABLE_COLUMNS.map((col) => {
                                             const val = r[col.key];
-                                            const display = (col.key === 'mrp' || col.key === 'cost_per_item')
+                                            const display = col.key === 'mrp'
                                                 ? (val == null ? '-' : Number(val).toFixed(2))
                                                 : (val == null || val === '' ? '-' : String(val));
                                             return (

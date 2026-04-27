@@ -7,7 +7,6 @@ from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from sqlalchemy import text
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -36,9 +35,7 @@ HEADER_MAP = {
     "gender": "gender",
     "tag": "tags",
     "tags": "tags",
-    "size": "option1_value",
-    "option1 value": "option1_value",
-    "option1_value": "option1_value",
+    "size": "size", 
     "collection": "collection",
     "subtype": "subtype",
     "season": "season",
@@ -46,17 +43,17 @@ HEADER_MAP = {
     "fabric_type": "fabric_type",
     "print": "print_name",
     "net weight": "net_weight",
-    "production time": "production_time",
+    "neight": "net_weight",
+    "buffer": "buffer",
     "simple/bundle": "simple_bundle",
     "mrp": "mrp",
-    "amazon asin": "amazon_asin",
-    "amazo flex sku": "amazon_flex_sku",
-    "amazon flex sku": "amazon_flex_sku",
-    "amazon fba sku": "amazon_fba_sku",
-    "amazon mfn sku": "amazon_mfn_sku",
-    "myntra style id": "myntra_style_id",
-    "myntra sku": "myntra_sku",
-    "fc": "fc",
+    "lifecycle": "lifecycle",
+    "summer factor": "summer_factor",
+    "winter factor": "winter_factor",
+    "style factor": "style_factor",
+    "lead_time": "lead_time",
+    "lead time": "lead_time",
+    "amazon asin": "lead_time",
     "cost per item": "cost_per_item",
     "cost_per_item": "cost_per_item",
     "cost": "cost_per_item",
@@ -70,31 +67,30 @@ POSITIONAL_HEADERS = {
     3: "type",
     4: "gender",
     5: "tags",
-    6: "option1_value",
-    7: "collection",
-    8: "subtype",
-    9: "season",
-    10: "fabric_type",
-    11: "print_name",
-    12: "net_weight",
-    13: "production_time",
-    14: "simple_bundle",
-    15: "mrp",
-    16: "gross_weights_1",
-    17: "garment_1",
-    18: "gross_weights_2",
-    19: "garment_2",
-    20: "amazon_asin",
-    21: "amazon_flex_sku",
-    22: "amazon_fba_sku",
-    23: "amazon_mfn_sku",
-    24: "myntra_style_id",
-    25: "myntra_sku",
-    26: "fc",
+    6: "collection",
+    7: "subtype",
+    8: "season",
+    9: "fabric_type",
+    10: "print_name",
+    11: "net_weight",
+    12: "production_time",
+    13: "simple_bundle",
+    14: "mrp",
+    15: "lifecycle",
+    16: "summer_factor",
+    17: "winter_factor",
+    18: "style_factor",
+    19: "lead_time",
 }
 
 
-REQUIRED_COLUMNS = {"variant_sku"}
+REQUIRED_COLUMNS = {
+    "variant_sku",
+    "style_code",
+    "title",
+    "type",
+    "net_weight",
+}
 
 
 def _clean_text(value: Optional[str]) -> Optional[str]:
@@ -179,6 +175,42 @@ def _to_decimal(value: Optional[str], *, field_name: str) -> Optional[Decimal]:
         raise ValueError(f"Invalid {field_name}: {value}")
 
 
+def _to_float(value: Optional[str], *, field_name: str) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (ValueError, TypeError):
+        raise ValueError(f"Invalid {field_name}: {value}")
+
+
+def _to_int(value: Optional[str], *, field_name: str) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(str(value).replace(",", "").strip()))
+    except (ValueError, TypeError):
+        raise ValueError(f"Invalid {field_name}: {value}")
+
+
+def _safe_float_from_db(value: Optional[str]) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_int_from_db(value: Optional[str]) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(str(value).replace(",", "").strip()))
+    except (ValueError, TypeError):
+        return None
+
+
 @router.get("/", response_model=ShopifyMasterDataListResponse)
 def list_shopify_master_data(
     skip: int = Query(0, ge=0),
@@ -198,20 +230,18 @@ def list_shopify_master_data(
                 ShopifyMasterData.type.ilike(term),
                 ShopifyMasterData.gender.ilike(term),
                 ShopifyMasterData.tags.ilike(term),
-                ShopifyMasterData.option1_value.ilike(term),
                 ShopifyMasterData.collection.ilike(term),
                 ShopifyMasterData.subtype.ilike(term),
                 ShopifyMasterData.season.ilike(term),
                 ShopifyMasterData.fabric_type.ilike(term),
                 ShopifyMasterData.print_name.ilike(term),
+                ShopifyMasterData.net_weight.ilike(term),
                 ShopifyMasterData.simple_bundle.ilike(term),
+                ShopifyMasterData.gross_weights_1.ilike(term),
+                ShopifyMasterData.garment_1.ilike(term),
+                ShopifyMasterData.gross_weights_2.ilike(term),
+                ShopifyMasterData.garment_2.ilike(term),
                 ShopifyMasterData.amazon_asin.ilike(term),
-                ShopifyMasterData.amazon_flex_sku.ilike(term),
-                ShopifyMasterData.amazon_fba_sku.ilike(term),
-                ShopifyMasterData.amazon_mfn_sku.ilike(term),
-                ShopifyMasterData.myntra_style_id.ilike(term),
-                ShopifyMasterData.myntra_sku.ilike(term),
-                ShopifyMasterData.fc.ilike(term),
             )
         )
 
@@ -223,8 +253,37 @@ def list_shopify_master_data(
         .all()
     )
 
+    items = [
+        ShopifyMasterDataItem(
+            id=r.id,
+            variant_sku=r.variant_sku,
+            style_code=r.style_code or "",
+            title=r.title or "",
+            type=r.type or "",
+            gender=r.gender,
+            tags=r.tags,
+            collection=r.collection,
+            subtype=r.subtype,
+            season=r.season,
+            fabric_type=r.fabric_type,
+            print_name=r.print_name,
+            net_weight=r.net_weight or "",
+            production_time=r.production_time,
+            simple_bundle=r.simple_bundle,
+            mrp=r.mrp,
+            lifecycle=r.gross_weights_1,
+            summer_factor=_safe_float_from_db(r.garment_1),
+            winter_factor=_safe_float_from_db(r.gross_weights_2),
+            style_factor=_safe_float_from_db(r.garment_2),
+            lead_time=_safe_int_from_db(r.amazon_asin),
+            created_at=r.created_at,
+            updated_at=r.updated_at,
+        )
+        for r in rows
+    ]
+
     return ShopifyMasterDataListResponse(
-        items=[ShopifyMasterDataItem.model_validate(r) for r in rows],
+        items=items,
         total=total,
         page=(skip // limit) + 1,
         page_size=limit,
@@ -262,9 +321,25 @@ def import_shopify_master_data(
         if not sku:
             blank_sku_rows += 1
             continue
+
+        missing_required = [
+            col
+            for col in REQUIRED_COLUMNS
+            if not str(row.get(col) or "").strip()
+        ]
+        if missing_required:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Row {idx}: Missing mandatory values: {', '.join(sorted(missing_required))}",
+            )
+
         sku_key = sku.lower()
         try:
             mrp = _to_decimal(row.get("mrp"), field_name="mrp")
+            summer_factor = _to_float(row.get("summer_factor"), field_name="summer_factor")
+            winter_factor = _to_float(row.get("winter_factor"), field_name="winter_factor")
+            style_factor = _to_float(row.get("style_factor"), field_name="style_factor")
+            lead_time = _to_int(row.get("lead_time"), field_name="lead_time")
             normalized = {
                 "row": idx,
                 "variant_sku": sku,
@@ -273,7 +348,6 @@ def import_shopify_master_data(
                 "type": row.get("type"),
                 "gender": row.get("gender"),
                 "tags": row.get("tags"),
-                "option1_value": row.get("option1_value"),
                 "collection": row.get("collection"),
                 "subtype": row.get("subtype"),
                 "season": row.get("season"),
@@ -283,17 +357,11 @@ def import_shopify_master_data(
                 "production_time": row.get("production_time"),
                 "simple_bundle": row.get("simple_bundle"),
                 "mrp": mrp,
-                "gross_weights_1": row.get("gross_weights_1"),
-                "garment_1": row.get("garment_1"),
-                "gross_weights_2": row.get("gross_weights_2"),
-                "garment_2": row.get("garment_2"),
-                "amazon_asin": row.get("amazon_asin"),
-                "amazon_flex_sku": row.get("amazon_flex_sku"),
-                "amazon_fba_sku": row.get("amazon_fba_sku"),
-                "amazon_mfn_sku": row.get("amazon_mfn_sku"),
-                "myntra_style_id": row.get("myntra_style_id"),
-                "myntra_sku": row.get("myntra_sku"),
-                "fc": row.get("fc"),
+                "gross_weights_1": row.get("lifecycle"),
+                "garment_1": str(summer_factor) if summer_factor is not None else None,
+                "gross_weights_2": str(winter_factor) if winter_factor is not None else None,
+                "garment_2": str(style_factor) if style_factor is not None else None,
+                "amazon_asin": str(lead_time) if lead_time is not None else None,
                 # Backward compatibility for report enrichment code that still consumes legacy keys.
                 "cost_per_item": mrp,
             }
@@ -314,43 +382,80 @@ def import_shopify_master_data(
     skipped = duplicate_rows_in_file + blank_sku_rows
     errors: list[dict] = []
 
-    # Replace mode: clear previous master dataset and load only current upload.
-    db.execute(text("TRUNCATE TABLE shopify_master_data RESTART IDENTITY"))
+    existing_rows = db.query(ShopifyMasterData).all()
+    existing_by_sku = {
+        (record.variant_sku or "").strip().lower(): record
+        for record in existing_rows
+        if (record.variant_sku or "").strip()
+    }
+
+    mutable_fields = [
+        "variant_sku",
+        "style_code",
+        "title",
+        "type",
+        "gender",
+        "tags",
+        "collection",
+        "subtype",
+        "season",
+        "fabric_type",
+        "print_name",
+        "net_weight",
+        "production_time",
+        "simple_bundle",
+        "mrp",
+        "gross_weights_1",
+        "garment_1",
+        "gross_weights_2",
+        "garment_2",
+        "amazon_asin",
+        "cost_per_item",
+    ]
 
     for row in normalized_rows:
-        db.add(
-            ShopifyMasterData(
-                variant_sku=row["variant_sku"],
-                style_code=row["style_code"],
-                title=row["title"],
-                type=row["type"],
-                gender=row["gender"],
-                tags=row["tags"],
-                option1_value=row["option1_value"],
-                collection=row["collection"],
-                subtype=row["subtype"],
-                season=row["season"],
-                fabric_type=row["fabric_type"],
-                print_name=row["print_name"],
-                net_weight=row["net_weight"],
-                production_time=row["production_time"],
-                simple_bundle=row["simple_bundle"],
-                mrp=row["mrp"],
-                gross_weights_1=row["gross_weights_1"],
-                garment_1=row["garment_1"],
-                gross_weights_2=row["gross_weights_2"],
-                garment_2=row["garment_2"],
-                amazon_asin=row["amazon_asin"],
-                amazon_flex_sku=row["amazon_flex_sku"],
-                amazon_fba_sku=row["amazon_fba_sku"],
-                amazon_mfn_sku=row["amazon_mfn_sku"],
-                myntra_style_id=row["myntra_style_id"],
-                myntra_sku=row["myntra_sku"],
-                fc=row["fc"],
-                cost_per_item=row["cost_per_item"],
+        sku_key = row["variant_sku"].strip().lower()
+        existing = existing_by_sku.get(sku_key)
+        if existing is None:
+            db.add(
+                ShopifyMasterData(
+                    variant_sku=row["variant_sku"],
+                    style_code=row["style_code"],
+                    title=row["title"],
+                    type=row["type"],
+                    gender=row["gender"],
+                    tags=row["tags"],
+                    collection=row["collection"],
+                    subtype=row["subtype"],
+                    season=row["season"],
+                    fabric_type=row["fabric_type"],
+                    print_name=row["print_name"],
+                    net_weight=row["net_weight"],
+                    production_time=row["production_time"],
+                    simple_bundle=row["simple_bundle"],
+                    mrp=row["mrp"],
+                    gross_weights_1=row["gross_weights_1"],
+                    garment_1=row["garment_1"],
+                    gross_weights_2=row["gross_weights_2"],
+                    garment_2=row["garment_2"],
+                    amazon_asin=row["amazon_asin"],
+                    cost_per_item=row["cost_per_item"],
+                )
             )
-        )
-        inserted += 1
+            inserted += 1
+            continue
+
+        changed = False
+        for field in mutable_fields:
+            new_value = row[field]
+            old_value = getattr(existing, field)
+            if old_value != new_value:
+                setattr(existing, field, new_value)
+                changed = True
+        if changed:
+            updated += 1
+        else:
+            skipped += 1
 
     try:
         db.commit()
