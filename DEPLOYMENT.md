@@ -163,7 +163,47 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml restart backend
 docker compose --env-file .env.prod -f docker-compose.prod.yml down
 ```
 
-## 9) Rollback
+## 9) Repair/Rebuild Runbook (DB-first)
+
+Use repair/rebuild when DB-first parity drifts from export snapshots, after major sync bugs, or during controlled historical rebuilds.
+
+### 9.1 Safety-first execution steps
+
+1. Start with reconciliation only:
+   - `python scripts/reconcile_sales_export_vs_db.py --from-date 2026-04-01 --to-date 2026-04-07 --closed-window-mode --thresholds revenue=1,orders=1,items=1`
+2. Run repair in dry-run mode (no writes/truncates):
+   - `curl -X POST "http://127.0.0.1:8000/api/v1/integrations/unicommerce/sync/repair/rebuild?from_date=2026-04-01&to_date=2026-04-07&entities=sales,returns,inventory&truncate_period=false&truncate_inventory=false&full_inventory_discovery=false&dry_run=true&run_in_background=false"`
+3. Execute real repair without truncate first:
+   - keep `truncate_period=false` and `truncate_inventory=false`.
+4. Reconcile again; only use truncate mode if drift still persists and root cause is understood.
+
+Validation rules:
+- Always validate closed windows only (current IST day is excluded by default).
+- Never use today for parity pass/fail decisions.
+- Business timezone for parity and reconciliation is IST (`Asia/Kolkata`).
+- Expected closed-window drift should remain under 1% for revenue/orders/items.
+
+### 9.2 Staged rollout strategy
+
+- Week 1: repair only 7-day windows (`from_date=today-7`) and verify reconciliation daily.
+- Month 1: expand to 30-day windows once week-level drift remains under threshold.
+- Full history: run larger windows or full range only after 30-day parity is stable.
+
+### 9.3 Truncate mode warning
+
+`truncate_period=true` deletes `sales_orders` and `sales_returns` rows in the selected window before rebuild.  
+`truncate_inventory=true` clears all `inventory_snapshots` before inventory rebuild.  
+Use truncate only in low-traffic windows with rollback/recovery plans.
+
+### 9.4 Progress tracking
+
+When `run_in_background=true`, the repair endpoint returns a `progress_key`. Poll:
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/integrations/unicommerce/sync/repair/rebuild/progress?progress_key=<progress_key>"
+```
+
+## 10) Rollback
 
 ```bash
 git log --oneline -n 20
@@ -171,7 +211,7 @@ git checkout <previous-good-commit>
 ./scripts/deploy_vps.sh
 ```
 
-## 10) Important note about localhost fallback
+## 11) Important note about localhost fallback
 
 Next.js public env vars are build-time values. If NEXT_PUBLIC_API_URL or NEXT_PUBLIC_WS_URL are wrong while building, the built frontend can point to localhost.
 

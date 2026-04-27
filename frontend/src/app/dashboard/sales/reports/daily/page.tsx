@@ -171,7 +171,7 @@ export default function DailySalesReportPage() {
   }, [mode, reportDate, customFrom, customTo]);
 
   const queryKey = useMemo(
-    () => ['sales-report', mode, ...Object.values(queryParams), activeProgressId],
+    () => ['sales-report-v2', mode, ...Object.values(queryParams), activeProgressId],
     [mode, queryParams, activeProgressId],
   );
 
@@ -185,10 +185,10 @@ export default function DailySalesReportPage() {
       return res.data;
     },
     enabled: showReport,
-    staleTime: 15 * 60_000,
+    staleTime: 0,
     retry: false,
-    refetchOnWindowFocus: false,
-    gcTime: 30 * 60_000,
+    refetchOnWindowFocus: true,
+    gcTime: 10 * 60_000,
   });
 
   const { data: progressData } = useQuery({
@@ -1007,6 +1007,8 @@ export default function DailySalesReportPage() {
                       First
                     </button>
                     <button onClick={() => setItemPage((p) => Math.max(1, p - 1))} disabled={itemPage === 1}
+                      aria-label="Previous page"
+                      title="Previous page"
                       className="p-1 rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed transition">
                       <ChevronLeft className="w-4 h-4" />
                     </button>
@@ -1032,6 +1034,8 @@ export default function DailySalesReportPage() {
                       );
                     })}
                     <button onClick={() => setItemPage((p) => Math.min(totalItemPages, p + 1))} disabled={itemPage === totalItemPages}
+                      aria-label="Next page"
+                      title="Next page"
                       className="p-1 rounded-lg text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed transition">
                       <ChevronRight className="w-4 h-4" />
                     </button>

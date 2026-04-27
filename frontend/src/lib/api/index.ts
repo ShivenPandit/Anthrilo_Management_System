@@ -75,8 +75,12 @@ export const unicommerceApi = {
   // Canonical DB-first endpoints
   getDbSales: (params?: { period?: string; from_date?: string; to_date?: string; lightweight?: boolean }) =>
     apiClient.get('/unicommerce-data/sales', { params }),
+  getDbOrders: (params?: { period?: string; from_date?: string; to_date?: string; page?: number; page_size?: number }) =>
+    apiClient.get('/unicommerce-data/orders', { params }),
   getDbInventory: (params?: { skus?: string; warehouse?: string }) =>
     apiClient.get('/unicommerce-data/inventory', { params }),
+  getDbFirstParityCheck: (params: { from_date: string; to_date: string; closed_window_mode?: boolean; revenue_drift_threshold_pct?: number; orders_drift_threshold_pct?: number }) =>
+    apiClient.get('/integrations/unicommerce/db-first-parity-check', { params }),
 
   // Paginated order lists (12 per page by default)
   getTodayOrders: (page: number = 1, pageSize: number = 12) =>

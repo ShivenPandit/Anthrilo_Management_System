@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -24,6 +25,8 @@ from app.db.export_models import (
     SalesReturnRecord,
     SyncLog,
 )
+from app.services.cache_service import CacheService
+from app.services.websocket_manager import ws_manager
 from app.services.unicommerce_data_service import get_unicommerce_data_service
 from app.services.unicommerce import get_unicommerce_service
 
@@ -185,6 +188,158 @@ class UnicommerceSyncOrchestrator:
                     break
 
             return skus
+        finally:
+            db.close()
+
+    def _set_repair_progress(self, progress_key: Optional[str], payload: Dict[str, Any]) -> None:
+        if not progress_key:
+            return
+        try:
+            CacheService.set(progress_key, payload, ttl=60 * 60 * 6)
+        except Exception as exc:
+            logger.warning(f"Failed to persist repair progress key={progress_key}: {exc}")
+
+    def _create_repair_sync_log(
+        self,
+        from_date: datetime,
+        to_date: datetime,
+        entities: List[str],
+        truncate_period: bool,
+        truncate_inventory: bool,
+        dry_run: bool,
+    ) -> Optional[int]:
+        db = SessionLocal()
+        try:
+            log = SyncLog(
+                sync_type="repair_rebuild",
+                entity="repair_rebuild",
+                status="running",
+                started_at=self._utcnow().replace(tzinfo=None),
+                details={
+                    "from_date": from_date.isoformat(),
+                    "to_date": to_date.isoformat(),
+                    "entities": entities,
+                    "truncate_period": bool(truncate_period),
+                    "truncate_inventory": bool(truncate_inventory),
+                    "dry_run": bool(dry_run),
+                },
+            )
+            db.add(log)
+            db.commit()
+            db.refresh(log)
+            return int(log.id)
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"Failed to create repair sync log row: {exc}")
+            return None
+        finally:
+            db.close()
+
+    def _finalize_repair_sync_log(
+        self,
+        log_id: Optional[int],
+        success: bool,
+        details: Dict[str, Any],
+        error_message: Optional[str] = None,
+    ) -> None:
+        if not log_id:
+            return
+        db = SessionLocal()
+        try:
+            status = "completed" if success else "failed"
+            db.query(SyncLog).filter(SyncLog.id == log_id).update(
+                {
+                    "status": status,
+                    "completed_at": self._utcnow().replace(tzinfo=None),
+                    "processed_count": int(success),
+                    "failed_count": 0 if success else 1,
+                    "error_message": error_message,
+                    "details": details,
+                }
+            )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"Failed to finalize repair sync log row={log_id}: {exc}")
+        finally:
+            db.close()
+
+    def _truncate_repair_targets(
+        self,
+        from_date: datetime,
+        to_date: datetime,
+        truncate_sales: bool,
+        truncate_returns: bool,
+        truncate_inventory: bool,
+        dry_run: bool,
+    ) -> Dict[str, Any]:
+        start = self._ensure_utc(from_date)
+        end = self._ensure_utc(to_date)
+
+        db = SessionLocal()
+        try:
+            sales_query = db.query(SalesOrderRecord).filter(
+                or_(
+                    and_(
+                        SalesOrderRecord.order_date.isnot(None),
+                        SalesOrderRecord.order_date >= start,
+                        SalesOrderRecord.order_date <= end,
+                    ),
+                    and_(
+                        SalesOrderRecord.order_date.is_(None),
+                        SalesOrderRecord.created_at >= start,
+                        SalesOrderRecord.created_at <= end,
+                    ),
+                )
+            )
+            returns_query = db.query(SalesReturnRecord).filter(
+                or_(
+                    and_(
+                        SalesReturnRecord.created_at >= start,
+                        SalesReturnRecord.created_at <= end,
+                    ),
+                    and_(
+                        SalesReturnRecord.updated_at >= start,
+                        SalesReturnRecord.updated_at <= end,
+                    ),
+                )
+            )
+            inventory_query = db.query(InventorySnapshotRecord)
+
+            deleted_sales = int(sales_query.count()) if truncate_sales else 0
+            deleted_returns = int(returns_query.count()) if truncate_returns else 0
+            deleted_inventory = int(inventory_query.count()) if truncate_inventory else 0
+
+            if not dry_run:
+                if truncate_sales:
+                    sales_query.delete(synchronize_session=False)
+                if truncate_returns:
+                    returns_query.delete(synchronize_session=False)
+                if truncate_inventory:
+                    inventory_query.delete(synchronize_session=False)
+                db.commit()
+
+            return {
+                "success": True,
+                "dry_run": bool(dry_run),
+                "deleted_sales_orders": deleted_sales,
+                "deleted_sales_returns": deleted_returns,
+                "deleted_inventory_snapshots": deleted_inventory,
+                "from_date": start.isoformat(),
+                "to_date": end.isoformat(),
+            }
+        except Exception as exc:
+            db.rollback()
+            return {
+                "success": False,
+                "dry_run": bool(dry_run),
+                "deleted_sales_orders": 0,
+                "deleted_sales_returns": 0,
+                "deleted_inventory_snapshots": 0,
+                "from_date": start.isoformat(),
+                "to_date": end.isoformat(),
+                "error": str(exc),
+            }
         finally:
             db.close()
 
@@ -686,11 +841,13 @@ class UnicommerceSyncOrchestrator:
         entities: Optional[List[str]] = None,
         truncate_period: bool = False,
         truncate_inventory: bool = False,
-        chunk_days: Optional[int] = None,
-        full_inventory_discovery: bool = True,
+        full_inventory_discovery: bool = False,
         inventory_discovery_limit: Optional[int] = None,
         inventory_facility_code: str = "anthrilo",
+        dry_run: bool = False,
+        progress_key: Optional[str] = None,
     ) -> Dict[str, Any]:
+        started_at = time.perf_counter()
         start = self._ensure_utc(from_date)
         end = self._ensure_utc(to_date)
 
@@ -719,59 +876,199 @@ class UnicommerceSyncOrchestrator:
                 "entities": sorted(selected),
             }
 
+        selected_entities = [
+            entity
+            for entity, enabled in (
+                ("sales", include_orders),
+                ("returns", include_returns),
+                ("inventory", include_inventory),
+            )
+            if enabled
+        ]
+        lock = await self._acquire_lock("repair_rebuild")
+        if not lock:
+            return {
+                "success": False,
+                "profile": "repair_rebuild",
+                "error": "Repair rebuild lock is already held",
+                "from_date": start.isoformat(),
+                "to_date": end.isoformat(),
+            }
+
+        log_id = self._create_repair_sync_log(
+            from_date=start,
+            to_date=end,
+            entities=selected_entities,
+            truncate_period=truncate_period,
+            truncate_inventory=truncate_inventory,
+            dry_run=dry_run,
+        )
+        entity_status: Dict[str, Dict[str, Any]] = {}
         truncate_result = {
             "success": True,
             "skipped": True,
-            "deleted_orders": 0,
-            "deleted_returns": 0,
-            "deleted_inventory": 0,
+            "dry_run": bool(dry_run),
+            "deleted_sales_orders": 0,
+            "deleted_sales_returns": 0,
+            "deleted_inventory_snapshots": 0,
         }
-        if truncate_period:
-            truncate_result = self._truncate_window_data(
-                from_date=start,
-                to_date=end,
-                truncate_orders=include_orders,
-                truncate_returns=include_returns,
-                truncate_inventory=include_inventory and bool(truncate_inventory),
-                inventory_facility_code=inventory_facility_code,
-            )
-            truncate_result["skipped"] = False
-            if not truncate_result.get("success"):
-                return {
-                    "success": False,
-                    "profile": "repair_rebuild",
-                    "from_date": start.isoformat(),
-                    "to_date": end.isoformat(),
-                    "truncate_result": truncate_result,
-                }
 
-        rebuild_result = await self.run_backfill(
-            from_date=start,
-            to_date=end,
-            chunk_days=chunk_days,
-            include_orders=include_orders,
-            include_returns=include_returns,
-            include_inventory=include_inventory,
-            full_inventory_discovery=bool(full_inventory_discovery and include_inventory),
-            inventory_discovery_limit=inventory_discovery_limit,
-            inventory_facility_code=inventory_facility_code,
+        self._set_repair_progress(
+            progress_key,
+            {
+                "status": "running",
+                "phase": "started",
+                "from_date": start.isoformat(),
+                "to_date": end.isoformat(),
+                "entities": selected_entities,
+            },
         )
 
-        return {
-            "success": bool(rebuild_result.get("success")),
-            "profile": "repair_rebuild",
-            "from_date": start.isoformat(),
-            "to_date": end.isoformat(),
-            "entities": {
-                "sales": include_orders,
-                "returns": include_returns,
-                "inventory": include_inventory,
-            },
-            "truncate_period": bool(truncate_period),
-            "truncate_inventory": bool(truncate_inventory),
-            "truncate_result": truncate_result,
-            "rebuild_result": rebuild_result,
-        }
+        try:
+            if truncate_period or truncate_inventory:
+                self._set_repair_progress(
+                    progress_key,
+                    {
+                        "status": "running",
+                        "phase": "truncate",
+                        "from_date": start.isoformat(),
+                        "to_date": end.isoformat(),
+                        "entities": selected_entities,
+                    },
+                )
+                truncate_result = self._truncate_repair_targets(
+                    from_date=start,
+                    to_date=end,
+                    truncate_sales=bool(truncate_period and include_orders),
+                    truncate_returns=bool(truncate_period and include_returns),
+                    truncate_inventory=bool(truncate_inventory and include_inventory),
+                    dry_run=dry_run,
+                )
+                truncate_result["skipped"] = False
+                if not truncate_result.get("success"):
+                    duration = round(time.perf_counter() - started_at, 3)
+                    response = {
+                        "success": False,
+                        "profile": "repair_rebuild",
+                        "from_date": start.isoformat(),
+                        "to_date": end.isoformat(),
+                        "sales": {"status": "skipped"},
+                        "returns": {"status": "skipped"},
+                        "inventory": {"status": "skipped"},
+                        "truncate_result": truncate_result,
+                        "duration": duration,
+                        "dry_run": bool(dry_run),
+                    }
+                    self._finalize_repair_sync_log(
+                        log_id,
+                        success=False,
+                        details=response,
+                        error_message=str(truncate_result.get("error") or "truncate_failed"),
+                    )
+                    self._set_repair_progress(progress_key, {"status": "failed", "phase": "truncate", **response})
+                    return response
+
+            if dry_run:
+                for entity in ("sales", "returns", "inventory"):
+                    if entity in selected_entities:
+                        entity_status[entity] = {"status": "dry_run_skipped", "success": True}
+                    else:
+                        entity_status[entity] = {"status": "not_selected", "success": True}
+            else:
+                if include_orders:
+                    self._set_repair_progress(progress_key, {"status": "running", "phase": "sales", "entity": "sales"})
+                    sales_result = await self.sync_orders_window(start, end)
+                    entity_status["sales"] = {
+                        "status": "completed" if sales_result.get("success") else "failed",
+                        **sales_result,
+                    }
+                else:
+                    entity_status["sales"] = {"status": "not_selected", "success": True}
+
+                if include_returns:
+                    self._set_repair_progress(progress_key, {"status": "running", "phase": "returns", "entity": "returns"})
+                    returns_result = await self.sync_returns_window(start, end)
+                    entity_status["returns"] = {
+                        "status": "completed" if returns_result.get("success") else "failed",
+                        **returns_result,
+                    }
+                else:
+                    entity_status["returns"] = {"status": "not_selected", "success": True}
+
+                if include_inventory:
+                    self._set_repair_progress(
+                        progress_key,
+                        {"status": "running", "phase": "inventory", "entity": "inventory"},
+                    )
+                    inventory_result = await self.sync_inventory(
+                        facility_code=(str(inventory_facility_code or "anthrilo").strip() or "anthrilo"),
+                        full_discovery=bool(full_inventory_discovery),
+                        discovery_limit=inventory_discovery_limit,
+                    )
+                    entity_status["inventory"] = {
+                        "status": "completed" if inventory_result.get("success") else "failed",
+                        **inventory_result,
+                    }
+                else:
+                    entity_status["inventory"] = {"status": "not_selected", "success": True}
+
+                # Invalidate report caches and notify listeners only after actual writes.
+                CacheService.invalidate_all_uc_cache()
+                await ws_manager.broadcast(
+                    "all",
+                    {
+                        "type": "repair_rebuild_completed",
+                        "data": {
+                            "from_date": start.isoformat(),
+                            "to_date": end.isoformat(),
+                            "entities": selected_entities,
+                        },
+                    },
+                )
+
+            duration = round(time.perf_counter() - started_at, 3)
+            success = all(bool((entity_status.get(entity) or {}).get("success", False)) for entity in ("sales", "returns", "inventory"))
+            response = {
+                "success": success,
+                "profile": "repair_rebuild",
+                "from_date": start.isoformat(),
+                "to_date": end.isoformat(),
+                "sales": entity_status.get("sales", {"status": "unknown", "success": False}),
+                "returns": entity_status.get("returns", {"status": "unknown", "success": False}),
+                "inventory": entity_status.get("inventory", {"status": "unknown", "success": False}),
+                "truncate_period": bool(truncate_period),
+                "truncate_inventory": bool(truncate_inventory),
+                "truncate_result": truncate_result,
+                "dry_run": bool(dry_run),
+                "duration": duration,
+            }
+            self._finalize_repair_sync_log(log_id, success=success, details=response)
+            self._set_repair_progress(
+                progress_key,
+                {
+                    "status": "completed" if success else "failed",
+                    "phase": "completed",
+                    **response,
+                },
+            )
+            return response
+        except Exception as exc:
+            duration = round(time.perf_counter() - started_at, 3)
+            failure_response = {
+                "success": False,
+                "profile": "repair_rebuild",
+                "from_date": start.isoformat(),
+                "to_date": end.isoformat(),
+                "error": str(exc),
+                "duration": duration,
+                "dry_run": bool(dry_run),
+            }
+            self._finalize_repair_sync_log(log_id, success=False, details=failure_response, error_message=str(exc))
+            self._set_repair_progress(progress_key, {"status": "failed", "phase": "error", **failure_response})
+            logger.error(f"Repair rebuild failed: {exc}", exc_info=True)
+            return failure_response
+        finally:
+            await self._release_lock(lock)
 
     async def run_backfill_windows(
         self,

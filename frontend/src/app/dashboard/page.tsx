@@ -1,7 +1,7 @@
 'use client';
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ucSales } from '@/features/sales/api';
+import { unicommerceApi } from '@/lib/api';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useWebSocket } from '@/lib/hooks/useWebSocket';
@@ -9,15 +9,17 @@ import { useEffect, useRef, useState, useMemo, lazy, Suspense, useCallback } fro
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ShoppingCart, DollarSign, TrendingUp, Package,
-  Clock, Zap,
+  Zap,
   BarChart3, Boxes, Receipt, Store,
-  RefreshCw, X, Bell,
+  RefreshCw, X, Bell, AlertTriangle,
 } from 'lucide-react';
 import { KPIStatCard } from '@/components/dashboard/KPIStatCard';
 import { ChartCard } from '@/components/dashboard/ChartCard';
 import { ComparisonCard } from '@/components/dashboard/ComparisonCard';
 import { InsightsPanel } from '@/components/dashboard/InsightsPanel';
 import { ChartSkeleton } from '@/components/dashboard/charts/ChartSkeleton';
+import { DashboardHealthCard } from '@/components/dashboard/DashboardHealthCard';
+import { getClosedWindowLast7DaysIst, getDayBeforeYesterdayIst, getYesterdayIst } from '@/lib/ist-date';
 
 // -- Lazy-loaded Charts (React.lazy avoids next/dynamic _next/undefined chunk bug) --
 const RevenueTrendChart = lazy(() => import('@/components/dashboard/charts/RevenueTrendChart'));
@@ -28,16 +30,6 @@ const ChannelDonutChart = lazy(() => import('@/components/dashboard/charts/Chann
 // -- Helpers --
 const formatCurrency = (v: number) =>
   v >= 100000 ? `${(v / 100000).toFixed(1)}L` : v >= 1000 ? `${(v / 1000).toFixed(1)}K` : v.toLocaleString('en-IN');
-
-const SALES_SYNC_INTERVAL_MINUTES = 6 * 60;
-
-const timeAgo = (timestamp: number) => {
-  const seconds = Math.floor((Date.now() - timestamp) / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  return `${Math.floor(minutes / 60)}h ago`;
-};
 
 const parseBackendUtcTimestamp = (isoValue?: string | null): Date | null => {
   if (!isoValue) return null;
@@ -58,14 +50,6 @@ const sourceDataAge = (isoValue?: string | null) => {
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   return minutes > 0 ? `${hours}h ${minutes}m ago` : `${hours}h ago`;
-};
-
-const formatDuration = (totalMinutes: number) => {
-  if (totalMinutes <= 0) return 'now';
-  if (totalMinutes < 60) return `${totalMinutes}m`;
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 };
 
 // ---
@@ -98,74 +82,145 @@ export default function DashboardPage() {
     return () => { if (toastTimerRef.current) clearTimeout(toastTimerRef.current); };
   }, [newOrderNotification, dismissNotification]);
 
-  // -- Data Queries --
-  const { data: todayData, isLoading: loadingToday, dataUpdatedAt: updatedAt, isFetching: fetchingToday } = useQuery({
-    queryKey: ['unicommerce-today'],
-    queryFn: async () => (await ucSales.getToday()).data,
-    refetchInterval: 30 * 60 * 1000,
-    staleTime: 10 * 60 * 1000,
-    gcTime: 10 * 60 * 1000,
+  const closedWindow = useMemo(() => getClosedWindowLast7DaysIst(), []);
+  const yesterdayDate = useMemo(() => getYesterdayIst(), []);
+  const dayBeforeDate = useMemo(() => getDayBeforeYesterdayIst(), []);
+
+  // A) KPI source: single day only (yesterday)
+  const { data: kpiData, isLoading: loadingKpi, isFetching: fetchingKpi } = useQuery({
+    queryKey: ['dashboard-kpi-sales', yesterdayDate],
+    queryFn: async () =>
+      (
+        await unicommerceApi.getDbSales({
+          period: 'custom',
+          from_date: yesterdayDate,
+          to_date: yesterdayDate,
+          lightweight: true,
+        })
+      ).data,
+    refetchInterval: 60 * 1000,
+    staleTime: 0,
+    gcTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: true,
   });
 
-  const { data: yesterdayData, isLoading: loadingYesterday } = useQuery({
-    queryKey: ['unicommerce-yesterday'],
-    queryFn: async () => (await ucSales.getYesterday()).data,
-    refetchInterval: 6 * 60 * 60 * 1000,
-    staleTime: 2 * 60 * 60 * 1000,
+  // B) Trend source: closed 7-day window only
+  const { data: trendData, isLoading: loadingTrend } = useQuery({
+    queryKey: ['dashboard-trend-sales', closedWindow.fromDate, closedWindow.toDate],
+    queryFn: async () =>
+      (
+        await unicommerceApi.getDbSales({
+          period: 'custom',
+          from_date: closedWindow.fromDate,
+          to_date: closedWindow.toDate,
+          lightweight: true,
+        })
+      ).data,
+    refetchInterval: 60 * 1000,
+    staleTime: 0,
+    gcTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: true,
   });
 
-  // Parallel reads are safe because data is served from DB-first endpoints.
-  const { data: last7Days, isLoading: loading7d } = useQuery({
-    queryKey: ['unicommerce-last-7-days'],
-    queryFn: async () => (await ucSales.getLast7Days()).data,
-    refetchInterval: 6 * 60 * 60 * 1000,
-    staleTime: 2 * 60 * 60 * 1000,
-    gcTime: 60 * 60 * 1000,
-    placeholderData: (prev: any) => prev,
+  // C) Comparison source: two independent daily calls
+  const { data: yesterdayCompareData, isLoading: loadingYesterdayCompare } = useQuery({
+    queryKey: ['dashboard-compare-yesterday', yesterdayDate],
+    queryFn: async () =>
+      (
+        await unicommerceApi.getDbSales({
+          period: 'custom',
+          from_date: yesterdayDate,
+          to_date: yesterdayDate,
+          lightweight: true,
+        })
+      ).data,
+    refetchInterval: 60 * 1000,
+    staleTime: 0,
+    gcTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: true,
+  });
+
+  const { data: dayBeforeCompareData, isLoading: loadingDayBeforeCompare } = useQuery({
+    queryKey: ['dashboard-compare-day-before', dayBeforeDate],
+    queryFn: async () =>
+      (
+        await unicommerceApi.getDbSales({
+          period: 'custom',
+          from_date: dayBeforeDate,
+          to_date: dayBeforeDate,
+          lightweight: true,
+        })
+      ).data,
+    refetchInterval: 60 * 1000,
+    staleTime: 0,
+    gcTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: true,
+  });
+
+  const { data: inventoryData, isLoading: loadingInventory } = useQuery({
+    queryKey: ['dashboard-db-inventory'],
+    queryFn: async () => (await unicommerceApi.getDbInventory()).data,
+    refetchInterval: 60 * 1000,
+    staleTime: 0,
+    gcTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: true,
+  });
+
+  const { data: parityData, isLoading: loadingParity } = useQuery({
+    queryKey: ['dashboard-parity', closedWindow.fromDate, closedWindow.toDate],
+    queryFn: async () =>
+      (
+        await unicommerceApi.getDbFirstParityCheck({
+          from_date: closedWindow.fromDate,
+          to_date: closedWindow.toDate,
+          closed_window_mode: true,
+          revenue_drift_threshold_pct: 1,
+          orders_drift_threshold_pct: 1,
+        })
+      ).data,
+    refetchInterval: 60 * 1000,
+    staleTime: 0,
+    gcTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: true,
   });
 
   const { mutateAsync: syncNow, isPending: syncingNow } = useMutation({
-    mutationFn: async () => (await ucSales.syncNow()).data,
+    mutationFn: async () => (await unicommerceApi.runIncrementalSyncNow()).data,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['unicommerce-today'] });
-      queryClient.invalidateQueries({ queryKey: ['unicommerce-yesterday'] });
-      queryClient.invalidateQueries({ queryKey: ['unicommerce-last-7-days'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-db-sales'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-kpi-sales'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-trend-sales'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-compare-yesterday'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-compare-day-before'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-db-inventory'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-parity'] });
       if (wsConnected) requestRefresh();
     },
   });
 
-  const dashboardFallbackDay = useMemo(() => {
-    const breakdown = last7Days?.summary?.daily_breakdown;
-    if (!Array.isArray(breakdown) || breakdown.length === 0) return null;
-    for (let index = breakdown.length - 1; index >= 0; index -= 1) {
-      const day = breakdown[index];
-      if ((day?.orders || 0) > 0 || (day?.revenue || 0) > 0) {
-        return day;
-      }
-    }
-    return null;
-  }, [last7Days]);
-
   // -- Derived Values --
-  const todayOrders = todayData?.summary?.total_orders || dashboardFallbackDay?.orders || 0;
-  const todayRevenue = todayData?.summary?.total_revenue || dashboardFallbackDay?.revenue || 0;
-  const todayItems = todayData?.summary?.total_items || dashboardFallbackDay?.items || 0;
-  const avgOrderValue = todayData?.summary?.avg_order_value || (todayOrders > 0 ? todayRevenue / todayOrders : 0);
-  const yesterdayOrders = yesterdayData?.summary?.total_orders || 0;
-  const yesterdayRevenue = yesterdayData?.summary?.total_revenue || 0;
-  const yesterdayItems = yesterdayData?.summary?.total_items || 0;
-  const isLoading = loadingToday && !todayData;
+  const todayOrders = kpiData?.summary?.valid_orders || 0;
+  const todayRevenue = kpiData?.summary?.total_revenue || 0;
+  const todayItems = kpiData?.summary?.total_items || 0;
+  const avgOrderValue = kpiData?.summary?.avg_order_value || (todayOrders > 0 ? todayRevenue / todayOrders : 0);
+  const yesterdayOrders = yesterdayCompareData?.summary?.valid_orders || 0;
+  const yesterdayRevenue = yesterdayCompareData?.summary?.total_revenue || 0;
+  const yesterdayItems = yesterdayCompareData?.summary?.total_items || 0;
+  const dayBeforeOrders = dayBeforeCompareData?.summary?.valid_orders || 0;
+  const dayBeforeRevenue = dayBeforeCompareData?.summary?.total_revenue || 0;
+  const dayBeforeItems = dayBeforeCompareData?.summary?.total_items || 0;
+  const isLoading = loadingKpi || loadingTrend || loadingYesterdayCompare || loadingDayBeforeCompare || loadingInventory || loadingParity;
 
   const dataHealthBadge = useMemo(() => {
-    if (!todayData) {
+    if (!kpiData) {
       return { label: 'Unknown', dotClass: 'bg-slate-400' };
     }
 
-    if (todayData.fallback_used) {
+    if (kpiData.fallback_used) {
       return { label: 'Using fallback', dotClass: 'bg-amber-500 animate-pulse' };
     }
 
-    const lastSyncedAt = todayData.last_synced_at;
+    const lastSyncedAt = kpiData.last_synced_at;
     if (lastSyncedAt) {
       const parsed = parseBackendUtcTimestamp(lastSyncedAt);
       if (parsed) {
@@ -177,67 +232,45 @@ export default function DashboardPage() {
     }
 
     return { label: 'Healthy', dotClass: 'bg-emerald-500' };
-  }, [todayData]);
+  }, [kpiData]);
 
   const sourceAgeLabel = useMemo(
-    () => sourceDataAge(todayData?.last_synced_at),
-    [todayData?.last_synced_at],
+    () => sourceDataAge(kpiData?.last_synced_at),
+    [kpiData?.last_synced_at],
   );
 
-  const lastDbSyncAt = useMemo(
-    () => parseBackendUtcTimestamp(todayData?.last_synced_at),
-    [todayData?.last_synced_at],
-  );
+  const healthStatus = useMemo(() => {
+    const revenueDrift = Number(parityData?.drift?.revenue_drift_pct || 0);
+    if (!parityData?.success) return 'error' as const;
+    if (revenueDrift > 1) return 'warning' as const;
+    return 'healthy' as const;
+  }, [parityData]);
 
-  const nextSyncLabel = useMemo(() => {
-    if (!lastDbSyncAt) {
-      return 'Next scheduled sync every 6h';
-    }
+  const showDriftAlert = useMemo(() => {
+    const closed = parityData?.window_type === 'closed';
+    const drift = Number(parityData?.drift?.revenue_drift_pct || 0);
+    return Boolean(closed && drift > 1);
+  }, [parityData]);
 
-    const nextSyncAt = new Date(lastDbSyncAt.getTime() + SALES_SYNC_INTERVAL_MINUTES * 60 * 1000);
-    const remainingMinutes = Math.max(0, Math.ceil((nextSyncAt.getTime() - Date.now()) / 60000));
-    const nextAt = nextSyncAt.toLocaleTimeString('en-IN', {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true,
-    });
-
-    if (remainingMinutes === 0) {
-      return `Next scheduled sync due now (${nextAt})`;
-    }
-
-    return `Next scheduled sync in ${formatDuration(remainingMinutes)} (${nextAt})`;
-  }, [lastDbSyncAt]);
+  const showSourceWarning = useMemo(() => {
+    const fallback = Boolean(kpiData?.fallback_used);
+    const health = (kpiData as any)?.data_health;
+    const healthStatus = typeof health === 'string' ? health : health?.coverage;
+    const unhealthy = Boolean(healthStatus) && String(healthStatus).toLowerCase() !== 'healthy' && String(healthStatus).toLowerCase() !== 'normalized';
+    return fallback || unhealthy;
+  }, [kpiData]);
 
   // Growth calculations
-  const orderGrowth = yesterdayOrders > 0 ? ((todayOrders - yesterdayOrders) / yesterdayOrders) * 100 : 0;
-  const revenueGrowth = yesterdayRevenue > 0 ? ((todayRevenue - yesterdayRevenue) / yesterdayRevenue) * 100 : 0;
+  const orderGrowth = dayBeforeOrders > 0 ? ((yesterdayOrders - dayBeforeOrders) / dayBeforeOrders) * 100 : 0;
+  const revenueGrowth = dayBeforeRevenue > 0 ? ((yesterdayRevenue - dayBeforeRevenue) / dayBeforeRevenue) * 100 : 0;
 
   // Daily trend data — use pre-aggregated daily_breakdown from backend summary
   // Defensive: if backend returns per-order entries instead of daily aggregates,
   // re-aggregate client-side (should never happen with fixed backend)
   const dailyTrend = useMemo(() => {
-    const breakdown = last7Days?.summary?.daily_breakdown;
+    const breakdown = trendData?.summary?.daily_breakdown;
     if (!breakdown || !Array.isArray(breakdown) || breakdown.length === 0) return [];
-
-    let data = breakdown;
-
-    // Guard: if too many entries (expected max ~30 for a month, 7 for a week),
-    // the backend returned per-order rows — re-aggregate by date client-side
-    if (data.length > 31) {
-      const byDate: Record<string, { date: string; orders: number; revenue: number; items: number }> = {};
-      for (const d of data) {
-        const key = (d.date || '').slice(0, 10);
-        if (!key) continue;
-        if (!byDate[key]) byDate[key] = { date: key, orders: 0, revenue: 0, items: 0 };
-        byDate[key].orders += d.orders || 0;
-        byDate[key].revenue += d.revenue || 0;
-        byDate[key].items += d.items || 0;
-      }
-      data = Object.values(byDate);
-    }
-
-    return data
+    return breakdown
       .sort((a: any, b: any) => (a.date || '').localeCompare(b.date || ''))
       .map((d: any) => ({
         date: (d.date || '').slice(5),              // "2026-02-14" → "02-14"
@@ -246,17 +279,17 @@ export default function DashboardPage() {
         revenue: Math.round(d.revenue || 0),
         items: d.items || 0,
       }));
-  }, [last7Days]);
+  }, [trendData]);
 
   const channelRows = useMemo(() => {
-    const breakdown = last7Days?.summary?.channel_breakdown || {};
+    const breakdown = trendData?.summary?.channel_breakdown || {};
     return Object.entries(breakdown).map(([channel, values]: [string, any]) => ({
       channel,
       revenue: Number(values?.revenue || 0),
       orders: Number(values?.orders || 0),
       items: Number(values?.items || 0),
     }));
-  }, [last7Days]);
+  }, [trendData]);
 
   // Channel chart data (memoized)
   const channelChartData = useMemo(() => {
@@ -293,25 +326,22 @@ export default function DashboardPage() {
       : undefined;
   }, [channelChartData]);
 
-  // Yesterday vs Day-Before-Yesterday — derived from dailyTrend (already aggregated + sorted)
-  const { ydayRevenue, ydayOrders, ydayItems, dbyRevenue, dbyOrders, dbyItems } = useMemo(() => {
-    if (dailyTrend.length < 2) {
-      return {
-        ydayRevenue: yesterdayRevenue, ydayOrders: yesterdayOrders, ydayItems: yesterdayItems,
-        dbyRevenue: 0, dbyOrders: 0, dbyItems: 0,
-      };
-    }
-    const yday = dailyTrend[dailyTrend.length - 1];
-    const dby = dailyTrend[dailyTrend.length - 2];
-    return {
-      ydayRevenue: Math.round(yday.revenue || 0),
-      ydayOrders: yday.orders || 0,
-      ydayItems: yday.items || 0,
-      dbyRevenue: Math.round(dby.revenue || 0),
-      dbyOrders: dby.orders || 0,
-      dbyItems: dby.items || 0,
-    };
-  }, [dailyTrend, yesterdayRevenue, yesterdayOrders, yesterdayItems]);
+  // Comparison values come from dedicated daily API calls only.
+  const ydayRevenue = yesterdayRevenue;
+  const ydayOrders = yesterdayOrders;
+  const ydayItems = yesterdayItems;
+  const dbyRevenue = dayBeforeRevenue;
+  const dbyOrders = dayBeforeOrders;
+  const dbyItems = dayBeforeItems;
+
+  // Temporary debug logs requested
+  useEffect(() => {
+    console.log('KPI:', kpiData);
+  }, [kpiData]);
+
+  useEffect(() => {
+    console.log('Trend:', trendData);
+  }, [trendData]);
 
   // Sparkline data from daily breakdown
   const revenueSparkline = useMemo(() => dailyTrend.map((d: any) => d.revenue), [dailyTrend]);
@@ -319,9 +349,10 @@ export default function DashboardPage() {
   const itemsSparkline = useMemo(() => dailyTrend.map((d: any) => d.items), [dailyTrend]);
 
   const handleRefresh = () => {
-    queryClient.invalidateQueries({ queryKey: ['unicommerce-today'] });
-    queryClient.invalidateQueries({ queryKey: ['unicommerce-yesterday'] });
-    queryClient.invalidateQueries({ queryKey: ['unicommerce-last-7-days'] });
+    queryClient.invalidateQueries({ queryKey: ['dashboard-kpi-sales'] });
+    queryClient.invalidateQueries({ queryKey: ['dashboard-trend-sales'] });
+    queryClient.invalidateQueries({ queryKey: ['dashboard-compare-yesterday'] });
+    queryClient.invalidateQueries({ queryKey: ['dashboard-compare-day-before'] });
     if (wsConnected) requestRefresh();
   };
 
@@ -362,7 +393,10 @@ export default function DashboardPage() {
                     {newOrderNotification.count} New Order{newOrderNotification.count > 1 ? 's' : ''}
                   </span>
                 </div>
-                <button onClick={() => { setShowToast(false); dismissNotification(); }}
+                <button
+                  aria-label="Dismiss notification"
+                  title="Dismiss notification"
+                  onClick={() => { setShowToast(false); dismissNotification(); }}
                   className="text-white/70 hover:text-white transition-colors"><X className="w-4 h-4" /></button>
               </div>
               <div className="p-4 space-y-2">
@@ -414,19 +448,10 @@ export default function DashboardPage() {
                 {dataHealthBadge.label}
               </span>
             </div>
-            {updatedAt > 0 && (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800">
-                <Clock className="w-3 h-3 text-slate-400" />
-                <span className="text-xs text-slate-500 dark:text-slate-400">Last UI refresh {timeAgo(updatedAt)}</span>
-              </div>
-            )}
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800">
-              <Clock className="w-3 h-3 text-slate-400" />
-              <span className="text-xs text-slate-500 dark:text-slate-400">Last DB sync {sourceAgeLabel}</span>
-            </div>
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800">
-              <Clock className="w-3 h-3 text-slate-400" />
-              <span className="text-xs text-slate-500 dark:text-slate-400">{nextSyncLabel}</span>
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                IST closed window: {closedWindow.fromDate} to {closedWindow.toDate}
+              </span>
             </div>
           </div>
           <button
@@ -440,11 +465,41 @@ export default function DashboardPage() {
           <button
             onClick={handleRefresh}
             className="btn btn-secondary w-auto self-start sm:self-auto !px-3.5 !py-2 !text-sm"
-            disabled={fetchingToday || syncingNow}
+            disabled={fetchingKpi || syncingNow}
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${fetchingToday ? 'animate-spin' : ''}`} />
-            {fetchingToday ? 'Refreshing...' : 'Refresh'}
+            <RefreshCw className={`w-3.5 h-3.5 ${fetchingKpi ? 'animate-spin' : ''}`} />
+            {fetchingKpi ? 'Refreshing...' : 'Refresh'}
           </button>
+        </div>
+      </div>
+
+      {showDriftAlert && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300 px-3 py-2 text-sm flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4" />
+          Data inconsistency detected (closed window drift {'>'} 1%).
+        </div>
+      )}
+
+      {showSourceWarning && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300 px-3 py-2 text-sm flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4" />
+          Source warning: fallback data or unhealthy data coverage detected.
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <DashboardHealthCard
+          status={healthStatus}
+          drift={Number(parityData?.drift?.revenue_drift_pct || 0)}
+          window={(parityData?.window_type || 'closed') as 'closed' | 'open'}
+          timezone={parityData?.timezone || 'IST'}
+        />
+        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 text-xs text-slate-600 dark:text-slate-300">
+          <p>Data source: {kpiData?.data_source || 'unknown'}</p>
+          <p>Fallback used: {kpiData?.fallback_used ? 'yes' : 'no'}</p>
+          <p>Last DB sync: {sourceAgeLabel}</p>
+          <p>Total Orders (DB): {kpiData?.summary?.valid_orders ?? 0}</p>
+          <p>Total SKUs (DB): {inventoryData?.total_skus ?? inventoryData?.summary?.total_skus ?? 0}</p>
         </div>
       </div>
 
@@ -546,7 +601,7 @@ export default function DashboardPage() {
             title="Yesterday vs Day Before"
             leftLabel="Yesterday"
             rightLabel="Day Before"
-            loading={loading7d && !last7Days}
+            loading={loadingTrend && !trendData}
             metrics={[
               {
                 label: 'Revenue',
@@ -586,7 +641,7 @@ export default function DashboardPage() {
               yesterdayItems={dbyItems}
               topChannel={topChannel}
               totalChannels={channelRows.length}
-              loading={loading7d && !last7Days}
+              loading={loadingTrend && !trendData}
               comparisonLabel="day before yesterday"
             />
           </motion.div>

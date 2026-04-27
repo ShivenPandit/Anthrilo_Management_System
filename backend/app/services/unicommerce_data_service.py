@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -23,6 +24,7 @@ from app.db.export_models import (
 from app.db.models import ProductMaster
 from app.services.cache_service import CacheService
 from app.services.unicommerce import get_unicommerce_service
+from app.utils.timezone_utils import IST, normalize_date_range_ist
 
 
 logger = logging.getLogger(__name__)
@@ -199,27 +201,45 @@ class UnicommerceDataService:
         from_date: Optional[datetime],
         to_date: Optional[datetime],
     ) -> Tuple[datetime, datetime, str]:
+        def _normalize_window(start_dt: datetime, end_dt: datetime) -> Tuple[datetime, datetime]:
+            start_utc, end_exclusive_utc, _ = normalize_date_range_ist(
+                start_dt,
+                end_dt,
+                closed_window_mode=False,
+            )
+            return start_utc, end_exclusive_utc
+
         if period == "today":
             start, end = self.uc_service.get_today_range()
-            return start, end, "today"
+            norm_start, norm_end_exclusive = _normalize_window(start, end)
+            return norm_start, norm_end_exclusive, "today"
 
         if period == "yesterday":
             start, end = self.uc_service.get_yesterday_range()
-            return start, end, "yesterday"
+            norm_start, norm_end_exclusive = _normalize_window(start, end)
+            return norm_start, norm_end_exclusive, "yesterday"
 
         if period == "last_7_days":
             start, end = self.uc_service.get_last_n_days_range(7)
-            return start, end, "last_7_days"
+            norm_start, norm_end_exclusive = _normalize_window(start, end)
+            return norm_start, norm_end_exclusive, "last_7_days"
 
         if period == "last_30_days":
             start, end = self.uc_service.get_last_n_days_range(30)
-            return start, end, "last_30_days"
+            norm_start, norm_end_exclusive = _normalize_window(start, end)
+            return norm_start, norm_end_exclusive, "last_30_days"
 
         if from_date and to_date:
-            return from_date, to_date, "custom"
+            norm_start, norm_end_exclusive, _ = normalize_date_range_ist(
+                from_date,
+                to_date,
+                closed_window_mode=False,
+            )
+            return norm_start, norm_end_exclusive, "custom"
 
         start, end = self.uc_service.get_today_range()
-        return start, end, "today"
+        norm_start, norm_end_exclusive = _normalize_window(start, end)
+        return norm_start, norm_end_exclusive, "today"
 
     def _raw_line_rows_from_sales_payloads(
         self,
@@ -241,7 +261,7 @@ class UnicommerceDataService:
             )
             order_date = self._normalize_dt(order_date)
 
-            if order_date and (order_date < from_date or order_date > to_date):
+            if order_date and (order_date < from_date or order_date >= to_date):
                 continue
 
             qty = self._safe_int(
@@ -783,7 +803,7 @@ class UnicommerceDataService:
             date_filter = and_(
                 SalesOrderRecord.order_date.isnot(None),
                 SalesOrderRecord.order_date >= start,
-                SalesOrderRecord.order_date <= end,
+                SalesOrderRecord.order_date < end,
             )
 
             if include_legacy_orders:
@@ -1329,42 +1349,53 @@ class UnicommerceDataService:
                 }
 
             if is_range:
-                from_dt = datetime.strptime(str(from_date), "%Y-%m-%d").replace(
-                    hour=0,
-                    minute=0,
-                    second=0,
-                    tzinfo=timezone.utc,
+                from_dt, to_exclusive_dt, _ = normalize_date_range_ist(
+                    str(from_date),
+                    str(to_date),
+                    closed_window_mode=False,
                 )
-                to_dt = datetime.strptime(str(to_date), "%Y-%m-%d").replace(
-                    hour=23,
-                    minute=59,
-                    second=59,
-                    tzinfo=timezone.utc,
-                )
+                to_dt = to_exclusive_dt - timedelta(seconds=1)
                 date_label = f"{from_date} to {to_date}"
             else:
                 report_date = datetime.strptime(str(date), "%Y-%m-%d").date()
-                from_dt = datetime.strptime(str(date), "%Y-%m-%d").replace(
-                    hour=0,
-                    minute=0,
-                    second=0,
-                    tzinfo=timezone.utc,
+                from_dt, to_exclusive_dt, _ = normalize_date_range_ist(
+                    str(date),
+                    str(date),
+                    closed_window_mode=False,
                 )
-                to_dt = datetime.strptime(str(date), "%Y-%m-%d").replace(
-                    hour=23,
-                    minute=59,
-                    second=59,
-                    tzinfo=timezone.utc,
-                )
+                to_dt = to_exclusive_dt - timedelta(seconds=1)
                 date_label = str(date)
 
             self._emit_progress(progress_cb, 15, "Loading sales rows for selected range…")
-            sales_result = self.get_sales_data(
-                period="custom",
-                from_date=from_dt,
-                to_date=to_dt,
-                include_legacy_orders=False,
-            )
+            # For single-day today/yesterday views, prefer live export parity with Unicommerce UI.
+            if not is_range and date:
+                report_day = datetime.strptime(str(date), "%Y-%m-%d").date()
+                today_ist = datetime.now(IST).date()
+                if report_day in {today_ist, today_ist - timedelta(days=1)}:
+                    sales_result = asyncio.run(
+                        self.uc_service.get_sales_data(
+                            from_date=from_dt,
+                            to_date=to_dt,
+                            period_name="custom",
+                        )
+                    )
+                    if isinstance(sales_result, dict):
+                        sales_result["data_source"] = "live_export_api"
+                        sales_result["fallback_used"] = False
+                else:
+                    sales_result = self.get_sales_data(
+                        period="custom",
+                        from_date=from_dt,
+                        to_date=to_dt,
+                        include_legacy_orders=False,
+                    )
+            else:
+                sales_result = self.get_sales_data(
+                    period="custom",
+                    from_date=from_dt,
+                    to_date=to_dt,
+                    include_legacy_orders=False,
+                )
 
             if not sales_result.get("success"):
                 return sales_result
@@ -1416,7 +1447,7 @@ class UnicommerceDataService:
                             and_(
                                 SalesOrderRecord.order_date.isnot(None),
                                 SalesOrderRecord.order_date >= from_dt,
-                                SalesOrderRecord.order_date <= to_dt,
+                                SalesOrderRecord.order_date < to_dt,
                             )
                         )
                         .all()
@@ -1515,8 +1546,12 @@ class UnicommerceDataService:
             if not is_range and date:
                 self._emit_progress(progress_cb, 82, "Preparing comparison with previous day…")
                 comp_date = datetime.strptime(str(date), "%Y-%m-%d").date() - timedelta(days=1)
-                comp_from = datetime.combine(comp_date, datetime.min.time()).replace(tzinfo=timezone.utc)
-                comp_to = datetime.combine(comp_date, datetime.max.time()).replace(tzinfo=timezone.utc)
+                comp_from, comp_to_exclusive, _ = normalize_date_range_ist(
+                    comp_date.isoformat(),
+                    comp_date.isoformat(),
+                    closed_window_mode=False,
+                )
+                comp_to = comp_to_exclusive - timedelta(seconds=1)
                 comp_result = self.get_sales_data(
                     period="custom",
                     from_date=comp_from,

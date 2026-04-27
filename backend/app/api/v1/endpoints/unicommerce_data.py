@@ -14,6 +14,7 @@ from app.services.cache_service import CacheService
 from app.services.unicommerce import get_unicommerce_service
 from app.services.unicommerce_data_service import get_unicommerce_data_service
 from app.services.unicommerce_sync_orchestrator import get_unicommerce_sync_orchestrator
+from app.utils.timezone_utils import normalize_date_range_ist
 
 
 router = APIRouter()
@@ -143,6 +144,14 @@ async def get_sales_data(
     try:
         parsed_from = _parse_date_boundary(from_date, end_of_day=False) if from_date else None
         parsed_to = _parse_date_boundary(to_date, end_of_day=True) if to_date else None
+        if period == "custom" and from_date and to_date:
+            start_utc, end_exclusive_utc, _ = normalize_date_range_ist(
+                from_date,
+                to_date,
+                closed_window_mode=False,
+            )
+            parsed_from = start_utc
+            parsed_to = end_exclusive_utc - timedelta(seconds=1)
     except ValueError as exc:
         return {
             "success": False,
@@ -184,6 +193,14 @@ def get_orders_paginated(
     try:
         parsed_from = _parse_date_boundary(from_date, end_of_day=False) if from_date else None
         parsed_to = _parse_date_boundary(to_date, end_of_day=True) if to_date else None
+        if period == "custom" and from_date and to_date:
+            start_utc, end_exclusive_utc, _ = normalize_date_range_ist(
+                from_date,
+                to_date,
+                closed_window_mode=False,
+            )
+            parsed_from = start_utc
+            parsed_to = end_exclusive_utc - timedelta(seconds=1)
     except ValueError as exc:
         return {
             "success": False,
