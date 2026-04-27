@@ -26,6 +26,8 @@ EXCLUDED_REVENUE_STATUSES = {
     "ERROR",
     "PENDING_VERIFICATION",
 }
+PARITY_REVENUE_DRIFT_THRESHOLD_PCT = 1.0
+PARITY_ORDERS_DRIFT_THRESHOLD_PCT = 1.0
 
 
 # WEBSOCKET CONNECTION MANAGER
@@ -71,12 +73,131 @@ def _parse_date_boundary_utc(value: str, end_of_day: bool = False) -> datetime:
     return parsed.replace(tzinfo=timezone.utc)
 
 
+def _drift_percent(diff: float, baseline: float) -> float:
+    return round((abs(diff) / max(abs(baseline), 1.0)) * 100.0, 4)
+
+
+async def _get_guardrailed_sales_data(
+    *,
+    period: str,
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+    compare_live: bool = False,
+) -> dict:
+    """Fetch DB-first sales data and optionally guard with live export parity."""
+    data_service = get_unicommerce_data_service()
+
+    if period == "custom":
+        if not from_dt or not to_dt:
+            return {"success": False, "error": "from_dt and to_dt are required for custom period"}
+        db_result = data_service.get_sales_data(
+            period="custom",
+            from_date=from_dt,
+            to_date=to_dt,
+        )
+        range_start = from_dt
+        range_end = to_dt
+    else:
+        db_result = data_service.get_sales_data(period=period)
+        uc_service = get_unicommerce_service()
+        if period == "today":
+            range_start, range_end = uc_service.get_today_range()
+        elif period == "yesterday":
+            range_start, range_end = uc_service.get_yesterday_range()
+        else:
+            range_start, range_end = uc_service.get_last_n_days_range(7)
+
+    if not compare_live:
+        return db_result
+
+    uc_service = get_unicommerce_service()
+    live_result = await uc_service.get_sales_data(
+        from_date=range_start,
+        to_date=range_end,
+        period_name="custom",
+    )
+
+    if not db_result.get("success") and live_result.get("success"):
+        live_result["data_source"] = "live_export_guardrail"
+        live_result["fallback_used"] = True
+        live_result["parity_check"] = {
+            "enabled": True,
+            "reason": "db_failed_live_used",
+            "revenue_drift_pct": None,
+            "orders_drift_pct": None,
+            "passed": False,
+        }
+        return live_result
+
+    if db_result.get("success") and not live_result.get("success"):
+        db_result["parity_check"] = {
+            "enabled": True,
+            "reason": "live_failed_db_used",
+            "revenue_drift_pct": None,
+            "orders_drift_pct": None,
+            "passed": False,
+        }
+        return db_result
+
+    if not db_result.get("success") and not live_result.get("success"):
+        return db_result
+
+    db_summary = dict(db_result.get("summary") or {})
+    live_summary = dict(live_result.get("summary") or {})
+
+    db_revenue = float(db_summary.get("total_revenue", 0) or 0.0)
+    live_revenue = float(live_summary.get("total_revenue", 0) or 0.0)
+    db_valid_orders = int(db_summary.get("valid_orders", 0) or 0)
+    live_valid_orders = int(live_summary.get("valid_orders", 0) or 0)
+
+    revenue_diff = round(db_revenue - live_revenue, 2)
+    orders_diff = int(db_valid_orders - live_valid_orders)
+    revenue_drift_pct = _drift_percent(revenue_diff, live_revenue)
+    orders_drift_pct = _drift_percent(float(orders_diff), float(live_valid_orders))
+
+    passed = (
+        revenue_drift_pct <= PARITY_REVENUE_DRIFT_THRESHOLD_PCT
+        and orders_drift_pct <= PARITY_ORDERS_DRIFT_THRESHOLD_PCT
+    )
+
+    parity_payload = {
+        "enabled": True,
+        "revenue_diff": revenue_diff,
+        "orders_diff": orders_diff,
+        "revenue_drift_pct": revenue_drift_pct,
+        "orders_drift_pct": orders_drift_pct,
+        "revenue_threshold_pct": PARITY_REVENUE_DRIFT_THRESHOLD_PCT,
+        "orders_threshold_pct": PARITY_ORDERS_DRIFT_THRESHOLD_PCT,
+        "passed": passed,
+    }
+
+    if passed:
+        db_result["parity_check"] = parity_payload
+        return db_result
+
+    logger.warning(
+        "Guardrail fallback to live export: period=%s revenue_drift=%.4f%% orders_drift=%.4f%%",
+        period,
+        revenue_drift_pct,
+        orders_drift_pct,
+    )
+    live_result["data_source"] = "live_export_guardrail"
+    live_result["fallback_used"] = True
+    live_result["parity_check"] = parity_payload
+    return live_result
+
+
 async def _broadcast_sales_refresh(sync_event: dict | None = None) -> None:
     """Broadcast refreshed sales snapshot and optional sync completion event."""
     try:
+        # Avoid serving stale zero/old values after sync or backfill updates.
+        CacheService.invalidate_all_uc_cache()
+
         today_key = f"uc:today:{datetime.now(IST).strftime('%Y-%m-%d')}"
-        data_service = get_unicommerce_data_service()
-        today_result = data_service.get_sales_data(period="today")
+        today_result = await _get_guardrailed_sales_data(
+            period="today",
+            compare_live=True,
+        )
 
         if today_result.get("success"):
             CacheService.set(today_key, today_result, 180)
@@ -103,8 +224,10 @@ async def get_today_sales():
             return cached
 
         logger.info("Fetching TODAY sales (cache miss)")
-        data_service = get_unicommerce_data_service()
-        result = data_service.get_sales_data(period="today")
+        result = await _get_guardrailed_sales_data(
+            period="today",
+            compare_live=True,
+        )
 
         if result.get("success"):
             summary = result.get("summary", {})
@@ -139,8 +262,10 @@ async def get_yesterday_sales():
             return cached
 
         logger.info("Fetching YESTERDAY sales (cache miss)")
-        data_service = get_unicommerce_data_service()
-        result = data_service.get_sales_data(period="yesterday")
+        result = await _get_guardrailed_sales_data(
+            period="yesterday",
+            compare_live=True,
+        )
 
         if result.get("success"):
             summary = result.get("summary", {})
@@ -169,8 +294,10 @@ async def get_last_7_days():
             return cached
 
         logger.info("Fetching LAST 7 DAYS sales (cache miss)")
-        data_service = get_unicommerce_data_service()
-        result = data_service.get_sales_data(period="last_7_days")
+        result = await _get_guardrailed_sales_data(
+            period="last_7_days",
+            compare_live=True,
+        )
 
         if result.get("success"):
             summary = result.get("summary", {})
@@ -300,14 +427,21 @@ async def get_sales_report(
             cached["_cached"] = True
             return cached
 
-        data_service = get_unicommerce_data_service()
-
         if period == "today":
-            result = data_service.get_sales_data(period="today")
+            result = await _get_guardrailed_sales_data(
+                period="today",
+                compare_live=True,
+            )
         elif period == "yesterday":
-            result = data_service.get_sales_data(period="yesterday")
+            result = await _get_guardrailed_sales_data(
+                period="yesterday",
+                compare_live=True,
+            )
         elif period == "last_7_days":
-            result = data_service.get_sales_data(period="last_7_days")
+            result = await _get_guardrailed_sales_data(
+                period="last_7_days",
+                compare_live=True,
+            )
         elif period == "custom" and from_date and to_date:
             from_dt = datetime.strptime(from_date, "%Y-%m-%d").replace(
                 hour=0, minute=0, second=0, tzinfo=IST
@@ -315,13 +449,17 @@ async def get_sales_report(
             to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(
                 hour=23, minute=59, second=59, tzinfo=IST
             ).astimezone(timezone.utc)
-            result = data_service.get_sales_data(
+            result = await _get_guardrailed_sales_data(
                 period="custom",
-                from_date=from_dt,
-                to_date=to_dt,
+                from_dt=from_dt,
+                to_dt=to_dt,
+                compare_live=True,
             )
         else:
-            result = data_service.get_sales_data(period="today")
+            result = await _get_guardrailed_sales_data(
+                period="today",
+                compare_live=True,
+            )
 
         # Cache result
         ttl = 180 if period == "today" else CacheService.TTL_MEDIUM
@@ -374,10 +512,11 @@ async def get_daily_sales_report(
             to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(
                 hour=23, minute=59, second=59, tzinfo=IST
             ).astimezone(timezone.utc)
-            result = data_service.get_sales_data(
+            result = await _get_guardrailed_sales_data(
                 period="custom",
-                from_date=from_dt,
-                to_date=to_dt,
+                from_dt=from_dt,
+                to_dt=to_dt,
+                compare_live=True,
             )
             date_label = f"{from_date} to {to_date}"
         else:
@@ -388,9 +527,15 @@ async def get_daily_sales_report(
 
             result = None
             if report_date == today:
-                result = data_service.get_sales_data(period="today")
+                result = await _get_guardrailed_sales_data(
+                    period="today",
+                    compare_live=True,
+                )
             elif report_date == yesterday:
-                result = data_service.get_sales_data(period="yesterday")
+                result = await _get_guardrailed_sales_data(
+                    period="yesterday",
+                    compare_live=True,
+                )
             else:
                 from_dt = datetime.strptime(date, "%Y-%m-%d").replace(
                     hour=0, minute=0, second=0, tzinfo=IST
@@ -398,10 +543,11 @@ async def get_daily_sales_report(
                 to_dt = datetime.strptime(date, "%Y-%m-%d").replace(
                     hour=23, minute=59, second=59, tzinfo=IST
                 ).astimezone(timezone.utc)
-                result = data_service.get_sales_data(
+                result = await _get_guardrailed_sales_data(
                     period="custom",
-                    from_date=from_dt,
-                    to_date=to_dt,
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                    compare_live=True,
                 )
             date_label = date
 
@@ -607,6 +753,169 @@ async def get_daily_sales_report(
         logger.error(
             f"Error generating daily sales report: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
+
+
+@router.get("/unicommerce/db-first-parity-check")
+async def get_db_first_parity_check(
+    date: str | None = Query(None, description="Single date (YYYY-MM-DD)"),
+    from_date: str | None = Query(None, description="Range start date (YYYY-MM-DD)"),
+    to_date: str | None = Query(None, description="Range end date (YYYY-MM-DD)"),
+    revenue_drift_threshold_pct: float = Query(1.0, description="Allowed revenue drift percent"),
+    orders_drift_threshold_pct: float = Query(1.0, description="Allowed valid orders drift percent"),
+):
+    """Compare DB-first sales summary with live export-job API for the same date window."""
+    try:
+        is_range = bool(from_date and to_date)
+        if not is_range and not date:
+            return {
+                "success": False,
+                "error": "Provide either 'date' or both 'from_date' and 'to_date'.",
+            }
+
+        if is_range:
+            from_dt = datetime.strptime(str(from_date), "%Y-%m-%d").replace(
+                hour=0,
+                minute=0,
+                second=0,
+                tzinfo=IST,
+            ).astimezone(timezone.utc)
+            to_dt = datetime.strptime(str(to_date), "%Y-%m-%d").replace(
+                hour=23,
+                minute=59,
+                second=59,
+                tzinfo=IST,
+            ).astimezone(timezone.utc)
+            window_label = f"{from_date} to {to_date}"
+        else:
+            from_dt = datetime.strptime(str(date), "%Y-%m-%d").replace(
+                hour=0,
+                minute=0,
+                second=0,
+                tzinfo=IST,
+            ).astimezone(timezone.utc)
+            to_dt = datetime.strptime(str(date), "%Y-%m-%d").replace(
+                hour=23,
+                minute=59,
+                second=59,
+                tzinfo=IST,
+            ).astimezone(timezone.utc)
+            window_label = str(date)
+
+        data_service = get_unicommerce_data_service()
+        uc_service = get_unicommerce_service()
+
+        db_result = data_service.get_sales_data(
+            period="custom",
+            from_date=from_dt,
+            to_date=to_dt,
+            include_legacy_orders=False,
+            include_orders=False,
+            include_summary=True,
+        )
+        if not db_result.get("success"):
+            return {
+                "success": False,
+                "error": db_result.get("error", "DB-first sales read failed"),
+                "window": window_label,
+            }
+
+        live_result = await uc_service.get_sales_data(
+            from_date=from_dt,
+            to_date=to_dt,
+            period_name="custom",
+        )
+        if not live_result.get("success"):
+            return {
+                "success": False,
+                "error": live_result.get("message", "Live export API read failed"),
+                "window": window_label,
+                "db_first": {
+                    "data_source": db_result.get("data_source"),
+                    "fallback_used": bool(db_result.get("fallback_used")),
+                    "last_synced_at": db_result.get("last_synced_at"),
+                },
+            }
+
+        db_summary = dict(db_result.get("summary") or {})
+        live_summary = dict(live_result.get("summary") or {})
+
+        db_revenue = float(db_summary.get("total_revenue", 0) or 0.0)
+        live_revenue = float(live_summary.get("total_revenue", 0) or 0.0)
+        db_valid_orders = int(db_summary.get("valid_orders", 0) or 0)
+        live_valid_orders = int(live_summary.get("valid_orders", 0) or 0)
+
+        revenue_diff = round(db_revenue - live_revenue, 2)
+        orders_diff = db_valid_orders - live_valid_orders
+
+        revenue_drift_pct = round(
+            (abs(revenue_diff) / max(abs(live_revenue), 1.0)) * 100,
+            4,
+        )
+        orders_drift_pct = round(
+            (abs(orders_diff) / max(abs(live_valid_orders), 1)) * 100,
+            4,
+        )
+
+        db_channels = dict(db_summary.get("channel_breakdown") or {})
+        live_channels = dict(live_summary.get("channel_breakdown") or {})
+        channel_names = sorted(set(db_channels.keys()) | set(live_channels.keys()))
+        channel_diffs = []
+        for name in channel_names:
+            db_channel = dict(db_channels.get(name) or {})
+            live_channel = dict(live_channels.get(name) or {})
+            db_channel_revenue = float(db_channel.get("revenue", 0) or 0.0)
+            live_channel_revenue = float(live_channel.get("revenue", 0) or 0.0)
+            channel_diffs.append(
+                {
+                    "channel": name,
+                    "db_revenue": round(db_channel_revenue, 2),
+                    "live_revenue": round(live_channel_revenue, 2),
+                    "revenue_diff": round(db_channel_revenue - live_channel_revenue, 2),
+                    "db_orders": int(db_channel.get("orders", 0) or 0),
+                    "live_orders": int(live_channel.get("orders", 0) or 0),
+                }
+            )
+
+        parity_passed = (
+            revenue_drift_pct <= float(revenue_drift_threshold_pct)
+            and orders_drift_pct <= float(orders_drift_threshold_pct)
+        )
+
+        return {
+            "success": True,
+            "window": window_label,
+            "range_utc": {
+                "from_date": from_dt.isoformat(),
+                "to_date": to_dt.isoformat(),
+            },
+            "parity_passed": parity_passed,
+            "thresholds": {
+                "revenue_drift_threshold_pct": float(revenue_drift_threshold_pct),
+                "orders_drift_threshold_pct": float(orders_drift_threshold_pct),
+            },
+            "drift": {
+                "revenue_diff": revenue_diff,
+                "revenue_drift_pct": revenue_drift_pct,
+                "valid_orders_diff": orders_diff,
+                "valid_orders_drift_pct": orders_drift_pct,
+            },
+            "db_first": {
+                "data_source": db_result.get("data_source"),
+                "fallback_used": bool(db_result.get("fallback_used")),
+                "last_synced_at": db_result.get("last_synced_at"),
+                "summary": db_summary,
+            },
+            "live_export_api": {
+                "fetch_info": dict(live_result.get("fetch_info") or {}),
+                "summary": live_summary,
+            },
+            "channel_diffs": channel_diffs,
+        }
+    except ValueError as exc:
+        return {"success": False, "error": f"Invalid date format. Use YYYY-MM-DD: {exc}"}
+    except Exception as exc:
+        logger.error("Error in DB-first parity check: %s", exc, exc_info=True)
+        return {"success": False, "error": str(exc)}
 
 
 # SALES ACTIVITY REPORT ENDPOINT
@@ -925,14 +1234,21 @@ async def get_channel_revenue(
             cached["_cached"] = True
             return cached
 
-        data_service = get_unicommerce_data_service()
-
         if period == "today":
-            result = data_service.get_sales_data(period="today")
+            result = await _get_guardrailed_sales_data(
+                period="today",
+                compare_live=True,
+            )
         elif period == "yesterday":
-            result = data_service.get_sales_data(period="yesterday")
+            result = await _get_guardrailed_sales_data(
+                period="yesterday",
+                compare_live=True,
+            )
         else:
-            result = data_service.get_sales_data(period="last_7_days")
+            result = await _get_guardrailed_sales_data(
+                period="last_7_days",
+                compare_live=True,
+            )
 
         if not result.get("success"):
             return result
@@ -1106,6 +1422,47 @@ async def get_sync_readiness():
         return orchestrator.get_release_readiness()
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/unicommerce/cache/reset")
+async def reset_unicommerce_cache(
+    warm: bool = Query(True, description="Warm today, yesterday, and last_7_days after reset"),
+):
+    """Clear Unicommerce Redis caches and optionally warm key dashboard summaries."""
+    try:
+        CacheService.invalidate_all_uc_cache()
+
+        warmed: dict[str, bool] = {}
+        if warm:
+            today_res = await _get_guardrailed_sales_data(period="today", compare_live=True)
+            yesterday_res = await _get_guardrailed_sales_data(period="yesterday", compare_live=True)
+            last7_res = await _get_guardrailed_sales_data(period="last_7_days", compare_live=True)
+
+            if today_res.get("success"):
+                today_key = f"uc:today:{datetime.now(IST).strftime('%Y-%m-%d')}"
+                CacheService.set(today_key, today_res, 180)
+            if yesterday_res.get("success"):
+                y_key = f"uc:yesterday:{(datetime.now(IST) - timedelta(days=1)).strftime('%Y-%m-%d')}"
+                CacheService.set(y_key, yesterday_res, CacheService.TTL_LONG)
+            if last7_res.get("success"):
+                l7_key = f"uc:last7:{datetime.now(IST).strftime('%Y-%m-%d')}"
+                CacheService.set(l7_key, last7_res, CacheService.TTL_LONG)
+
+            warmed = {
+                "today": bool(today_res.get("success")),
+                "yesterday": bool(yesterday_res.get("success")),
+                "last_7_days": bool(last7_res.get("success")),
+            }
+
+        return {
+            "success": True,
+            "message": "Unicommerce cache reset completed",
+            "warm": warm,
+            "warmed": warmed,
+        }
+    except Exception as e:
+        logger.error(f"Error resetting cache: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 

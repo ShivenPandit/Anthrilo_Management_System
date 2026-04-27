@@ -118,6 +118,32 @@ git pull --ff-only
 ./scripts/deploy_vps.sh
 ```
 
+Advanced update modes:
+
+```bash
+# Update and rebuild images (default behavior)
+ACTION=update ./scripts/deploy_vps.sh
+
+# Fast restart without rebuild
+ACTION=restart ./scripts/deploy_vps.sh
+
+# Update without image rebuild
+ACTION=update NO_BUILD=1 ./scripts/deploy_vps.sh
+
+# After update, force cache reset + warm critical dashboards (enabled by default)
+RUN_POST_DEPLOY_FIXES=1 ./scripts/deploy_vps.sh
+
+# Trigger full historical backfill in background after deploy
+RUN_FULL_BACKFILL=1 BACKFILL_FROM_DATE=2024-01-01 BACKFILL_TO_DATE=2026-04-27 ./scripts/deploy_vps.sh
+```
+
+By default, deploy script now does the following in order:
+
+- Starts or updates Docker services
+- Waits for backend health on `/health`
+- Resets Unicommerce cache using `/api/v1/integrations/unicommerce/cache/reset?warm=true`
+- Optionally triggers `/api/v1/integrations/unicommerce/sync/profile/full_backfill`
+
 ## 8) Useful operations
 
 ```bash
