@@ -135,6 +135,9 @@ RUN_POST_DEPLOY_FIXES=1 ./scripts/deploy_vps.sh
 
 # Trigger full historical backfill in background after deploy
 RUN_FULL_BACKFILL=1 BACKFILL_FROM_DATE=2024-01-01 BACKFILL_TO_DATE=2026-04-27 ./scripts/deploy_vps.sh
+
+# Trigger repair rebuild (sales + returns + inventory) in background after deploy
+RUN_REPAIR_REBUILD=1 REPAIR_FROM_DATE=2024-01-01 REPAIR_TO_DATE=2026-04-27 REPAIR_ENTITIES=sales,returns,inventory REPAIR_TRUNCATE_PERIOD=1 REPAIR_FULL_INVENTORY_DISCOVERY=1 ./scripts/deploy_vps.sh
 ```
 
 By default, deploy script now does the following in order:
@@ -143,6 +146,7 @@ By default, deploy script now does the following in order:
 - Waits for backend health on `/health`
 - Resets Unicommerce cache using `/api/v1/integrations/unicommerce/cache/reset?warm=true`
 - Optionally triggers `/api/v1/integrations/unicommerce/sync/profile/full_backfill`
+- Optionally triggers `/api/v1/integrations/unicommerce/sync/repair/rebuild`
 
 ## 8) Useful operations
 
