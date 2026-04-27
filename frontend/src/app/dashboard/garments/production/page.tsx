@@ -181,8 +181,8 @@ export default function OrdersPage() {
           ] as Array<{ key: OrdersPeriod; label: string }>).map((p) => (
             <button key={p.key} onClick={() => { setPeriod(p.key); setPage(1); setChannelFilter(null); }}
               className={`px-3.5 py-1.5 rounded-lg text-sm font-medium transition-all ${period === p.key
-                  ? 'bg-white dark:bg-slate-600 text-slate-900 dark:text-white shadow-sm'
-                  : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+                ? 'bg-white dark:bg-slate-600 text-slate-900 dark:text-white shadow-sm'
+                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                 }`}>
               {p.label}
             </button>
@@ -229,8 +229,8 @@ export default function OrdersPage() {
               return (
                 <button key={ch.name} onClick={() => setChannelFilter(isActive ? null : ch.name)}
                   className={`text-left p-3.5 rounded-xl border transition-all group ${isActive
-                      ? 'border-blue-400 dark:border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 ring-1 ring-blue-400/30'
-                      : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 hover:border-slate-300 dark:hover:border-slate-600'
+                    ? 'border-blue-400 dark:border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 ring-1 ring-blue-400/30'
+                    : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 hover:border-slate-300 dark:hover:border-slate-600'
                     }`}>
                   <div className="flex items-center gap-2 mb-2">
                     <div className={`h-2.5 w-2.5 rounded-full bg-gradient-to-br ${grad}`} />
@@ -361,8 +361,8 @@ export default function OrdersPage() {
                       {/* Payment type */}
                       <td className="px-4 py-3">
                         <span className={`px-2 py-0.5 rounded-md text-[11px] font-medium ${o.cod
-                            ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300'
-                            : 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300'
+                          ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300'
+                          : 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300'
                           }`}>
                           {o.cod ? 'COD' : 'Prepaid'}
                         </span>
@@ -390,8 +390,8 @@ export default function OrdersPage() {
               ) : (
                 <button key={n} onClick={() => setPage(n as number)}
                   className={`min-w-[36px] h-9 rounded-lg text-sm font-medium transition-colors ${n === page
-                      ? 'bg-blue-600 text-white shadow-sm'
-                      : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'
                     }`}>
                   {n}
                 </button>

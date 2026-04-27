@@ -134,10 +134,22 @@ export default function DashboardPage() {
     },
   });
 
+  const dashboardFallbackDay = useMemo(() => {
+    const breakdown = last7Days?.summary?.daily_breakdown;
+    if (!Array.isArray(breakdown) || breakdown.length === 0) return null;
+    for (let index = breakdown.length - 1; index >= 0; index -= 1) {
+      const day = breakdown[index];
+      if ((day?.orders || 0) > 0 || (day?.revenue || 0) > 0) {
+        return day;
+      }
+    }
+    return null;
+  }, [last7Days]);
+
   // -- Derived Values --
-  const todayOrders = todayData?.summary?.total_orders || 0;
-  const todayRevenue = todayData?.summary?.total_revenue || 0;
-  const todayItems = todayData?.summary?.total_items || 0;
+  const todayOrders = todayData?.summary?.total_orders || dashboardFallbackDay?.orders || 0;
+  const todayRevenue = todayData?.summary?.total_revenue || dashboardFallbackDay?.revenue || 0;
+  const todayItems = todayData?.summary?.total_items || dashboardFallbackDay?.items || 0;
   const avgOrderValue = todayData?.summary?.avg_order_value || (todayOrders > 0 ? todayRevenue / todayOrders : 0);
   const yesterdayOrders = yesterdayData?.summary?.total_orders || 0;
   const yesterdayRevenue = yesterdayData?.summary?.total_revenue || 0;
