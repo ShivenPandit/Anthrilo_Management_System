@@ -780,17 +780,10 @@ class UnicommerceDataService:
 
         db = self._get_db()
         try:
-            date_filter = or_(
-                and_(
-                    SalesOrderRecord.order_date.isnot(None),
-                    SalesOrderRecord.order_date >= start,
-                    SalesOrderRecord.order_date <= end,
-                ),
-                and_(
-                    SalesOrderRecord.order_date.is_(None),
-                    SalesOrderRecord.created_at >= start,
-                    SalesOrderRecord.created_at <= end,
-                ),
+            date_filter = and_(
+                SalesOrderRecord.order_date.isnot(None),
+                SalesOrderRecord.order_date >= start,
+                SalesOrderRecord.order_date <= end,
             )
 
             if include_legacy_orders:
@@ -1420,17 +1413,10 @@ class UnicommerceDataService:
                             SalesOrderRecord.status,
                         )
                         .filter(
-                            or_(
-                                and_(
-                                    SalesOrderRecord.order_date.isnot(None),
-                                    SalesOrderRecord.order_date >= from_dt,
-                                    SalesOrderRecord.order_date <= to_dt,
-                                ),
-                                and_(
-                                    SalesOrderRecord.order_date.is_(None),
-                                    SalesOrderRecord.created_at >= from_dt,
-                                    SalesOrderRecord.created_at <= to_dt,
-                                ),
+                            and_(
+                                SalesOrderRecord.order_date.isnot(None),
+                                SalesOrderRecord.order_date >= from_dt,
+                                SalesOrderRecord.order_date <= to_dt,
                             )
                         )
                         .all()
@@ -2738,17 +2724,10 @@ class UnicommerceDataService:
                                 return val
                         return ""
 
-                    date_filter = or_(
-                        and_(
-                            SalesOrderRecord.order_date.isnot(None),
-                            SalesOrderRecord.order_date >= from_dt,
-                            SalesOrderRecord.order_date <= to_dt,
-                        ),
-                        and_(
-                            SalesOrderRecord.order_date.is_(None),
-                            SalesOrderRecord.created_at >= from_dt,
-                            SalesOrderRecord.created_at <= to_dt,
-                        ),
+                    date_filter = and_(
+                        SalesOrderRecord.order_date.isnot(None),
+                        SalesOrderRecord.order_date >= from_dt,
+                        SalesOrderRecord.order_date <= to_dt,
                     )
 
                     latest_ids_subquery = (
@@ -3135,17 +3114,10 @@ class UnicommerceDataService:
 
             db = self._get_db()
             try:
-                date_filter = or_(
-                    and_(
-                        SalesOrderRecord.order_date.isnot(None),
-                        SalesOrderRecord.order_date >= from_dt,
-                        SalesOrderRecord.order_date <= to_dt,
-                    ),
-                    and_(
-                        SalesOrderRecord.order_date.is_(None),
-                        SalesOrderRecord.created_at >= from_dt,
-                        SalesOrderRecord.created_at <= to_dt,
-                    ),
+                date_filter = and_(
+                    SalesOrderRecord.order_date.isnot(None),
+                    SalesOrderRecord.order_date >= from_dt,
+                    SalesOrderRecord.order_date <= to_dt,
                 )
 
                 rows = (
@@ -3629,8 +3601,8 @@ class UnicommerceDataService:
                         mrp = selling
 
                     sku_map[sku]["total_quantity"] += qty
-                    sku_map[sku]["total_revenue"] += selling
-                    sku_map[sku]["total_mrp"] += mrp
+                    sku_map[sku]["total_revenue"] += selling * qty
+                    sku_map[sku]["total_mrp"] += mrp * qty
                     sku_map[sku]["order_count"] += 1
 
                     if channel not in sku_map[sku]["channels"]:
@@ -3639,7 +3611,7 @@ class UnicommerceDataService:
                             "revenue": 0.0,
                         }
                     sku_map[sku]["channels"][channel]["quantity"] += qty
-                    sku_map[sku]["channels"][channel]["revenue"] += selling
+                    sku_map[sku]["channels"][channel]["revenue"] += selling * qty
 
             for sku_data in sku_map.values():
                 sku_data["total_discount"] = round(
@@ -4439,17 +4411,10 @@ class UnicommerceDataService:
                 normalized_records = (
                     db.query(SalesOrderRecord)
                     .filter(
-                        or_(
-                            and_(
-                                SalesOrderRecord.order_date.isnot(None),
-                                SalesOrderRecord.order_date >= from_dt,
-                                SalesOrderRecord.order_date <= to_dt,
-                            ),
-                            and_(
-                                SalesOrderRecord.order_date.is_(None),
-                                SalesOrderRecord.created_at >= from_dt,
-                                SalesOrderRecord.created_at <= to_dt,
-                            ),
+                        and_(
+                            SalesOrderRecord.order_date.isnot(None),
+                            SalesOrderRecord.order_date >= from_dt,
+                            SalesOrderRecord.order_date <= to_dt,
                         )
                     )
                     .all()
@@ -4662,15 +4627,13 @@ class UnicommerceDataService:
         db = self._get_db()
         try:
             normalized_records = (
-                db.query(SalesReturnRecord)
+                db.query(SalesOrderRecord)
                 .filter(
-                        SalesReturnRecord.updated_at >= from_date,
-                        SalesReturnRecord.updated_at <= to_date,
-                     )
-                    .order_by(SalesReturnRecord.updated_at.desc())
-                    .limit(5000)
-                    .all()
-)
+                    SalesOrderRecord.order_id == code,
+                )
+                .order_by(SalesOrderRecord.updated_at.desc(), SalesOrderRecord.id.desc())
+                .all()
+            )
 
             if normalized_records:
                 order_dto = self._order_detail_from_normalized_rows(code, normalized_records)
@@ -4750,17 +4713,10 @@ class UnicommerceDataService:
             normalized_records = (
                 db.query(SalesOrderRecord)
                 .filter(
-                    or_(
-                        and_(
-                            SalesOrderRecord.order_date.isnot(None),
-                            SalesOrderRecord.order_date >= start,
-                            SalesOrderRecord.order_date <= end,
-                        ),
-                        and_(
-                            SalesOrderRecord.order_date.is_(None),
-                            SalesOrderRecord.created_at >= start,
-                            SalesOrderRecord.created_at <= end,
-                        ),
+                    and_(
+                        SalesOrderRecord.order_date.isnot(None),
+                        SalesOrderRecord.order_date >= start,
+                        SalesOrderRecord.order_date <= end,
                     )
                 )
                 .all()
