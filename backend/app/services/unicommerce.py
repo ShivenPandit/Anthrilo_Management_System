@@ -67,8 +67,6 @@ class UnicommerceService:
         "sellingPrice",
         "maxRetailPrice",
         "discount",
-        "taxAmount",
-        "refundAmount",
         "totalPrice",
         "channelProductId",
         "bundleSkuCode",

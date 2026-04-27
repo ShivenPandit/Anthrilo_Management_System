@@ -1518,6 +1518,72 @@ async def run_sync_profile(
         return {"success": False, "error": str(e)}
 
 
+@router.post("/unicommerce/sync/repair/rebuild")
+async def run_repair_rebuild(
+    background_tasks: BackgroundTasks,
+    from_date: str = Query(..., description="YYYY-MM-DD (historical fixed start date)"),
+    to_date: str = Query(None, description="YYYY-MM-DD (defaults to today UTC)"),
+    entities: str = Query("sales,returns,inventory", description="Comma-separated: sales,returns,inventory"),
+    truncate_period: bool = Query(False, description="Delete selected entity rows in date window before rebuild"),
+    truncate_inventory: bool = Query(False, description="Delete inventory snapshots before inventory rebuild"),
+    full_inventory_discovery: bool = Query(True, description="Use full SKU discovery for inventory in repair mode"),
+    inventory_discovery_limit: int = Query(None, description="Optional SKU cap for inventory discovery"),
+    inventory_facility_code: str = Query("anthrilo", description="Inventory facility code"),
+    chunk_days: int = Query(None, description="Optional backfill chunk size in days"),
+    run_in_background: bool = Query(True, description="Run repair in background"),
+):
+    """Repair and rebuild DB-first data from export APIs for selected entities."""
+    try:
+        orchestrator = get_unicommerce_sync_orchestrator()
+
+        parsed_from = _parse_date_boundary_utc(from_date, end_of_day=False)
+        effective_to = to_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        parsed_to = _parse_date_boundary_utc(effective_to, end_of_day=True)
+
+        entity_tokens = [part.strip().lower() for part in (entities or "").split(",") if part.strip()]
+        if not entity_tokens:
+            return {
+                "success": False,
+                "error": "At least one entity is required. Use sales,returns,inventory",
+            }
+
+        async def _run_repair_task() -> dict:
+            result = await orchestrator.run_repair_rebuild(
+                from_date=parsed_from,
+                to_date=parsed_to,
+                entities=entity_tokens,
+                truncate_period=truncate_period,
+                truncate_inventory=truncate_inventory,
+                chunk_days=chunk_days,
+                full_inventory_discovery=full_inventory_discovery,
+                inventory_discovery_limit=inventory_discovery_limit,
+                inventory_facility_code=inventory_facility_code,
+            )
+            await _broadcast_sales_refresh(result)
+            return result
+
+        if run_in_background:
+            background_tasks.add_task(_run_repair_task)
+            return {
+                "success": True,
+                "message": "Repair rebuild started in background",
+                "from_date": parsed_from.isoformat(),
+                "to_date": parsed_to.isoformat(),
+                "entities": entity_tokens,
+                "truncate_period": truncate_period,
+                "truncate_inventory": truncate_inventory,
+                "full_inventory_discovery": full_inventory_discovery,
+                "inventory_facility_code": inventory_facility_code,
+            }
+
+        return await _run_repair_task()
+    except ValueError as e:
+        return {"success": False, "error": f"Invalid date format: {e}"}
+    except Exception as e:
+        logger.error(f"Error running repair rebuild: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
 @router.post("/unicommerce/sync/backfill/windows")
 async def run_backfill_windows(
     background_tasks: BackgroundTasks,

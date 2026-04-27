@@ -10,13 +10,20 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import distinct, func
+from sqlalchemy import and_, distinct, func, or_
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import settings
 from app.core.redis import redis_client
 from app.db.session import SessionLocal
-from app.db.export_models import ExportJob, ExportRow, SalesOrderRecord, SyncLog
+from app.db.export_models import (
+    ExportJob,
+    ExportRow,
+    InventorySnapshotRecord,
+    SalesOrderRecord,
+    SalesReturnRecord,
+    SyncLog,
+)
 from app.services.unicommerce_data_service import get_unicommerce_data_service
 from app.services.unicommerce import get_unicommerce_service
 
@@ -107,11 +114,11 @@ class UnicommerceSyncOrchestrator:
         if process_lock is not None and process_lock.locked():
             process_lock.release()
 
-    def _discover_recent_skus(self, lookback_days: int = 30, limit: int = 5000) -> List[str]:
+    def _discover_recent_skus(self, lookback_days: int = 30, limit: Optional[int] = 5000) -> List[str]:
         db = SessionLocal()
         try:
             since = self._utcnow() - timedelta(days=max(1, int(lookback_days)))
-            rows = (
+            query = (
                 db.query(SalesOrderRecord.sku)
                 .filter(
                     SalesOrderRecord.sku.isnot(None),
@@ -119,14 +126,17 @@ class UnicommerceSyncOrchestrator:
                     SalesOrderRecord.updated_at >= since,
                 )
                 .group_by(SalesOrderRecord.sku)
-                .limit(max(1, int(limit)))
-                .all()
             )
+
+            if limit is not None and int(limit) > 0:
+                query = query.limit(max(1, int(limit)))
+
+            rows = query.all()
             return [str(row[0]).strip() for row in rows if row and row[0]]
         finally:
             db.close()
 
-    def _discover_item_master_skus(self, limit: int = 5000) -> List[str]:
+    def _discover_item_master_skus(self, limit: Optional[int] = 5000) -> List[str]:
         db = SessionLocal()
         try:
             item_master_job = (
@@ -149,7 +159,12 @@ class UnicommerceSyncOrchestrator:
                 .all()
             )
 
-            max_items = max(1, int(limit))
+            max_items: Optional[int]
+            if limit is None or int(limit) <= 0:
+                max_items = None
+            else:
+                max_items = max(1, int(limit))
+
             seen: set[str] = set()
             skus: List[str] = []
             for wrapped in row_payloads:
@@ -166,7 +181,7 @@ class UnicommerceSyncOrchestrator:
                     continue
                 seen.add(sku)
                 skus.append(sku)
-                if len(skus) >= max_items:
+                if max_items is not None and len(skus) >= max_items:
                     break
 
             return skus
@@ -411,6 +426,8 @@ class UnicommerceSyncOrchestrator:
         self,
         skus: Optional[List[str]] = None,
         facility_code: str = "anthrilo",
+        full_discovery: bool = False,
+        discovery_limit: Optional[int] = None,
     ) -> Dict[str, Any]:
         lock = await self._acquire_lock("inventory")
         if not lock:
@@ -422,11 +439,13 @@ class UnicommerceSyncOrchestrator:
         try:
             clean_skus = [str(sku).strip() for sku in (skus or []) if str(sku).strip()]
             if not clean_skus:
-                discovery_limit = max(1, int(settings.UNICOMMERCE_SYNC_DISCOVERY_SKU_LIMIT))
-                item_master_skus = self._discover_item_master_skus(limit=discovery_limit)
+                configured_limit = max(1, int(discovery_limit or settings.UNICOMMERCE_SYNC_DISCOVERY_SKU_LIMIT))
+                effective_limit: Optional[int] = None if full_discovery else configured_limit
+
+                item_master_skus = self._discover_item_master_skus(limit=effective_limit)
                 recent_skus = self._discover_recent_skus(
                     lookback_days=max(7, int(settings.UNICOMMERCE_SYNC_LOOKBACK_DAYS * 7)),
-                    limit=discovery_limit,
+                    limit=effective_limit,
                 )
 
                 clean_skus = []
@@ -437,7 +456,7 @@ class UnicommerceSyncOrchestrator:
                         continue
                     seen.add(normalized)
                     clean_skus.append(normalized)
-                    if len(clean_skus) >= discovery_limit:
+                    if effective_limit is not None and len(clean_skus) >= effective_limit:
                         break
 
             if not clean_skus:
@@ -454,6 +473,7 @@ class UnicommerceSyncOrchestrator:
                 "requested_skus": len(clean_skus),
                 "fetched_skus": len(snapshots or {}),
                 "facility_code": facility_code,
+                "full_discovery": bool(full_discovery),
             }
         finally:
             await self._release_lock(lock)
@@ -498,8 +518,12 @@ class UnicommerceSyncOrchestrator:
         from_date: datetime,
         to_date: datetime,
         chunk_days: Optional[int] = None,
+        include_orders: bool = True,
         include_returns: bool = True,
         include_inventory: bool = True,
+        full_inventory_discovery: bool = False,
+        inventory_discovery_limit: Optional[int] = None,
+        inventory_facility_code: Optional[str] = None,
     ) -> Dict[str, Any]:
         start = self._ensure_utc(from_date)
         end = self._ensure_utc(to_date)
@@ -510,12 +534,15 @@ class UnicommerceSyncOrchestrator:
         total_returns = 0
 
         for chunk_start, chunk_end in chunks:
-            orders = await self.sync_orders_window(chunk_start, chunk_end)
+            orders = None
+            if include_orders:
+                orders = await self.sync_orders_window(chunk_start, chunk_end)
             returns = None
             if include_returns:
                 returns = await self.sync_returns_window(chunk_start, chunk_end)
 
-            total_orders += int(orders.get("total_records", 0) or 0)
+            if orders is not None:
+                total_orders += int(orders.get("total_records", 0) or 0)
             if returns is not None:
                 total_returns += int(returns.get("total_items", 0) or 0)
 
@@ -530,9 +557,18 @@ class UnicommerceSyncOrchestrator:
 
         inventory = None
         if include_inventory:
-            inventory = await self.sync_inventory()
+            inventory = await self.sync_inventory(
+                facility_code=(
+                    str(inventory_facility_code or settings.UNICOMMERCE_SYNC_INVENTORY_FACILITY_CODE or "anthrilo").strip()
+                    or "anthrilo"
+                ),
+                full_discovery=full_inventory_discovery,
+                discovery_limit=inventory_discovery_limit,
+            )
 
-        success = all(bool(chunk.get("orders", {}).get("success")) for chunk in chunk_results)
+        success = True
+        if include_orders:
+            success = success and all(bool((chunk.get("orders") or {}).get("success")) for chunk in chunk_results)
         if include_returns:
             success = success and all(
                 bool((chunk.get("returns") or {}).get("success"))
@@ -548,10 +584,193 @@ class UnicommerceSyncOrchestrator:
             "to_date": end.isoformat(),
             "chunk_days": int(chunk_days or settings.UNICOMMERCE_SYNC_BACKFILL_CHUNK_DAYS),
             "chunk_count": len(chunks),
+            "include_orders": bool(include_orders),
+            "include_returns": bool(include_returns),
+            "include_inventory": bool(include_inventory),
             "total_orders": total_orders,
             "total_returns": total_returns,
             "inventory": inventory,
             "chunks": chunk_results,
+        }
+
+    def _truncate_window_data(
+        self,
+        from_date: datetime,
+        to_date: datetime,
+        truncate_orders: bool,
+        truncate_returns: bool,
+        truncate_inventory: bool,
+        inventory_facility_code: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        start = self._ensure_utc(from_date)
+        end = self._ensure_utc(to_date)
+
+        db = SessionLocal()
+        try:
+            deleted_orders = 0
+            deleted_returns = 0
+            deleted_inventory = 0
+
+            if truncate_orders:
+                deleted_orders = (
+                    db.query(SalesOrderRecord)
+                    .filter(
+                        or_(
+                            and_(
+                                SalesOrderRecord.order_date.isnot(None),
+                                SalesOrderRecord.order_date >= start,
+                                SalesOrderRecord.order_date <= end,
+                            ),
+                            and_(
+                                SalesOrderRecord.order_date.is_(None),
+                                SalesOrderRecord.created_at >= start,
+                                SalesOrderRecord.created_at <= end,
+                            ),
+                        )
+                    )
+                    .delete(synchronize_session=False)
+                )
+
+            if truncate_returns:
+                deleted_returns = (
+                    db.query(SalesReturnRecord)
+                    .filter(
+                        or_(
+                            and_(
+                                SalesReturnRecord.created_at >= start,
+                                SalesReturnRecord.created_at <= end,
+                            ),
+                            and_(
+                                SalesReturnRecord.updated_at >= start,
+                                SalesReturnRecord.updated_at <= end,
+                            ),
+                        )
+                    )
+                    .delete(synchronize_session=False)
+                )
+
+            if truncate_inventory:
+                inventory_query = db.query(InventorySnapshotRecord)
+                facility = str(inventory_facility_code or "").strip()
+                if facility:
+                    inventory_query = inventory_query.filter(InventorySnapshotRecord.warehouse == facility)
+                deleted_inventory = inventory_query.delete(synchronize_session=False)
+
+            db.commit()
+            return {
+                "success": True,
+                "from_date": start.isoformat(),
+                "to_date": end.isoformat(),
+                "deleted_orders": int(deleted_orders),
+                "deleted_returns": int(deleted_returns),
+                "deleted_inventory": int(deleted_inventory),
+            }
+        except Exception as exc:
+            db.rollback()
+            return {
+                "success": False,
+                "from_date": start.isoformat(),
+                "to_date": end.isoformat(),
+                "deleted_orders": 0,
+                "deleted_returns": 0,
+                "deleted_inventory": 0,
+                "error": str(exc),
+            }
+        finally:
+            db.close()
+
+    async def run_repair_rebuild(
+        self,
+        from_date: datetime,
+        to_date: datetime,
+        entities: Optional[List[str]] = None,
+        truncate_period: bool = False,
+        truncate_inventory: bool = False,
+        chunk_days: Optional[int] = None,
+        full_inventory_discovery: bool = True,
+        inventory_discovery_limit: Optional[int] = None,
+        inventory_facility_code: str = "anthrilo",
+    ) -> Dict[str, Any]:
+        start = self._ensure_utc(from_date)
+        end = self._ensure_utc(to_date)
+
+        if end < start:
+            return {
+                "success": False,
+                "error": "to_date cannot be earlier than from_date",
+                "from_date": start.isoformat(),
+                "to_date": end.isoformat(),
+            }
+
+        selected = {
+            (token or "").strip().lower()
+            for token in (entities or ["sales", "returns", "inventory"])
+            if str(token or "").strip()
+        }
+
+        include_orders = bool(selected & {"sales", "sale_orders", "orders"})
+        include_returns = bool(selected & {"returns", "sales_returns", "return_gst"})
+        include_inventory = bool(selected & {"inventory", "inventory_snapshot", "snapshots"})
+
+        if not (include_orders or include_returns or include_inventory):
+            return {
+                "success": False,
+                "error": "No valid entities selected. Use sales, returns, inventory",
+                "entities": sorted(selected),
+            }
+
+        truncate_result = {
+            "success": True,
+            "skipped": True,
+            "deleted_orders": 0,
+            "deleted_returns": 0,
+            "deleted_inventory": 0,
+        }
+        if truncate_period:
+            truncate_result = self._truncate_window_data(
+                from_date=start,
+                to_date=end,
+                truncate_orders=include_orders,
+                truncate_returns=include_returns,
+                truncate_inventory=include_inventory and bool(truncate_inventory),
+                inventory_facility_code=inventory_facility_code,
+            )
+            truncate_result["skipped"] = False
+            if not truncate_result.get("success"):
+                return {
+                    "success": False,
+                    "profile": "repair_rebuild",
+                    "from_date": start.isoformat(),
+                    "to_date": end.isoformat(),
+                    "truncate_result": truncate_result,
+                }
+
+        rebuild_result = await self.run_backfill(
+            from_date=start,
+            to_date=end,
+            chunk_days=chunk_days,
+            include_orders=include_orders,
+            include_returns=include_returns,
+            include_inventory=include_inventory,
+            full_inventory_discovery=bool(full_inventory_discovery and include_inventory),
+            inventory_discovery_limit=inventory_discovery_limit,
+            inventory_facility_code=inventory_facility_code,
+        )
+
+        return {
+            "success": bool(rebuild_result.get("success")),
+            "profile": "repair_rebuild",
+            "from_date": start.isoformat(),
+            "to_date": end.isoformat(),
+            "entities": {
+                "sales": include_orders,
+                "returns": include_returns,
+                "inventory": include_inventory,
+            },
+            "truncate_period": bool(truncate_period),
+            "truncate_inventory": bool(truncate_inventory),
+            "truncate_result": truncate_result,
+            "rebuild_result": rebuild_result,
         }
 
     async def run_backfill_windows(
