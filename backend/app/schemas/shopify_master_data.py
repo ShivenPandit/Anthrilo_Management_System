@@ -8,33 +8,26 @@ from pydantic import BaseModel
 class ShopifyMasterDataItem(BaseModel):
     id: int
     variant_sku: str
-    style_code: Optional[str] = None
-    title: Optional[str] = None
-    type: Optional[str] = None
+    style_code: str
+    title: str
+    type: str
     gender: Optional[str] = None
     tags: Optional[str] = None
-    option1_value: Optional[str] = None
+    size: Optional[str]= None
     collection: Optional[str] = None
     subtype: Optional[str] = None
     season: Optional[str] = None
     fabric_type: Optional[str] = None
     print_name: Optional[str] = None
-    net_weight: Optional[str] = None
-    production_time: Optional[str] = None
+    net_weight: str
+    buffer: Optional[str] = None
     simple_bundle: Optional[str] = None
     mrp: Optional[Decimal] = None
-    gross_weights_1: Optional[str] = None
-    garment_1: Optional[str] = None
-    gross_weights_2: Optional[str] = None
-    garment_2: Optional[str] = None
-    amazon_asin: Optional[str] = None
-    amazon_flex_sku: Optional[str] = None
-    amazon_fba_sku: Optional[str] = None
-    amazon_mfn_sku: Optional[str] = None
-    myntra_style_id: Optional[str] = None
-    myntra_sku: Optional[str] = None
-    fc: Optional[str] = None
-    cost_per_item: Optional[Decimal] = None
+    lifecycle: Optional[str] = None
+    summer_factor: Optional[float] = None
+    winter_factor: Optional[float] = None
+    style_factor: Optional[float] = None
+    lead_time: Optional[int] = None
     created_at: datetime
     updated_at: datetime
 
