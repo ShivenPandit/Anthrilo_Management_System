@@ -5,17 +5,18 @@ import logging
 import asyncio
 import json as json_module
 from datetime import datetime, timezone, timedelta, date as date_cls
+from uuid import uuid4
 from app.services.unicommerce import get_unicommerce_service
 from app.services.unicommerce_data_service import get_unicommerce_data_service
 from app.services.unicommerce_sync_orchestrator import get_unicommerce_sync_orchestrator
 from app.core.token_manager import get_token_manager
 from app.core.redis import redis_client
 from app.services.cache_service import CacheService
+from app.utils.timezone_utils import IST, normalize_date_range_ist
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-IST = timezone(timedelta(hours=5, minutes=30))
 EXCLUDED_REVENUE_STATUSES = {
     "CANCELLED",
     "CANCELED",
@@ -453,7 +454,7 @@ async def get_sales_report(
                 period="custom",
                 from_dt=from_dt,
                 to_dt=to_dt,
-                compare_live=True,
+                compare_live=False,
             )
         else:
             result = await _get_guardrailed_sales_data(
@@ -492,7 +493,8 @@ async def get_daily_sales_report(
     """
     try:
         # Redis cache check (10-min TTL)
-        cache_key = f"uc:daily_report:{date or 'na'}:{from_date or 'na'}:{to_date or 'na'}"
+        # v2 key prevents serving pre-IST-normalization cached payloads.
+        cache_key = f"uc:daily_report:v2:{date or 'na'}:{from_date or 'na'}:{to_date or 'na'}"
         cached = CacheService.get(cache_key)
         if cached:
             cached["cached"] = True
@@ -506,12 +508,12 @@ async def get_daily_sales_report(
             return {"success": False, "error": "Provide either 'date' or both 'from_date' and 'to_date'."}
 
         if is_range:
-            from_dt = datetime.strptime(from_date, "%Y-%m-%d").replace(
-                hour=0, minute=0, second=0, tzinfo=IST
-            ).astimezone(timezone.utc)
-            to_dt = datetime.strptime(to_date, "%Y-%m-%d").replace(
-                hour=23, minute=59, second=59, tzinfo=IST
-            ).astimezone(timezone.utc)
+            from_dt, to_exclusive_dt, _ = normalize_date_range_ist(
+                from_date,
+                to_date,
+                closed_window_mode=False,
+            )
+            to_dt = to_exclusive_dt - timedelta(seconds=1)
             result = await _get_guardrailed_sales_data(
                 period="custom",
                 from_dt=from_dt,
@@ -529,25 +531,25 @@ async def get_daily_sales_report(
             if report_date == today:
                 result = await _get_guardrailed_sales_data(
                     period="today",
-                    compare_live=True,
+                    compare_live=False,
                 )
             elif report_date == yesterday:
                 result = await _get_guardrailed_sales_data(
                     period="yesterday",
-                    compare_live=True,
+                    compare_live=False,
                 )
             else:
-                from_dt = datetime.strptime(date, "%Y-%m-%d").replace(
-                    hour=0, minute=0, second=0, tzinfo=IST
-                ).astimezone(timezone.utc)
-                to_dt = datetime.strptime(date, "%Y-%m-%d").replace(
-                    hour=23, minute=59, second=59, tzinfo=IST
-                ).astimezone(timezone.utc)
+                from_dt, to_exclusive_dt, _ = normalize_date_range_ist(
+                    date,
+                    date,
+                    closed_window_mode=False,
+                )
+                to_dt = to_exclusive_dt - timedelta(seconds=1)
                 result = await _get_guardrailed_sales_data(
                     period="custom",
                     from_dt=from_dt,
                     to_dt=to_dt,
-                    compare_live=True,
+                    compare_live=False,
                 )
             date_label = date
 
@@ -760,6 +762,7 @@ async def get_db_first_parity_check(
     date: str | None = Query(None, description="Single date (YYYY-MM-DD)"),
     from_date: str | None = Query(None, description="Range start date (YYYY-MM-DD)"),
     to_date: str | None = Query(None, description="Range end date (YYYY-MM-DD)"),
+    closed_window_mode: bool = Query(True, description="Default true. Excludes current IST day from parity windows."),
     revenue_drift_threshold_pct: float = Query(1.0, description="Allowed revenue drift percent"),
     orders_drift_threshold_pct: float = Query(1.0, description="Allowed valid orders drift percent"),
 ):
@@ -772,34 +775,26 @@ async def get_db_first_parity_check(
                 "error": "Provide either 'date' or both 'from_date' and 'to_date'.",
             }
 
-        if is_range:
-            from_dt = datetime.strptime(str(from_date), "%Y-%m-%d").replace(
-                hour=0,
-                minute=0,
-                second=0,
-                tzinfo=IST,
-            ).astimezone(timezone.utc)
-            to_dt = datetime.strptime(str(to_date), "%Y-%m-%d").replace(
-                hour=23,
-                minute=59,
-                second=59,
-                tzinfo=IST,
-            ).astimezone(timezone.utc)
-            window_label = f"{from_date} to {to_date}"
-        else:
-            from_dt = datetime.strptime(str(date), "%Y-%m-%d").replace(
-                hour=0,
-                minute=0,
-                second=0,
-                tzinfo=IST,
-            ).astimezone(timezone.utc)
-            to_dt = datetime.strptime(str(date), "%Y-%m-%d").replace(
-                hour=23,
-                minute=59,
-                second=59,
-                tzinfo=IST,
-            ).astimezone(timezone.utc)
-            window_label = str(date)
+        raw_from = str(from_date) if is_range else str(date)
+        raw_to = str(to_date) if is_range else str(date)
+
+        from_dt, to_exclusive_dt, window_meta = normalize_date_range_ist(
+            raw_from,
+            raw_to,
+            closed_window_mode=bool(closed_window_mode),
+        )
+        to_dt = to_exclusive_dt - timedelta(seconds=1)
+        window_label = f"{window_meta['from_date_ist']} to {window_meta['to_date_ist']}"
+
+        if window_meta["window_type"] == "open":
+            return {
+                "success": False,
+                "error": "Open window detected. Current IST day cannot be used for parity validation.",
+                "window": window_label,
+                "window_type": "open",
+                "timezone": "IST",
+                "data_completeness": "partial",
+            }
 
         data_service = get_unicommerce_data_service()
         uc_service = get_unicommerce_service()
@@ -884,6 +879,10 @@ async def get_db_first_parity_check(
         return {
             "success": True,
             "window": window_label,
+            "window_type": window_meta["window_type"],
+            "timezone": "IST",
+            "data_completeness": window_meta["data_completeness"],
+            "warning": window_meta.get("warning"),
             "range_utc": {
                 "from_date": from_dt.isoformat(),
                 "to_date": to_dt.isoformat(),
@@ -1526,11 +1525,9 @@ async def run_repair_rebuild(
     entities: str = Query("sales,returns,inventory", description="Comma-separated: sales,returns,inventory"),
     truncate_period: bool = Query(False, description="Delete selected entity rows in date window before rebuild"),
     truncate_inventory: bool = Query(False, description="Delete inventory snapshots before inventory rebuild"),
-    full_inventory_discovery: bool = Query(True, description="Use full SKU discovery for inventory in repair mode"),
-    inventory_discovery_limit: int = Query(None, description="Optional SKU cap for inventory discovery"),
-    inventory_facility_code: str = Query("anthrilo", description="Inventory facility code"),
-    chunk_days: int = Query(None, description="Optional backfill chunk size in days"),
-    run_in_background: bool = Query(True, description="Run repair in background"),
+    full_inventory_discovery: bool = Query(False, description="Use full SKU discovery for inventory in repair mode"),
+    run_in_background: bool = Query(False, description="Run repair in background"),
+    dry_run: bool = Query(False, description="Validate and preview actions without mutating data"),
 ):
     """Repair and rebuild DB-first data from export APIs for selected entities."""
     try:
@@ -1546,6 +1543,22 @@ async def run_repair_rebuild(
                 "success": False,
                 "error": "At least one entity is required. Use sales,returns,inventory",
             }
+        invalid_entities = sorted(set(entity_tokens) - {"sales", "returns", "inventory"})
+        if invalid_entities:
+            return {
+                "success": False,
+                "error": "Invalid entities. Use sales,returns,inventory",
+                "invalid_entities": invalid_entities,
+            }
+        if truncate_inventory and "inventory" not in entity_tokens:
+            return {
+                "success": False,
+                "error": "truncate_inventory=true requires inventory in entities",
+            }
+        if parsed_to < parsed_from:
+            return {"success": False, "error": "to_date cannot be earlier than from_date"}
+
+        progress_key = f"uc:sync:repair:progress:{uuid4().hex}"
 
         async def _run_repair_task() -> dict:
             result = await orchestrator.run_repair_rebuild(
@@ -1554,12 +1567,12 @@ async def run_repair_rebuild(
                 entities=entity_tokens,
                 truncate_period=truncate_period,
                 truncate_inventory=truncate_inventory,
-                chunk_days=chunk_days,
                 full_inventory_discovery=full_inventory_discovery,
-                inventory_discovery_limit=inventory_discovery_limit,
-                inventory_facility_code=inventory_facility_code,
+                dry_run=dry_run,
+                progress_key=progress_key,
             )
-            await _broadcast_sales_refresh(result)
+            if not dry_run:
+                await _broadcast_sales_refresh(result)
             return result
 
         if run_in_background:
@@ -1573,7 +1586,9 @@ async def run_repair_rebuild(
                 "truncate_period": truncate_period,
                 "truncate_inventory": truncate_inventory,
                 "full_inventory_discovery": full_inventory_discovery,
-                "inventory_facility_code": inventory_facility_code,
+                "dry_run": dry_run,
+                "progress_key": progress_key,
+                "progress_endpoint": f"/api/v1/integrations/unicommerce/sync/repair/rebuild/progress?progress_key={progress_key}",
             }
 
         return await _run_repair_task()
@@ -1582,6 +1597,30 @@ async def run_repair_rebuild(
     except Exception as e:
         logger.error(f"Error running repair rebuild: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
+
+
+@router.get("/unicommerce/sync/repair/rebuild/progress")
+async def get_repair_rebuild_progress(
+    progress_key: str = Query(..., description="Progress key returned by repair rebuild endpoint"),
+):
+    """Read repair rebuild execution progress from Redis cache."""
+    try:
+        payload = CacheService.get(progress_key)
+        if payload is None:
+            return {
+                "success": False,
+                "status": "not_found",
+                "error": "Progress key not found or expired",
+                "progress_key": progress_key,
+            }
+        return {
+            "success": True,
+            "progress_key": progress_key,
+            "progress": payload,
+        }
+    except Exception as e:
+        logger.error(f"Error reading repair progress: {e}", exc_info=True)
+        return {"success": False, "error": str(e), "progress_key": progress_key}
 
 
 @router.post("/unicommerce/sync/backfill/windows")
