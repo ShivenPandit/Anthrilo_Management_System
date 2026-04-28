@@ -12,6 +12,7 @@ import {
 import { DayPicker } from 'react-day-picker';
 import 'react-day-picker/style.css';
 import { format, parse } from 'date-fns';
+import { getYesterdayIst, toIstYmd } from '@/lib/ist-date';
 import {
   PieChart, Pie, Cell, Tooltip as RTooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -73,6 +74,13 @@ type SortKey = 'channel_name' | 'quantity' | 'selling_price' | 'orders' | 'avg' 
 type ItemSortKey = 'item_sku_code' | 'sale_order_item_code' | 'item_type_name' | 'channel_name' | 'order_date' | 'bundle_sku_code_number' | 'selling_price' | 'size' | 'good_inventory' | 'virtual_inventory';
 type SortDir = 'asc' | 'desc';
 
+const getIstRelativeDate = (daysFromToday: number) => {
+  const [year, month, day] = toIstYmd(new Date()).split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
+  date.setUTCDate(date.getUTCDate() + daysFromToday);
+  return toIstYmd(date);
+};
+
 /* animated counter */
 function AnimatedNumber({ value, prefix = '', duration = 800 }: { value: number; prefix?: string; duration?: number }) {
   const [display, setDisplay] = useState(0);
@@ -100,27 +108,23 @@ function AnimatedNumber({ value, prefix = '', duration = 800 }: { value: number;
 export default function DailySalesReportPage() {
   const [mode, setMode] = useState<ReportMode>('daily');
 
-  const [reportDate, setReportDate] = useState<string>(() => {
-    const d = new Date(); d.setDate(d.getDate() - 1);
-    return d.toISOString().split('T')[0];
-  });
+  const [reportDate, setReportDate] = useState<string>(() => getYesterdayIst());
   const [calOpen, setCalOpen] = useState(false);
   const calRef = useRef<HTMLDivElement>(null);
 
-  const [customFrom, setCustomFrom] = useState<string>(() => {
-    const d = new Date(); d.setDate(d.getDate() - 7);
-    return d.toISOString().split('T')[0];
-  });
-  const [customTo, setCustomTo] = useState<string>(() => {
-    const d = new Date(); d.setDate(d.getDate() - 1);
-    return d.toISOString().split('T')[0];
-  });
+  const [customFrom, setCustomFrom] = useState<string>(() => getIstRelativeDate(-7));
+  const [customTo, setCustomTo] = useState<string>(() => getYesterdayIst());
   const [calFromOpen, setCalFromOpen] = useState(false);
   const [calToOpen, setCalToOpen] = useState(false);
   const calFromRef = useRef<HTMLDivElement>(null);
   const calToRef = useRef<HTMLDivElement>(null);
 
   const [showReport, setShowReport] = useState(true);
+  const [submittedMode, setSubmittedMode] = useState<ReportMode>('daily');
+  const [submittedReportDate, setSubmittedReportDate] = useState<string>(() => getYesterdayIst());
+  const [submittedCustomFrom, setSubmittedCustomFrom] = useState<string>(() => getIstRelativeDate(-7));
+  const [submittedCustomTo, setSubmittedCustomTo] = useState<string>(() => getYesterdayIst());
+  const [requestVersion, setRequestVersion] = useState(0);
   const [search, setSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('selling_price');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
@@ -144,9 +148,9 @@ export default function DailySalesReportPage() {
   }, [calOpen, calFromOpen, calToOpen]);
 
   const queryParams = useMemo((): { date?: string; from_date?: string; to_date?: string } => {
-    if (mode === 'daily') {
-      return { date: reportDate };
-    } else if (mode === 'weekly') {
+    if (submittedMode === 'daily') {
+      return { date: submittedReportDate };
+    } else if (submittedMode === 'weekly') {
       const today = new Date();
       const currentWeekStart = new Date(today);
       currentWeekStart.setDate(today.getDate() - ((today.getDay() + 6) % 7));
@@ -157,22 +161,22 @@ export default function DailySalesReportPage() {
       const from = format(weekStart, 'yyyy-MM-dd');
       const to = format(weekEnd, 'yyyy-MM-dd');
       return { from_date: from, to_date: to };
-    } else if (mode === 'monthly') {
+    } else if (submittedMode === 'monthly') {
       const today = new Date();
       const firstOfCurrentMonth = new Date(today.getFullYear(), today.getMonth(), 1);
       const lastOfPreviousMonth = new Date(today.getFullYear(), today.getMonth(), 0);
       const firstOfPreviousMonth = new Date(lastOfPreviousMonth.getFullYear(), lastOfPreviousMonth.getMonth(), 1);
       return { from_date: format(firstOfPreviousMonth, 'yyyy-MM-dd'), to_date: format(lastOfPreviousMonth, 'yyyy-MM-dd') };
     } else {
-      return { from_date: customFrom, to_date: customTo };
+      return { from_date: submittedCustomFrom, to_date: submittedCustomTo };
     }
     // weekly/monthly values only change once per day — safe to omit `now`
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, reportDate, customFrom, customTo]);
+  }, [submittedMode, submittedReportDate, submittedCustomFrom, submittedCustomTo]);
 
   const queryKey = useMemo(
-    () => ['sales-report-v2', mode, ...Object.values(queryParams), activeProgressId],
-    [mode, queryParams, activeProgressId],
+    () => ['sales-report-v2', submittedMode, ...Object.values(queryParams), requestVersion],
+    [submittedMode, queryParams, requestVersion],
   );
 
   const { data: raw, isLoading, isFetching, isError, error } = useQuery({
@@ -187,7 +191,7 @@ export default function DailySalesReportPage() {
     enabled: showReport,
     staleTime: 0,
     retry: false,
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: false,
     gcTime: 10 * 60_000,
   });
 
@@ -218,10 +222,16 @@ export default function DailySalesReportPage() {
     setBackendPercent(1);
     setBackendLabel('Starting report generation…');
     setActiveProgressId(createProgressId());
+    setSubmittedMode(mode);
+    setSubmittedReportDate(reportDate);
+    setSubmittedCustomFrom(customFrom);
+    setSubmittedCustomTo(customTo);
+    setRequestVersion((prev) => prev + 1);
     setShowReport(true);
-  }, []);
+  }, [customFrom, customTo, mode, reportDate]);
 
   const queryLoading = isLoading || isFetching;
+  const blockingLoading = isLoading || Boolean(activeProgressId && isFetching);
 
   // Real elapsed-time counter + percentage progress while loading
   const [elapsed, setElapsed] = useState(0);
@@ -250,10 +260,12 @@ export default function DailySalesReportPage() {
     if (!queryLoading && (raw?.success || (!raw && !isError))) {
       setBackendPercent(0);
       setBackendLabel('');
+      setActiveProgressId(null);
       return;
     }
     if (!queryLoading && isError) {
       setBackendLabel('Report request failed');
+      setActiveProgressId(null);
     }
   }, [isError, queryLoading, raw]);
 
@@ -351,13 +363,13 @@ export default function DailySalesReportPage() {
     const csv = lines.join('\n');
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
     const a = document.createElement('a');
-    const filename = mode === 'daily' ? `channel-wise-sales-report-${reportDate}.csv`
-      : mode === 'weekly' ? `channel-wise-sales-report-week-${queryParams.from_date!}-to-${queryParams.to_date!}.csv`
-        : mode === 'monthly' ? `channel-wise-sales-report-month-${queryParams.from_date!}-to-${queryParams.to_date!}.csv`
-          : `channel-wise-sales-report-${customFrom}-to-${customTo}.csv`;
+    const filename = submittedMode === 'daily' ? `channel-wise-sales-report-${submittedReportDate}.csv`
+      : submittedMode === 'weekly' ? `channel-wise-sales-report-week-${queryParams.from_date!}-to-${queryParams.to_date!}.csv`
+        : submittedMode === 'monthly' ? `channel-wise-sales-report-month-${queryParams.from_date!}-to-${queryParams.to_date!}.csv`
+          : `channel-wise-sales-report-${submittedCustomFrom}-to-${submittedCustomTo}.csv`;
     a.href = url; a.download = filename;
     document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-  }, [raw, mode, reportDate, customFrom, customTo, queryParams]);
+  }, [queryParams, raw, submittedCustomFrom, submittedCustomTo, submittedMode, submittedReportDate]);
 
   /* derived data */
   const totals = raw?.totals;
@@ -459,13 +471,13 @@ export default function DailySalesReportPage() {
     itemSortKey === k ? (itemSortDir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />) : <ArrowUpDown className="w-3 h-3 opacity-30" />;
 
   /* date labels */
-  const dateLabel = mode === 'daily'
-    ? format(parse(reportDate, 'yyyy-MM-dd', new Date()), 'EEEE, dd MMMM yyyy')
-    : mode === 'weekly'
+  const dateLabel = submittedMode === 'daily'
+    ? format(parse(submittedReportDate, 'yyyy-MM-dd', new Date()), 'EEEE, dd MMMM yyyy')
+    : submittedMode === 'weekly'
       ? `${format(parse(queryParams.from_date!, 'yyyy-MM-dd', new Date()), 'dd MMM yyyy')} – ${format(parse(queryParams.to_date!, 'yyyy-MM-dd', new Date()), 'dd MMM yyyy')}`
-      : mode === 'monthly'
+      : submittedMode === 'monthly'
         ? `${format(parse(queryParams.from_date!, 'yyyy-MM-dd', new Date()), 'dd MMM yyyy')} – ${format(parse(queryParams.to_date!, 'yyyy-MM-dd', new Date()), 'dd MMM yyyy')}`
-        : `${format(parse(customFrom, 'yyyy-MM-dd', new Date()), 'dd MMM yyyy')} – ${format(parse(customTo, 'yyyy-MM-dd', new Date()), 'dd MMM yyyy')}`;
+        : `${format(parse(submittedCustomFrom, 'yyyy-MM-dd', new Date()), 'dd MMM yyyy')} – ${format(parse(submittedCustomTo, 'yyyy-MM-dd', new Date()), 'dd MMM yyyy')}`;
 
   const CAL_CLASSES = {
     root: 'rdp-custom',
@@ -497,7 +509,7 @@ export default function DailySalesReportPage() {
             { key: 'monthly' as ReportMode, label: 'Monthly', icon: Layers },
             { key: 'custom' as ReportMode, label: 'Custom Range', icon: BarChart3 },
           ]).map((tab) => (
-            <button key={tab.key} onClick={() => { setMode(tab.key); setShowReport(false); }}
+            <button key={tab.key} onClick={() => setMode(tab.key)}
               className={`inline-flex items-center gap-2 px-3.5 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all whitespace-nowrap ${mode === tab.key
                 ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-400 shadow-sm'
                 : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-300'
@@ -529,7 +541,7 @@ export default function DailySalesReportPage() {
                       className="absolute left-0 top-full mt-2 z-50 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl p-3">
                       <DayPicker mode="single"
                         selected={parse(reportDate, 'yyyy-MM-dd', new Date())}
-                        onSelect={(day) => { if (day) { setReportDate(format(day, 'yyyy-MM-dd')); setShowReport(false); setCalOpen(false); } }}
+                        onSelect={(day) => { if (day) { setReportDate(format(day, 'yyyy-MM-dd')); setCalOpen(false); } }}
                         disabled={{ after: new Date() }}
                         defaultMonth={parse(reportDate, 'yyyy-MM-dd', new Date())}
                         classNames={CAL_CLASSES}
@@ -615,7 +627,7 @@ export default function DailySalesReportPage() {
                       className="absolute left-0 top-full mt-2 z-50 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl p-3">
                       <DayPicker mode="single"
                         selected={parse(customFrom, 'yyyy-MM-dd', new Date())}
-                        onSelect={(day) => { if (day) { setCustomFrom(format(day, 'yyyy-MM-dd')); setShowReport(false); setCalFromOpen(false); } }}
+                        onSelect={(day) => { if (day) { setCustomFrom(format(day, 'yyyy-MM-dd')); setCalFromOpen(false); } }}
                         disabled={{ after: new Date() }}
                         defaultMonth={parse(customFrom, 'yyyy-MM-dd', new Date())}
                         classNames={CAL_CLASSES}
@@ -640,7 +652,7 @@ export default function DailySalesReportPage() {
                       className="absolute left-0 top-full mt-2 z-50 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl p-3">
                       <DayPicker mode="single"
                         selected={parse(customTo, 'yyyy-MM-dd', new Date())}
-                        onSelect={(day) => { if (day) { setCustomTo(format(day, 'yyyy-MM-dd')); setShowReport(false); setCalToOpen(false); } }}
+                        onSelect={(day) => { if (day) { setCustomTo(format(day, 'yyyy-MM-dd')); setCalToOpen(false); } }}
                         disabled={{ after: new Date() }}
                         defaultMonth={parse(customTo, 'yyyy-MM-dd', new Date())}
                         classNames={CAL_CLASSES}
@@ -667,7 +679,7 @@ export default function DailySalesReportPage() {
 
       {/* Loading */}
       <AnimatePresence>
-        {queryLoading && (
+        {blockingLoading && (
           <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
             className="rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm p-10 flex flex-col items-center gap-4">
             <div className="h-10 w-10 rounded-full border-[3px] border-blue-500 border-t-transparent animate-spin" />
@@ -690,7 +702,7 @@ export default function DailySalesReportPage() {
       </AnimatePresence>
 
       {/* Error */}
-      {showReport && (isError || (raw && !raw.success)) && !queryLoading && (
+      {showReport && (isError || (raw && !raw.success)) && !blockingLoading && (
         <div className="rounded-2xl bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 p-4">
           <p className="text-sm text-rose-600 dark:text-rose-400">
             {raw?.error || (error as any)?.message || 'Failed to generate report'}

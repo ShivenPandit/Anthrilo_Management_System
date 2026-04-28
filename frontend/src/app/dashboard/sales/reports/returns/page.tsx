@@ -17,6 +17,7 @@ import {
 import { DayPicker } from 'react-day-picker';
 import 'react-day-picker/style.css';
 import { format, parse } from 'date-fns';
+import { getYesterdayIst, getIstRelativeDate } from '@/lib/ist-date';
 
 /* helpers */
 const fmtCurr = (v: number) => `₹${v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -86,16 +87,13 @@ const createProgressId = () => {
 /*  */
 export default function ReturnReportPage() {
   const [reportDate, setReportDate] = useState<string>(() => {
-    const d = new Date(); d.setDate(d.getDate() - 1);
-    return d.toISOString().split('T')[0];
+    return getYesterdayIst();
   });
   const [fromDate, setFromDate] = useState<string>(() => {
-    const d = new Date(); d.setDate(d.getDate() - 7);
-    return d.toISOString().split('T')[0];
+    return getIstRelativeDate(-7);
   });
   const [toDate, setToDate] = useState<string>(() => {
-    const d = new Date(); d.setDate(d.getDate() - 1);
-    return d.toISOString().split('T')[0];
+    return getYesterdayIst();
   });
   const [period, setPeriod] = useState<ReportPeriod>('daily');
   const [showReport, setShowReport] = useState(true);
@@ -390,6 +388,8 @@ export default function ReturnReportPage() {
                 <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1.5">From</label>
                 <input
                   type="date"
+                  aria-label="Return report start date"
+                  title="Return report start date"
                   value={fromDate}
                   max={toDate || undefined}
                   onChange={(e) => { setFromDate(e.target.value); setShowReport(false); }}
@@ -400,9 +400,11 @@ export default function ReturnReportPage() {
                 <label className="block text-xs font-medium text-slate-500 dark:text-slate-400 mb-1.5">To</label>
                 <input
                   type="date"
+                  aria-label="Return report end date"
+                  title="Return report end date"
                   value={toDate}
                   min={fromDate || undefined}
-                  max={new Date().toISOString().split('T')[0]}
+                  max={getIstRelativeDate(0)}
                   onChange={(e) => { setToDate(e.target.value); setShowReport(false); }}
                   className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-violet-500"
                 />

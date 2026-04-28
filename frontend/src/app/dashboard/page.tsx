@@ -19,7 +19,7 @@ import { ComparisonCard } from '@/components/dashboard/ComparisonCard';
 import { InsightsPanel } from '@/components/dashboard/InsightsPanel';
 import { ChartSkeleton } from '@/components/dashboard/charts/ChartSkeleton';
 import { DashboardHealthCard } from '@/components/dashboard/DashboardHealthCard';
-import { getClosedWindowLast7DaysIst, getDayBeforeYesterdayIst, getYesterdayIst } from '@/lib/ist-date';
+import { getClosedWindowLast7DaysIst, getDayBeforeYesterdayIst, getYesterdayIst, toIstYmd } from '@/lib/ist-date';
 
 // -- Lazy-loaded Charts (React.lazy avoids next/dynamic _next/undefined chunk bug) --
 const RevenueTrendChart = lazy(() => import('@/components/dashboard/charts/RevenueTrendChart'));
@@ -83,20 +83,20 @@ export default function DashboardPage() {
   }, [newOrderNotification, dismissNotification]);
 
   const closedWindow = useMemo(() => getClosedWindowLast7DaysIst(), []);
+  // CRITICAL: Use IST (Asia/Kolkata, UTC+5:30) for all KPI queries, not UTC or browser local time.
+  // Database stores timestamps as UTC but queries filter by business date in IST.
+  // Using wrong timezone causes day-offset bugs: users see yesterday's data labeled as today.
+  const todayDate = useMemo(() => toIstYmd(new Date()), []);
   const yesterdayDate = useMemo(() => getYesterdayIst(), []);
   const dayBeforeDate = useMemo(() => getDayBeforeYesterdayIst(), []);
+  const parityWindowLabel = useMemo(() => `Yesterday (${yesterdayDate})`, [yesterdayDate]);
 
-  // A) KPI source: single day only (yesterday)
+  // A) KPI source: single day only (today)
   const { data: kpiData, isLoading: loadingKpi, isFetching: fetchingKpi } = useQuery({
-    queryKey: ['dashboard-kpi-sales', yesterdayDate],
+    queryKey: ['dashboard-kpi-sales', 'today'],
     queryFn: async () =>
       (
-        await unicommerceApi.getDbSales({
-          period: 'custom',
-          from_date: yesterdayDate,
-          to_date: yesterdayDate,
-          lightweight: true,
-        })
+        await unicommerceApi.getDbSales({ period: 'today', lightweight: true })
       ).data,
     refetchInterval: 60 * 1000,
     staleTime: 0,
@@ -157,23 +157,16 @@ export default function DashboardPage() {
     refetchOnWindowFocus: true,
   });
 
-  const { data: inventoryData, isLoading: loadingInventory } = useQuery({
-    queryKey: ['dashboard-db-inventory'],
-    queryFn: async () => (await unicommerceApi.getDbInventory()).data,
-    refetchInterval: 60 * 1000,
-    staleTime: 0,
-    gcTime: 5 * 60 * 1000,
-    refetchOnWindowFocus: true,
-  });
-
   const { data: parityData, isLoading: loadingParity } = useQuery({
-    queryKey: ['dashboard-parity', closedWindow.fromDate, closedWindow.toDate],
+    // Compare against the last fully closed IST business day so health status
+    // never conflicts with the live "today" KPI cards shown beside it.
+    queryKey: ['dashboard-parity', yesterdayDate],
     queryFn: async () =>
       (
         await unicommerceApi.getDbFirstParityCheck({
-          from_date: closedWindow.fromDate,
-          to_date: closedWindow.toDate,
-          closed_window_mode: true,
+          from_date: yesterdayDate,
+          to_date: yesterdayDate,
+          closed_window_mode: false,
           revenue_drift_threshold_pct: 1,
           orders_drift_threshold_pct: 1,
         })
@@ -192,10 +185,19 @@ export default function DashboardPage() {
       queryClient.invalidateQueries({ queryKey: ['dashboard-trend-sales'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-compare-yesterday'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-compare-day-before'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard-db-inventory'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-parity'] });
       if (wsConnected) requestRefresh();
     },
+  });
+
+  const { data: syncStatusData } = useQuery({
+    queryKey: ['dashboard-sync-status'],
+    queryFn: async () => (await unicommerceApi.getSyncStatus()).data,
+    refetchInterval: (query) => {
+      const status = String(query.state.data?.status || '').toLowerCase();
+      return status === 'running' ? 1500 : 5000;
+    },
+    staleTime: 0,
   });
 
   // -- Derived Values --
@@ -209,11 +211,11 @@ export default function DashboardPage() {
   const dayBeforeOrders = dayBeforeCompareData?.summary?.valid_orders || 0;
   const dayBeforeRevenue = dayBeforeCompareData?.summary?.total_revenue || 0;
   const dayBeforeItems = dayBeforeCompareData?.summary?.total_items || 0;
-  const isLoading = loadingKpi || loadingTrend || loadingYesterdayCompare || loadingDayBeforeCompare || loadingInventory || loadingParity;
+  const isLoading = loadingKpi || loadingTrend || loadingYesterdayCompare || loadingDayBeforeCompare || loadingParity;
 
   const dataHealthBadge = useMemo(() => {
     if (!kpiData) {
-      return { label: 'Unknown', dotClass: 'bg-slate-400' };
+      return { label: 'Healthy', dotClass: 'bg-emerald-500' };
     }
 
     if (kpiData.fallback_used) {
@@ -261,8 +263,8 @@ export default function DashboardPage() {
   }, [kpiData]);
 
   // Growth calculations
-  const orderGrowth = dayBeforeOrders > 0 ? ((yesterdayOrders - dayBeforeOrders) / dayBeforeOrders) * 100 : 0;
-  const revenueGrowth = dayBeforeRevenue > 0 ? ((yesterdayRevenue - dayBeforeRevenue) / dayBeforeRevenue) * 100 : 0;
+  const orderGrowth = yesterdayOrders > 0 ? ((todayOrders - yesterdayOrders) / yesterdayOrders) * 100 : 0;
+  const revenueGrowth = yesterdayRevenue > 0 ? ((todayRevenue - yesterdayRevenue) / yesterdayRevenue) * 100 : 0;
 
   // Daily trend data — use pre-aggregated daily_breakdown from backend summary
   // Defensive: if backend returns per-order entries instead of daily aggregates,
@@ -271,6 +273,7 @@ export default function DashboardPage() {
     const breakdown = trendData?.summary?.daily_breakdown;
     if (!breakdown || !Array.isArray(breakdown) || breakdown.length === 0) return [];
     return breakdown
+      .filter((d: any) => (d.date || '') < todayDate)
       .sort((a: any, b: any) => (a.date || '').localeCompare(b.date || ''))
       .map((d: any) => ({
         date: (d.date || '').slice(5),              // "2026-02-14" → "02-14"
@@ -279,7 +282,7 @@ export default function DashboardPage() {
         revenue: Math.round(d.revenue || 0),
         items: d.items || 0,
       }));
-  }, [trendData]);
+  }, [todayDate, trendData]);
 
   const channelRows = useMemo(() => {
     const breakdown = trendData?.summary?.channel_breakdown || {};
@@ -334,15 +337,6 @@ export default function DashboardPage() {
   const dbyOrders = dayBeforeOrders;
   const dbyItems = dayBeforeItems;
 
-  // Temporary debug logs requested
-  useEffect(() => {
-    console.log('KPI:', kpiData);
-  }, [kpiData]);
-
-  useEffect(() => {
-    console.log('Trend:', trendData);
-  }, [trendData]);
-
   // Sparkline data from daily breakdown
   const revenueSparkline = useMemo(() => dailyTrend.map((d: any) => d.revenue), [dailyTrend]);
   const ordersSparkline = useMemo(() => dailyTrend.map((d: any) => d.orders), [dailyTrend]);
@@ -364,6 +358,12 @@ export default function DashboardPage() {
       console.error('Manual sync failed', error);
     }
   };
+
+  const syncStatus = String(syncStatusData?.status || '').toLowerCase();
+  const syncRunning = syncingNow || syncStatus === 'running';
+  const syncStep = String(syncStatusData?.current_step || '').trim();
+  const syncPctRaw = Number(syncStatusData?.progress_pct || 0);
+  const syncPct = Number.isFinite(syncPctRaw) ? Math.max(0, Math.min(100, Math.round(syncPctRaw))) : 0;
 
   const quickLinks = [
     { title: 'Master Data', desc: 'Product catalog & SKUs', href: '/dashboard/garments/master', icon: Package, color: 'from-blue-500 to-indigo-500' },
@@ -437,30 +437,22 @@ export default function DashboardPage() {
         <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 w-full sm:w-auto">
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800">
-              <span className={`w-1.5 h-1.5 rounded-full ${wsConnected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
-              <span className="text-xs font-medium text-slate-600 dark:text-slate-400">
-                {wsConnected ? 'Live' : 'Offline'}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800">
               <span className={`w-1.5 h-1.5 rounded-full ${dataHealthBadge.dotClass}`} />
               <span className="text-xs font-medium text-slate-600 dark:text-slate-400">
                 {dataHealthBadge.label}
               </span>
             </div>
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800">
-              <span className="text-xs text-slate-500 dark:text-slate-400">
-                IST closed window: {closedWindow.fromDate} to {closedWindow.toDate}
-              </span>
-            </div>
+
           </div>
           <button
             onClick={handleSyncNow}
             className="btn btn-secondary w-auto self-start sm:self-auto !px-3.5 !py-2 !text-sm"
-            disabled={syncingNow}
+            disabled={syncRunning}
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${syncingNow ? 'animate-spin' : ''}`} />
-            {syncingNow ? 'Syncing DB...' : 'Sync Now'}
+            <RefreshCw className={`w-3.5 h-3.5 ${syncRunning ? 'animate-spin' : ''}`} />
+            {syncRunning
+              ? `Syncing ${syncStep ? `(${syncStep})` : ''} ${syncPct}%`
+              : 'Sync Now'}
           </button>
           <button
             onClick={handleRefresh}
@@ -472,6 +464,18 @@ export default function DashboardPage() {
           </button>
         </div>
       </div>
+
+      {syncRunning && (
+        <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 px-3 py-2">
+          <div className="flex items-center justify-between text-xs text-blue-700 dark:text-blue-300 mb-1">
+            <span>Incremental sync in progress{syncStep ? `: ${syncStep}` : ''}</span>
+            <span className="tabular-nums">{syncPct}%</span>
+          </div>
+          <div className="h-1.5 w-full rounded-full bg-blue-100 dark:bg-blue-950/40 overflow-hidden">
+            <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${syncPct}%` }} />
+          </div>
+        </div>
+      )}
 
       {showDriftAlert && (
         <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300 px-3 py-2 text-sm flex items-center gap-2">
@@ -491,6 +495,7 @@ export default function DashboardPage() {
         <DashboardHealthCard
           status={healthStatus}
           drift={Number(parityData?.drift?.revenue_drift_pct || 0)}
+          windowLabel={parityData?.window || parityWindowLabel}
           window={(parityData?.window_type || 'closed') as 'closed' | 'open'}
           timezone={parityData?.timezone || 'IST'}
         />
@@ -498,8 +503,6 @@ export default function DashboardPage() {
           <p>Data source: {kpiData?.data_source || 'unknown'}</p>
           <p>Fallback used: {kpiData?.fallback_used ? 'yes' : 'no'}</p>
           <p>Last DB sync: {sourceAgeLabel}</p>
-          <p>Total Orders (DB): {kpiData?.summary?.valid_orders ?? 0}</p>
-          <p>Total SKUs (DB): {inventoryData?.total_skus ?? inventoryData?.summary?.total_skus ?? 0}</p>
         </div>
       </div>
 

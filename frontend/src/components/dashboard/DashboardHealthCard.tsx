@@ -6,6 +6,7 @@ interface DashboardHealthCardProps {
   status: HealthStatus;
   drift: number;
   window: 'closed' | 'open';
+  windowLabel?: string;
   timezone: string;
 }
 
@@ -15,7 +16,7 @@ const statusClass: Record<HealthStatus, string> = {
   error: 'text-rose-600 bg-rose-50 border-rose-200 dark:text-rose-400 dark:bg-rose-900/20 dark:border-rose-800',
 };
 
-export function DashboardHealthCard({ status, drift, window, timezone }: DashboardHealthCardProps) {
+export function DashboardHealthCard({ status, drift, window, windowLabel, timezone }: DashboardHealthCardProps) {
   return (
     <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3">
       <div className="flex items-center justify-between">
@@ -32,6 +33,7 @@ export function DashboardHealthCard({ status, drift, window, timezone }: Dashboa
         <div>
           <p className="text-slate-400">Window</p>
           <p className="font-semibold">{window}</p>
+          {windowLabel ? <p className="mt-0.5 text-[11px] text-slate-400">{windowLabel}</p> : null}
         </div>
         <div>
           <p className="text-slate-400">Timezone</p>

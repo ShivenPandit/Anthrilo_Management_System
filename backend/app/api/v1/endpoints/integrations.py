@@ -1394,9 +1394,21 @@ async def get_sync_status(
     try:
         orchestrator = get_unicommerce_sync_orchestrator()
         health = orchestrator.get_sync_health()
+        runtime = orchestrator.get_runtime_sync_status()
         if period:
             health["requested_period"] = period
-        return health
+        return {
+            "success": True,
+            "status": runtime.get("status", "idle"),
+            "current_step": runtime.get("current_step"),
+            "progress_pct": int(runtime.get("progress_pct", 0) or 0),
+            "last_synced_at": runtime.get("last_synced_at"),
+            "health_status": health.get("status"),
+            "entities": health.get("entities", []),
+            "max_lag_minutes": health.get("max_lag_minutes"),
+            "requested_period": health.get("requested_period"),
+            "updated_at": runtime.get("updated_at"),
+        }
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
