@@ -46,3 +46,11 @@ export const getDayBeforeYesterdayIst = (): string => {
   return toIstYmd(date);
 };
 
+export const getIstRelativeDate = (daysFromToday: number): string => {
+  const today = toIstYmd(new Date());
+  const [year, month, day] = today.split('-').map(Number);
+  const base = new Date(Date.UTC(year, month - 1, day, 0, 0, 0));
+  base.setUTCDate(base.getUTCDate() + daysFromToday);
+  return toIstYmd(base);
+};
+

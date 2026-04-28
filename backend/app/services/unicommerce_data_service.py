@@ -181,6 +181,15 @@ class UnicommerceDataService:
         return value.astimezone(timezone.utc)
 
     @staticmethod
+    def _db_filter_dt(value: Optional[datetime]) -> Optional[datetime]:
+        """Convert aware UTC datetimes to naive UTC for timestamp-without-time-zone DB filters."""
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    @staticmethod
     def _pick(payload: Dict[str, Any], *keys: str) -> Optional[Any]:
         for key in keys:
             value = payload.get(key)
@@ -207,12 +216,13 @@ class UnicommerceDataService:
                 end_dt,
                 closed_window_mode=False,
             )
-            return start_utc, end_exclusive_utc
+            return self._db_filter_dt(start_utc), self._db_filter_dt(end_exclusive_utc)
 
         if period == "today":
             start, end = self.uc_service.get_today_range()
-            norm_start, norm_end_exclusive = _normalize_window(start, end)
-            return norm_start, norm_end_exclusive, "today"
+            # Preserve the partial-day cutoff for "today".
+            # Normalizing to IST day bounds would incorrectly widen this to the full day.
+            return self._db_filter_dt(start), self._db_filter_dt(end + timedelta(microseconds=1)), "today"
 
         if period == "yesterday":
             start, end = self.uc_service.get_yesterday_range()
@@ -235,7 +245,7 @@ class UnicommerceDataService:
                 to_date,
                 closed_window_mode=False,
             )
-            return norm_start, norm_end_exclusive, "custom"
+            return self._db_filter_dt(norm_start), self._db_filter_dt(norm_end_exclusive), "custom"
 
         start, end = self.uc_service.get_today_range()
         norm_start, norm_end_exclusive = _normalize_window(start, end)
@@ -256,9 +266,7 @@ class UnicommerceDataService:
             if not order_id:
                 continue
 
-            order_date = self.uc_service._parse_datetime(
-                self._pick(payload, "Created", "created")
-            )
+            order_date = self.uc_service._parse_business_order_datetime(payload)
             order_date = self._normalize_dt(order_date)
 
             if order_date and (order_date < from_date or order_date >= to_date):
@@ -570,10 +578,12 @@ class UnicommerceDataService:
             item_discount = self._safe_decimal(row.get("discount"))
             item_tax = self._safe_decimal(row.get("tax"))
             item_refund = self._safe_decimal(row.get("refund"))
-            order["selling_price"] += item_price * Decimal(qty)
-            order["discount"] += item_discount * Decimal(qty)
-            order["tax"] += item_tax * Decimal(qty)
-            order["refund"] += item_refund * Decimal(qty)
+            # Unicommerce export rows already store row totals for selling/discount/tax/refund.
+            # Multiplying by qty inflates revenue whenever one row represents multiple units.
+            order["selling_price"] += item_price
+            order["discount"] += item_discount
+            order["tax"] += item_tax
+            order["refund"] += item_refund
             order["item_count"] += 1
             order["quantity"] += qty
 
@@ -607,9 +617,16 @@ class UnicommerceDataService:
             tax = self._safe_decimal(order.get("tax"))
             refund = self._safe_decimal(order.get("refund"))
             qty = int(order.get("quantity") or 0)
+            item_count = int(order.get("item_count") or 0)
             created = order.get("created")
 
             status_breakdown[status] = status_breakdown.get(status, 0) + 1
+
+            # If an order only contained FABRIC rows (which are excluded above),
+            # it should not count toward valid orders (it has no real sellable items).
+            if item_count <= 0:
+                excluded_orders += 1
+                continue
 
             include = status not in self.EXCLUDED_STATUSES
             if include:
@@ -618,13 +635,13 @@ class UnicommerceDataService:
                 total_discount += discount
                 total_tax += tax
                 total_refund += refund
-                total_items += qty
+                total_items += item_count
 
                 if channel not in channel_breakdown:
                     channel_breakdown[channel] = {"orders": 0, "revenue": Decimal("0"), "items": 0}
                 channel_breakdown[channel]["orders"] += 1
                 channel_breakdown[channel]["revenue"] += revenue
-                channel_breakdown[channel]["items"] += qty
+                channel_breakdown[channel]["items"] += item_count
 
                 date_key = None
                 if isinstance(created, datetime):
@@ -632,7 +649,7 @@ class UnicommerceDataService:
                         created_utc = created.replace(tzinfo=timezone.utc)
                     else:
                         created_utc = created.astimezone(timezone.utc)
-                    date_key = created_utc.strftime("%Y-%m-%d")
+                    date_key = created_utc.astimezone(IST).strftime("%Y-%m-%d")
                 elif created:
                     date_key = self._safe_str(created)[:10]
 
@@ -646,7 +663,7 @@ class UnicommerceDataService:
                         }
                     daily_map[date_key]["orders"] += 1
                     daily_map[date_key]["revenue"] += revenue
-                    daily_map[date_key]["items"] += qty
+                    daily_map[date_key]["items"] += item_count
             else:
                 excluded_orders += 1
 
@@ -800,6 +817,10 @@ class UnicommerceDataService:
 
         db = self._get_db()
         try:
+            # Period filtering uses order_date (business event time), NOT created_at (sync ingestion time).
+            # This is CRITICAL: order_date is when customer placed order; created_at is when we synced it.
+            # If we used created_at, a batch sync from April 2026 could mis-report as Sept 2023 (sync date).
+            # Always use order_date for period bucketing to avoid cross-period drift.
             date_filter = and_(
                 SalesOrderRecord.order_date.isnot(None),
                 SalesOrderRecord.order_date >= start,
@@ -1081,6 +1102,16 @@ class UnicommerceDataService:
         to_date: datetime,
         return_type: str = "ALL",
     ) -> Dict[str, Any]:
+        def _normalize_return_type(value: Any) -> str:
+            raw = self._safe_str(value).upper()
+            if not raw:
+                return "UNKNOWN"
+            if "COURIER" in raw or "RTO" in raw:
+                return "RTO"
+            if "CUSTOMER" in raw or "CIR" in raw or "REVERSE" in raw:
+                return "CIR"
+            return raw
+
         type_norm = self._safe_str(return_type or "ALL").upper()
         if type_norm not in {"RTO", "CIR", "ALL"}:
             type_norm = "ALL"
@@ -1089,19 +1120,17 @@ class UnicommerceDataService:
         try:
             items: List[Dict[str, Any]] = []
 
-            # Use created_at as a coarse date filter with extra buffer,
-            # then rely on the parsed event date post-filter (below) for
-            # precision.  Filtering on updated_at is WRONG because re-sync
-            # operations update it, causing old returns to appear in recent
-            # reports.  A 30-day buffer on created_at ensures we don't miss
-            # records that were created slightly outside the window but whose
-            # actual return event date falls within range.
-            coarse_from = from_date - timedelta(days=30)
+            ist = timezone(timedelta(hours=5, minutes=30))
+            from_date_ist = self._normalize_dt(from_date).astimezone(ist).date() if from_date else None
+            to_date_ist = self._normalize_dt(to_date).astimezone(ist).date() if to_date else None
+
             normalized_records = (
                 db.query(SalesReturnRecord)
                 .filter(
-                    SalesReturnRecord.created_at >= coarse_from,
-                    SalesReturnRecord.created_at <= to_date + timedelta(days=1),
+                    func.coalesce(
+                        SalesReturnRecord.raw_data["Date"].astext,
+                        SalesReturnRecord.raw_data["date"].astext,
+                    ).isnot(None)
                 )
                 .all()
             )
@@ -1113,6 +1142,8 @@ class UnicommerceDataService:
                         raw,
                         "Return Date",
                         "returnDate",
+                        "Date",
+                        "date",
                         "Invoice Date",
                         "invoiceDate",
                         "Created",
@@ -1123,13 +1154,27 @@ class UnicommerceDataService:
                 )
                 parsed_dt = self._normalize_dt(parsed_dt or record.updated_at or record.created_at)
 
-                if parsed_dt and (parsed_dt < from_date or parsed_dt > to_date):
+                raw_business_date = self._safe_str(
+                    self._pick(raw, "Date", "date")
+                )
+                if raw_business_date:
+                    try:
+                        business_date = datetime.strptime(raw_business_date, "%d-%m-%Y").date()
+                    except ValueError:
+                        try:
+                            business_date = datetime.strptime(raw_business_date, "%Y-%m-%d").date()
+                        except ValueError:
+                            business_date = parsed_dt.date() if parsed_dt else None
+                else:
+                    business_date = parsed_dt.date() if parsed_dt else None
+
+                if business_date is not None and (business_date < from_date_ist or business_date > to_date_ist):
                     continue
 
-                rtype = self._safe_str(
+                rtype = _normalize_return_type(
                     self._pick(raw, "Return Type", "returnType")
                     or record.return_status
-                ).upper() or "UNKNOWN"
+                )
                 if type_norm != "ALL" and rtype != type_norm:
                     continue
 
@@ -1171,6 +1216,8 @@ class UnicommerceDataService:
                             raw,
                             "Return Date",
                             "returnDate",
+                            "Date",
+                            "date",
                             "Invoice Date",
                             "invoiceDate",
                             "Created",
@@ -1182,7 +1229,7 @@ class UnicommerceDataService:
                     if parsed_dt and (parsed_dt < from_date or parsed_dt > to_date):
                         continue
 
-                    rtype = self._safe_str(self._pick(raw, "Return Type", "returnType")).upper() or "UNKNOWN"
+                    rtype = _normalize_return_type(self._pick(raw, "Return Type", "returnType"))
                     if type_norm != "ALL" and rtype != type_norm:
                         continue
 
@@ -1633,6 +1680,16 @@ class UnicommerceDataService:
         progress_cb: Optional[Callable[[int, str], None]] = None,
     ) -> Dict[str, Any]:
         try:
+            def _normalize_return_type(value: Any) -> str:
+                raw = self._safe_str(value).upper()
+                if not raw:
+                    return "UNKNOWN"
+                if "COURIER" in raw or "RTO" in raw:
+                    return "RTO"
+                if "CUSTOMER" in raw or "CIR" in raw or "REVERSE" in raw:
+                    return "CIR"
+                return raw
+
             self._emit_progress(progress_cb, 5, "Validating return report parameters…")
             period_norm = self._safe_str(period or "daily").lower()
             ist = timezone(timedelta(hours=5, minutes=30))
@@ -1705,68 +1762,43 @@ class UnicommerceDataService:
 
             order_groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for item in all_items:
-                so_code = self._safe_str(item.get("saleOrderCode")) or "UNKNOWN"
-                order_groups[so_code].append(item)
+                return_code = self._safe_str(item.get("invoiceCode")) or self._safe_str(item.get("saleOrderCode")) or "UNKNOWN"
+                order_groups[return_code].append(item)
 
             self._emit_progress(progress_cb, 52, "Classifying RTO vs CIR and grouping by channel…")
 
-            for so_code, items in order_groups.items():
-                if not items:
-                    continue
+            for item in all_items:
+                rtype = _normalize_return_type(item.get("returnType"))
+                channel = self._safe_str(item.get("channel")) or "UNKNOWN"
+                sku = self._safe_str(item.get("sku")) or "UNKNOWN"
+                item_name = self._safe_str(item.get("itemName"))
+                qty = self._safe_int(item.get("quantity"), default=1)
+                if qty <= 0:
+                    qty = 1
 
-                first = items[0]
-                rtype = self._safe_str(first.get("returnType")) or "UNKNOWN"
-                channel = self._safe_str(first.get("channel")) or "UNKNOWN"
+                unit_price = self._safe_float(item.get("unitPrice"), default=0.0)
+                refund_amount = self._safe_float(item.get("refundAmount"), default=0.0)
+                price = refund_amount if refund_amount > 0 else (unit_price * qty)
+
+                total_items_count += qty
+                total_value += price
 
                 if rtype == "RTO":
                     rto_count += 1
                 elif rtype == "CIR":
                     cir_count += 1
 
-                return_entry: Dict[str, Any] = {
-                    "code": self._safe_str(first.get("invoiceCode")) or so_code,
-                    "type": rtype,
-                    "channel": channel,
-                    "status": "RETURNED",
-                    "created": "",
-                    "saleOrderCode": so_code,
-                    "items": [],
-                    "total_value": 0.0,
-                }
-
-                for item in items:
-                    sku = self._safe_str(item.get("sku")) or "UNKNOWN"
-                    item_name = self._safe_str(item.get("itemName"))
-                    qty = self._safe_int(item.get("quantity"), default=1)
-                    if qty <= 0:
-                        qty = 1
-
-                    unit_price = self._safe_float(item.get("unitPrice"), default=0.0)
-                    price = unit_price * qty
-
-                    total_items_count += qty
-                    total_value += price
-                    return_entry["total_value"] += price
-                    return_entry["items"].append(
-                        {
-                            "sku": sku,
-                            "name": item_name,
-                            "quantity": qty,
-                            "price": price,
-                        }
-                    )
-
-                    if sku not in sku_map:
-                        sku_map[sku] = {
-                            "sku": sku,
-                            "name": item_name,
-                            "quantity": 0,
-                            "value": 0.0,
-                            "return_count": 0,
-                        }
-                    sku_map[sku]["quantity"] += qty
-                    sku_map[sku]["value"] += price
-                    sku_map[sku]["return_count"] += 1
+                if sku not in sku_map:
+                    sku_map[sku] = {
+                        "sku": sku,
+                        "name": item_name,
+                        "quantity": 0,
+                        "value": 0.0,
+                        "return_count": 0,
+                    }
+                sku_map[sku]["quantity"] += qty
+                sku_map[sku]["value"] += price
+                sku_map[sku]["return_count"] += 1
 
                 if channel not in channel_map:
                     channel_map[channel] = {
@@ -1778,14 +1810,32 @@ class UnicommerceDataService:
                         "cir": 0,
                     }
                 channel_map[channel]["returns"] += 1
-                channel_map[channel]["items"] += len(items)
-                channel_map[channel]["value"] += float(return_entry["total_value"] or 0.0)
+                channel_map[channel]["items"] += qty
+                channel_map[channel]["value"] += price
                 if rtype == "RTO":
                     channel_map[channel]["rto"] += 1
-                else:
+                elif rtype == "CIR":
                     channel_map[channel]["cir"] += 1
 
-                returns_list.append(return_entry)
+                returns_list.append(
+                    {
+                        "code": self._safe_str(item.get("invoiceCode")) or self._safe_str(item.get("saleOrderCode")) or "UNKNOWN",
+                        "type": rtype,
+                        "channel": channel,
+                        "status": "RETURNED",
+                        "created": self._safe_str(item.get("returnDate")),
+                        "saleOrderCode": self._safe_str(item.get("saleOrderCode")) or "UNKNOWN",
+                        "items": [
+                            {
+                                "sku": sku,
+                                "name": item_name,
+                                "quantity": qty,
+                                "price": price,
+                            }
+                        ],
+                        "total_value": price,
+                    }
+                )
 
             self._emit_progress(progress_cb, 84, "Finalizing return summary metrics…")
 
@@ -5347,6 +5397,62 @@ class UnicommerceDataService:
             if warehouse_norm:
                 query = query.filter(InventorySnapshotRecord.warehouse == warehouse_norm)
 
+            keyword_norm = self._safe_str(keyword).lower()
+            category_norm = self._safe_str(category).lower()
+            stock_filter_norm = self._safe_str(stock_filter).lower() or "all"
+            safe_start = max(0, int(display_start or 0))
+            safe_length = max(1, min(500, int(display_length or 25)))
+
+            # Fast path: pure paginated browse queries should not materialize the entire catalog.
+            if not keyword_norm and not category_norm:
+                if stock_filter_norm == "in_stock":
+                    query = query.filter(InventorySnapshotRecord.available_qty > 0)
+                elif stock_filter_norm == "out_of_stock":
+                    query = query.filter(InventorySnapshotRecord.available_qty <= 0)
+
+                page_records = (
+                    query.order_by(InventorySnapshotRecord.sku.asc())
+                    .offset(safe_start)
+                    .limit(safe_length + 1)
+                    .all()
+                )
+
+                has_more = len(page_records) > safe_length
+                page_records = page_records[:safe_length]
+                # Fast, monotonic estimate that avoids heavy COUNT(*) on large tables.
+                total_records = safe_start + len(page_records) + (1 if has_more else 0)
+
+                page_skus = [self._safe_str(record.sku) for record in page_records if self._safe_str(record.sku)]
+                item_master_map = self._get_item_master_catalog_metadata_map()
+                product_master_map = self._get_product_master_metadata_map(db, page_skus)
+                sales_order_map = self._get_sales_order_catalog_metadata_map(db, page_skus)
+
+                elements = [
+                    self._inventory_record_to_catalog_element(
+                        record,
+                        item_master_meta=item_master_map.get(self._safe_str(record.sku), {}),
+                        product_master_meta=product_master_map.get(self._safe_str(record.sku), {}),
+                        sales_order_meta=sales_order_map.get(self._safe_str(record.sku), {}),
+                    )
+                    for record in page_records
+                ]
+
+                if not include_inventory_snapshot:
+                    for entry in elements:
+                        entry.pop("inventorySnapshots", None)
+
+                last_synced = max((r.updated_at for r in page_records if r.updated_at), default=None)
+                return {
+                    "successful": True,
+                    "data_source": "normalized_inventory_snapshots",
+                    "fallback_used": False,
+                    "last_synced_at": last_synced.isoformat() if last_synced else None,
+                    "totalRecords": total_records,
+                    "displayStart": safe_start,
+                    "displayLength": safe_length,
+                    "elements": elements,
+                }
+
             records = query.all()
             sku_list = [self._safe_str(record.sku) for record in records if self._safe_str(record.sku)]
             item_master_map = self._get_item_master_catalog_metadata_map()
@@ -5362,7 +5468,6 @@ class UnicommerceDataService:
                 for record in records
             ]
 
-            keyword_norm = self._safe_str(keyword).lower()
             if keyword_norm:
                 def _matches(entry: Dict[str, Any]) -> bool:
                     searchable = " ".join(
@@ -5380,14 +5485,12 @@ class UnicommerceDataService:
 
                 elements = [entry for entry in elements if _matches(entry)]
 
-            category_norm = self._safe_str(category).lower()
             if category_norm:
                 elements = [
                     entry for entry in elements
                     if self._safe_str(entry.get("categoryName")).lower() == category_norm
                 ]
 
-            stock_filter_norm = self._safe_str(stock_filter).lower() or "all"
             if stock_filter_norm == "in_stock":
                 elements = [
                     entry
@@ -5404,8 +5507,6 @@ class UnicommerceDataService:
             elements.sort(key=lambda entry: self._safe_str(entry.get("skuCode")))
 
             total_records = len(elements)
-            safe_start = max(0, int(display_start or 0))
-            safe_length = max(1, min(500, int(display_length or 25)))
             paged = elements[safe_start:safe_start + safe_length]
 
             if not include_inventory_snapshot:

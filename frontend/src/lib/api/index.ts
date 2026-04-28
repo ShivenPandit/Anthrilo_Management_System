@@ -201,6 +201,8 @@ export const unicommerceApi = {
     apiClient.post('/integrations/unicommerce/sync/profile/incremental', null, {
       params: { run_in_background: false },
     }),
+  getSyncStatus: () =>
+    apiClient.get('/integrations/unicommerce/sync/status'),
 
   // Legacy endpoints (kept for backward compat)
   searchOrders: (params: { from_date: string; to_date: string; display_start?: number; display_length?: number }) =>

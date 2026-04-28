@@ -17,6 +17,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any, Optional, Tuple, Set
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.services.order_date_validation import validate_order_date
+
 from app.core.token_manager import get_token_manager
 from app.core.config import settings
 from app.db.session import SessionLocal
@@ -33,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 # IST timezone offset
 IST = timezone(timedelta(hours=5, minutes=30))
+TZ_SUFFIX_RE = re.compile(r"(Z|[+-]\d{2}:\d{2})$")
 
 
 class UnicommerceService:
@@ -236,6 +239,15 @@ class UnicommerceService:
         return str(value).strip() if value is not None else ""
 
     @staticmethod
+    def _clean_code(value: Any) -> str:
+        """
+        Normalize IDs coming from CSV exports.
+        Some exports include Excel-safe prefixes like ` or '.
+        """
+        text_value = str(value).strip() if value is not None else ""
+        return text_value.lstrip("`'").strip()
+
+    @staticmethod
     def _safe_int(value: Any, default: int = 0) -> int:
         try:
             if value is None or value == "":
@@ -300,6 +312,23 @@ class UnicommerceService:
 
         return None
 
+    def _parse_business_order_datetime(self, row: Dict[str, Any]) -> Optional[datetime]:
+        """Use only the business event timestamp field for order_date."""
+        candidates = (
+            row.get("Order Date as dd/mm/yyyy hh:MM:ss"),
+            row.get("orderDate"),
+            row.get("order_date"),
+            row.get("Order Date"),
+        )
+        for candidate in candidates:
+            parsed = self._parse_datetime(candidate)
+            if parsed is not None:
+                raw = str(candidate).strip() if candidate is not None else ""
+                if raw and not TZ_SUFFIX_RE.search(raw):
+                    return parsed.replace(tzinfo=IST).astimezone(timezone.utc)
+                return parsed.astimezone(timezone.utc) if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return None
+
     @staticmethod
     def _partition_month_from_dt(value: Optional[datetime]):
         if value is None:
@@ -326,6 +355,20 @@ class UnicommerceService:
             separators=(",", ":"),
         )
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _auto_sale_order_item_code(self, order_id: str, row: Dict[str, Any]) -> str:
+        """
+        Deterministic fallback item-code when the export does not provide one.
+
+        IMPORTANT: This must be stable across re-syncs even if the CSV contains Excel-safe prefixes
+        (like ` or ') or minor string formatting differences in unrelated columns.
+        """
+        sku = self._clean_code(row.get("Item SKU Code") or row.get("skuCode") or row.get("itemSku") or "")
+        name = self._safe_str(row.get("Item Details") or row.get("itemDetails") or row.get("itemTypeName") or "")
+        qty = self._safe_int(row.get("Quantity") or row.get("Qty") or row.get("QTY") or row.get("quantity") or 1, default=1)
+        price = self._safe_str(row.get("Selling Price") or row.get("sellingPrice") or "0")
+        key = f"{order_id}|{sku}|{qty}|{price}|{name}".strip()
+        return f"AUTO-{hashlib.sha256(key.encode('utf-8')).hexdigest()[:20]}"
 
     def _derive_export_entity(
         self,
@@ -520,19 +563,19 @@ class UnicommerceService:
             row = self._normalize_csv_row(raw_row)
 
             order_id = (
-                self._safe_str(row.get("Sale Order Code"))
-                or self._safe_str(row.get("saleOrderCode"))
-                or self._safe_str(row.get("code"))
+                self._clean_code(row.get("Sale Order Code"))
+                or self._clean_code(row.get("saleOrderCode"))
+                or self._clean_code(row.get("code"))
             )
             if not order_id:
                 continue
 
             sale_order_item_code = (
-                self._safe_str(row.get("Sale Order Item Code"))
-                or self._safe_str(row.get("soicode"))
+                self._clean_code(row.get("Sale Order Item Code"))
+                or self._clean_code(row.get("soicode"))
             )
             if not sale_order_item_code:
-                sale_order_item_code = f"AUTO-{self._row_hash(row)[:20]}"
+                sale_order_item_code = self._auto_sale_order_item_code(order_id, row)
 
             qty = self._safe_int(
                 row.get("Quantity")
@@ -546,7 +589,13 @@ class UnicommerceService:
                 qty = 1
 
             channel_raw = self._safe_str(row.get("Channel Name") or row.get("channel") or "UNKNOWN")
-            order_date = self._parse_datetime(row.get("Created") or row.get("created"))
+            order_date = self._parse_business_order_datetime(row)
+            if order_date is None:
+                raise ValueError(
+                    f"Missing business order timestamp for order {order_id}. "
+                    "Expected Order Date field; refusing Created fallback."
+                )
+            order_date = validate_order_date(order_date.replace(tzinfo=None), order_id, context="sync_import").replace(tzinfo=timezone.utc)
 
             # Normalize status and channel to prevent case/whitespace fragmentation
             status_raw = self._safe_str(
@@ -627,7 +676,7 @@ class UnicommerceService:
                 chunk = payloads[start:start + chunk_size]
                 stmt = pg_insert(SalesOrderRecord).values(chunk)
                 upsert_stmt = stmt.on_conflict_do_update(
-                    index_elements=["order_id", "sale_order_item_code", "partition_month"],
+                    index_elements=["order_id", "sale_order_item_code"],
                     set_={
                         "channel": stmt.excluded.channel,
                         "sku": stmt.excluded.sku,
@@ -659,6 +708,191 @@ class UnicommerceService:
             db.rollback()
             logger.warning(f"Export archival: failed to upsert normalized sales orders: {exc}")
             return 0
+        finally:
+            db.close()
+
+    def _upsert_sales_order_rows_best_effort(
+        self,
+        rows: List[Dict[str, Any]],
+        *,
+        requested_from: datetime,
+        requested_to: datetime,
+    ) -> tuple[int, int]:
+        """
+        Best-effort upsert for a specific export window.
+
+        - Prefers business order timestamp fields for order_date.
+        - If business timestamp is missing, falls back to Created/created ONLY if the parsed
+          Created timestamp lies within [requested_from, requested_to]. This avoids cross-day drift.
+
+        Returns (upserted_rows, skipped_rows).
+        """
+        if not rows:
+            return 0, 0
+
+        req_from = requested_from if requested_from.tzinfo else requested_from.replace(tzinfo=timezone.utc)
+        req_to = requested_to if requested_to.tzinfo else requested_to.replace(tzinfo=timezone.utc)
+
+        payloads: List[Dict[str, Any]] = []
+        skipped = 0
+
+        for raw_row in rows:
+            row = self._normalize_csv_row(raw_row)
+
+            order_id = (
+                self._clean_code(row.get("Sale Order Code"))
+                or self._clean_code(row.get("saleOrderCode"))
+                or self._clean_code(row.get("code"))
+            )
+            if not order_id:
+                skipped += 1
+                continue
+
+            sale_order_item_code = (
+                self._clean_code(row.get("Sale Order Item Code"))
+                or self._clean_code(row.get("soicode"))
+            )
+            if not sale_order_item_code:
+                sale_order_item_code = self._auto_sale_order_item_code(order_id, row)
+
+            qty = self._safe_int(
+                row.get("Quantity")
+                or row.get("Qty")
+                or row.get("QTY")
+                or row.get("quantity")
+                or 1,
+                default=1,
+            )
+            if qty <= 0:
+                qty = 1
+
+            channel_raw = self._safe_str(row.get("Channel Name") or row.get("channel") or "UNKNOWN")
+            order_date = self._parse_business_order_datetime(row)
+            if order_date is None:
+                created_candidate = row.get("Created") or row.get("created")
+                created_dt = self._parse_datetime(created_candidate)
+                if created_dt is None:
+                    skipped += 1
+                    continue
+                raw_created = str(created_candidate).strip() if created_candidate is not None else ""
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                # If Created is a naive string (no TZ suffix), treat it as IST-local (business system time)
+                if raw_created and not TZ_SUFFIX_RE.search(raw_created):
+                    created_dt = created_dt.replace(tzinfo=IST)
+                created_utc = created_dt.astimezone(timezone.utc)
+                if not (req_from <= created_utc <= req_to):
+                    skipped += 1
+                    continue
+                order_date = created_utc
+
+            # Store as naive UTC in DB
+            validated = validate_order_date(
+                order_date.astimezone(timezone.utc).replace(tzinfo=None),
+                order_id,
+                context="sync_import_best_effort",
+            )
+
+            status_raw = self._safe_str(
+                row.get("Sale Order Status") or row.get("status") or "CREATED"
+            ).upper()
+            channel_normalized = channel_raw.replace(" ", "_")
+
+            payloads.append(
+                {
+                    "order_id": order_id,
+                    "sale_order_item_code": sale_order_item_code,
+                    "channel": channel_normalized,
+                    "sku": self._safe_str(
+                        row.get("Item SKU Code")
+                        or row.get("skuCode")
+                        or row.get("itemSku")
+                    ),
+                    "product_name": self._safe_str(
+                        row.get("Item Details")
+                        or row.get("itemDetails")
+                        or row.get("itemTypeName")
+                    ),
+                    "qty": qty,
+                    "selling_price": self._safe_float(row.get("Selling Price") or row.get("sellingPrice") or 0),
+                    "discount": self._safe_float(row.get("Discount") or row.get("discount") or 0),
+                    "tax": self._safe_float(
+                        row.get("Tax Amount") or row.get("taxAmount")
+                        or row.get("Tax") or row.get("tax") or 0
+                    ),
+                    "refund": self._safe_float(
+                        row.get("Refund Amount") or row.get("refundAmount")
+                        or row.get("Refund") or row.get("refund") or 0
+                    ),
+                    "category": (self._safe_str(row.get("Category") or row.get("category") or "") or None),
+                    "status": status_raw,
+                    "order_date": validated,
+                    "dispatch_date": self._parse_datetime(row.get("Dispatch Date") or row.get("dispatchdate")),
+                    "delivery_date": self._parse_datetime(row.get("Delivery Date") or row.get("deliverydate")),
+                    "cancel_date": self._parse_datetime(row.get("Cancel Date") or row.get("cancelDate")),
+                    "return_date": self._parse_datetime(row.get("Return Date") or row.get("returnDate")),
+                    "warehouse": self._safe_str(
+                        row.get("Warehouse")
+                        or row.get("Facility")
+                        or row.get("godDown")
+                    ),
+                    "customer_name": self._safe_str(
+                        row.get("Customer Name")
+                        or row.get("customerName")
+                        or row.get("shippingAddressName")
+                    ),
+                    "customer_city": self._safe_str(
+                        row.get("Shipping Address City")
+                        or row.get("shippingAddressCity")
+                    ),
+                    "raw_data": row,
+                    "updated_at": datetime.utcnow(),
+                    "partition_month": self._partition_month_from_dt(validated.replace(tzinfo=timezone.utc)),
+                }
+            )
+
+        if not payloads:
+            return 0, skipped
+
+        db = SessionLocal()
+        try:
+            chunk_size = 1000
+            for start in range(0, len(payloads), chunk_size):
+                chunk = payloads[start:start + chunk_size]
+                stmt = pg_insert(SalesOrderRecord).values(chunk)
+                upsert_stmt = stmt.on_conflict_do_update(
+                    index_elements=["order_id", "sale_order_item_code"],
+                    set_={
+                        "channel": stmt.excluded.channel,
+                        "sku": stmt.excluded.sku,
+                        "product_name": stmt.excluded.product_name,
+                        "qty": stmt.excluded.qty,
+                        "selling_price": stmt.excluded.selling_price,
+                        "discount": stmt.excluded.discount,
+                        "tax": stmt.excluded.tax,
+                        "refund": stmt.excluded.refund,
+                        "category": stmt.excluded.category,
+                        "status": stmt.excluded.status,
+                        "order_date": stmt.excluded.order_date,
+                        "dispatch_date": stmt.excluded.dispatch_date,
+                        "delivery_date": stmt.excluded.delivery_date,
+                        "cancel_date": stmt.excluded.cancel_date,
+                        "return_date": stmt.excluded.return_date,
+                        "warehouse": stmt.excluded.warehouse,
+                        "customer_name": stmt.excluded.customer_name,
+                        "customer_city": stmt.excluded.customer_city,
+                        "raw_data": stmt.excluded.raw_data,
+                        "partition_month": stmt.excluded.partition_month,
+                        "updated_at": datetime.utcnow(),
+                    },
+                )
+                db.execute(upsert_stmt)
+            db.commit()
+            return len(payloads), skipped
+        except Exception as exc:
+            db.rollback()
+            logger.warning(f"Export archival: failed to upsert normalized sales orders (best effort): {exc}")
+            return 0, skipped
         finally:
             db.close()
 
@@ -1068,9 +1302,10 @@ class UnicommerceService:
                             else:
                                 logger.error(
                                     f"Export: Job {job_code} COMPLETE but no filePath after "
-                                    f"{MAX_NO_FILEPATH_RETRIES} retries ({elapsed:.1f}s)"
+                                    f"{MAX_NO_FILEPATH_RETRIES} retries ({elapsed:.1f}s). "
+                                    "Treating as empty export window."
                                 )
-                                return None
+                                return ""
                     elif status in ("FAILED", "CANCELLED", "ABORTED"):
                         logger.error(
                             f"Export: Job {job_code} {status} after {elapsed:.1f}s"
@@ -1474,7 +1709,7 @@ class UnicommerceService:
             download_url = await self._poll_export_status(job_code)
             poll_time = time_module.time() - start_time - create_time
 
-            if not download_url:
+            if download_url is None:
                 logger.error("Export: Job failed or timed out")
                 self._update_export_job_record(
                     export_job_id,
@@ -1498,6 +1733,53 @@ class UnicommerceService:
 
             logger.info(f"  Step 2 done in {poll_time:.1f}s file ready")
 
+            if download_url == "":
+                logger.info(
+                    "Export: Completed with no filePath; treating as empty window %s -> %s",
+                    from_date.isoformat(),
+                    to_date.isoformat(),
+                )
+                self._update_export_job_record(
+                    export_job_id,
+                    status="completed",
+                    download_url=None,
+                    total_csv_rows=0,
+                    parsed_entities=0,
+                    completed_at=datetime.utcnow(),
+                )
+                self._update_sync_log_record(
+                    sync_log_id,
+                    status="completed",
+                    processed_count=0,
+                    failed_count=0,
+                    completed_at=datetime.utcnow(),
+                    details={
+                        "from_date": from_date.isoformat(),
+                        "to_date": to_date.isoformat(),
+                        "export_job_id": export_job_id,
+                        "archived_rows": 0,
+                        "normalized_rows": 0,
+                        "total_csv_rows": 0,
+                        "empty_window": True,
+                    },
+                )
+                return {
+                    "successful": True,
+                    "orders": [],
+                    "totalRecords": 0,
+                    "export_job_id": export_job_id,
+                    "archived_rows": 0,
+                    "normalized_rows": 0,
+                    "phase1_time": round(create_time + poll_time, 2),
+                    "phase2_time": 0,
+                    "total_time": round(time_module.time() - start_time, 2),
+                    "method": "export_job",
+                    "failed_codes": [],
+                    "retry_recovered": 0,
+                    "phase1_dedup": 0,
+                    "phase2_dedup": 0,
+                }
+
             # Step 3: Download and parse CSV
             orders, raw_rows, csv_headers = await self._download_parse_export(
                 download_url,
@@ -1509,7 +1791,21 @@ class UnicommerceService:
                 "sale_orders",
                 raw_rows,
             )
-            normalized_rows = self._upsert_sales_order_rows(raw_rows)
+            normalization_error = None
+            normalized_rows = 0
+            skipped_rows = 0
+            try:
+                normalized_rows, skipped_rows = self._upsert_sales_order_rows_best_effort(
+                    raw_rows,
+                    requested_from=from_date,
+                    requested_to=to_date,
+                )
+            except Exception as exc:
+                normalization_error = str(exc)
+                logger.warning(
+                    "Export archival: best-effort upsert failed: %s",
+                    exc,
+                )
 
             self._update_export_job_record(
                 export_job_id,
@@ -1519,6 +1815,7 @@ class UnicommerceService:
                 file_checksum=file_checksum,
                 total_csv_rows=len(raw_rows),
                 parsed_entities=normalized_rows,
+                error_message=normalization_error,
                 completed_at=datetime.utcnow(),
             )
 
@@ -1534,7 +1831,9 @@ class UnicommerceService:
                     "export_job_id": export_job_id,
                     "archived_rows": archived_rows,
                     "normalized_rows": normalized_rows,
+                    "skipped_rows": skipped_rows,
                     "total_csv_rows": len(raw_rows),
+                    "normalization_error": normalization_error,
                 },
             )
 
@@ -1731,7 +2030,8 @@ class UnicommerceService:
         for item in items:
             selling_price = safe_float(item.get("sellingPrice", 0))
             quantity = safe_float(item.get("quantity", 1))
-            item_revenue = selling_price * quantity
+            # Export/API item rows already carry the row total in sellingPrice.
+            item_revenue = selling_price
             total_selling_price += item_revenue
 
             # Multiply by quantity for per-item values
@@ -1740,7 +2040,7 @@ class UnicommerceService:
             total_refund += safe_float(item.get("refundAmount", 0)) * quantity
 
         include_in_revenue = status not in self.EXCLUDED_STATUSES
-        excluded_reason = f"Status: {status}" if not include_in_revenue else None
+        excluded_reason = f"Status: {status}" if status in self.EXCLUDED_STATUSES else None
 
         net_revenue = 0.0
         if include_in_revenue:

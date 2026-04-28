@@ -106,6 +106,9 @@ class SalesOrderRecord(Base):
     category = Column(String(120), nullable=True, index=True)
 
     status = Column(String(40), nullable=False, default="created", index=True)
+    # CRITICAL: order_date is the BUSINESS EVENT timestamp (when customer placed order), NOT sync timestamp
+    # NEVER set this to created_at or synced_at — period queries depend on order_date for correct bucketing
+    # If wrong, historical data will appear in wrong date ranges (e.g., April 2026 orders show as Sept 2023)
     order_date = Column(DateTime, nullable=True, index=True)
     dispatch_date = Column(DateTime, nullable=True)
     delivery_date = Column(DateTime, nullable=True)
@@ -131,8 +134,7 @@ class SalesOrderRecord(Base):
         UniqueConstraint(
             "order_id",
             "sale_order_item_code",
-            "partition_month",
-            name="uq_sales_orders_order_item_month",
+            name="uq_sales_orders_order_item",
         ),
         Index("ix_sales_orders_order_id", "order_id"),
         Index("ix_sales_orders_status", "status"),
