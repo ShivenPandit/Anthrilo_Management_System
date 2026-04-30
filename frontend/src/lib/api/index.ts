@@ -199,7 +199,7 @@ export const unicommerceApi = {
   // Manual ingestion trigger (runs incremental profile and waits for completion)
   runIncrementalSyncNow: () =>
     apiClient.post('/integrations/unicommerce/sync/profile/incremental', null, {
-      params: { run_in_background: false },
+      params: { run_in_background: true },
     }),
   getSyncStatus: () =>
     apiClient.get('/integrations/unicommerce/sync/status'),

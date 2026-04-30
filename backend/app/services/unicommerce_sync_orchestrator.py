@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -45,14 +44,6 @@ class UnicommerceSyncOrchestrator:
     """Coordinates incremental, realtime-triggered, and backfill sync profiles."""
 
     _process_locks: Dict[str, asyncio.Lock] = {}
-    _runtime_sync_state_lock = threading.Lock()
-    _runtime_sync_state: Dict[str, Any] = {
-        "status": "idle",
-        "current_step": None,
-        "progress_pct": 0,
-        "last_synced_at": None,
-        "updated_at": None,
-    }
 
     def __init__(self) -> None:
         self.uc_service = get_unicommerce_service()
@@ -426,76 +417,6 @@ class UnicommerceSyncOrchestrator:
         self._scheduler_next_run_at[job_key] = next_due
         return next_due
 
-    def _set_runtime_sync_state(
-        self,
-        *,
-        status: str,
-        current_step: Optional[str],
-        progress_pct: int,
-        last_synced_at: Optional[str] = None,
-    ) -> None:
-        payload = {
-            "status": status,
-            "current_step": current_step,
-            "progress_pct": max(0, min(100, int(progress_pct))),
-            "updated_at": self._utcnow().isoformat(),
-        }
-        if last_synced_at is not None:
-            payload["last_synced_at"] = last_synced_at
-
-        with self._runtime_sync_state_lock:
-            self._runtime_sync_state.update(payload)
-
-    def _get_last_completed_sync_iso(self) -> Optional[str]:
-        db = SessionLocal()
-        try:
-            latest = (
-                db.query(SyncLog)
-                .filter(
-                    SyncLog.entity.in_(["sale_orders", "sales_returns", "inventory_snapshot"]),
-                    SyncLog.status == "completed",
-                )
-                .order_by(SyncLog.id.desc())
-                .first()
-            )
-            if not latest:
-                return None
-
-            completed = latest.completed_at or latest.started_at
-            if not completed:
-                return None
-            return self._ensure_utc(completed).isoformat()
-        finally:
-            db.close()
-
-    def get_runtime_sync_status(self) -> Dict[str, Any]:
-        with self._runtime_sync_state_lock:
-            snapshot = dict(self._runtime_sync_state)
-
-        if redis_client is not None:
-            try:
-                lock_exists = bool(redis_client.get("uc:sync:lock:incremental_profile"))
-                if lock_exists and snapshot.get("status") != "running":
-                    snapshot["status"] = "running"
-                    snapshot["current_step"] = snapshot.get("current_step") or "orders"
-                    snapshot["progress_pct"] = int(snapshot.get("progress_pct") or 1)
-            except Exception as exc:
-                logger.warning(f"Failed to probe incremental sync lock state: {exc}")
-
-        if not snapshot.get("last_synced_at"):
-            snapshot["last_synced_at"] = self._get_last_completed_sync_iso()
-
-        if snapshot.get("status") not in {"running", "idle"}:
-            snapshot["status"] = "idle"
-
-        return {
-            "status": snapshot.get("status") or "idle",
-            "current_step": snapshot.get("current_step"),
-            "progress_pct": int(snapshot.get("progress_pct") or 0),
-            "last_synced_at": snapshot.get("last_synced_at"),
-            "updated_at": snapshot.get("updated_at"),
-        }
-
     async def _run_sales_scheduler_job(self) -> Dict[str, Any]:
         lookback_days = max(
             1,
@@ -713,18 +634,6 @@ class UnicommerceSyncOrchestrator:
             await self._release_lock(lock)
 
     async def run_incremental_sync(self, lookback_days: Optional[int] = None) -> Dict[str, Any]:
-        profile_lock = await self._acquire_lock("incremental_profile")
-        if not profile_lock:
-            status = self.get_runtime_sync_status()
-            return {
-                "success": True,
-                "status": "in_progress",
-                "message": "Sync already running",
-                "current_step": status.get("current_step"),
-                "progress_pct": status.get("progress_pct", 0),
-                "last_synced_at": status.get("last_synced_at"),
-            }
-
         days = int(lookback_days or settings.UNICOMMERCE_SYNC_LOOKBACK_DAYS)
         safe_days = max(1, days)
         now_utc = self._utcnow()
@@ -735,37 +644,20 @@ class UnicommerceSyncOrchestrator:
         now_ist = now_utc.astimezone(ist)
         start_day_ist = now_ist.date() - timedelta(days=safe_days)
         from_date = datetime.combine(start_day_ist, datetime.min.time(), tzinfo=ist).astimezone(timezone.utc)
-        try:
-            self._set_runtime_sync_state(status="running", current_step="orders", progress_pct=10)
-            orders = await self.sync_orders_window(from_date, now_utc)
 
-            self._set_runtime_sync_state(status="running", current_step="returns", progress_pct=45)
-            returns = await self.sync_returns_window(from_date, now_utc)
+        orders = await self.sync_orders_window(from_date, now_utc)
+        returns = await self.sync_returns_window(from_date, now_utc)
+        inventory = await self.sync_inventory()
 
-            self._set_runtime_sync_state(status="running", current_step="inventory", progress_pct=80)
-            inventory = await self.sync_inventory()
-
-            success = bool(orders.get("success")) and bool(returns.get("success")) and bool(inventory.get("success"))
-            completed_at = self._utcnow().isoformat() if success else self.get_runtime_sync_status().get("last_synced_at")
-            self._set_runtime_sync_state(
-                status="idle",
-                current_step=None,
-                progress_pct=100 if success else 0,
-                last_synced_at=completed_at,
-            )
-
-            return {
-                "success": success,
-                "profile": "incremental",
-                "status": "completed" if success else "failed",
-                "from_date": from_date.isoformat(),
-                "to_date": now_utc.isoformat(),
-                "orders": orders,
-                "returns": returns,
-                "inventory": inventory,
-            }
-        finally:
-            await self._release_lock(profile_lock)
+        return {
+            "success": bool(orders.get("success")) and bool(returns.get("success")) and bool(inventory.get("success")),
+            "profile": "incremental",
+            "from_date": from_date.isoformat(),
+            "to_date": now_utc.isoformat(),
+            "orders": orders,
+            "returns": returns,
+            "inventory": inventory,
+        }
 
     async def run_realtime_trigger_sync(self, hours: int = 6) -> Dict[str, Any]:
         now_utc = self._utcnow()
@@ -1338,6 +1230,50 @@ class UnicommerceSyncOrchestrator:
             }
         finally:
             db.close()
+
+    def get_runtime_sync_status(self) -> Dict[str, Any]:
+        """Lightweight runtime snapshot for UI status endpoint."""
+        now_utc = self._utcnow()
+        scheduler_running = bool(self._scheduler_task and not self._scheduler_task.done())
+        runtime_status = "running" if scheduler_running else "idle"
+        current_step: Optional[str] = "scheduler_loop" if scheduler_running else None
+        progress_pct = 10 if scheduler_running else 0
+        last_synced_at: Optional[str] = None
+
+        db = SessionLocal()
+        try:
+            latest = (
+                db.query(SyncLog)
+                .filter(SyncLog.status.in_(["completed", "running", "failed"]))
+                .order_by(SyncLog.id.desc())
+                .first()
+            )
+            if latest:
+                timestamp = latest.completed_at or latest.started_at
+                if timestamp:
+                    last_synced_at = self._ensure_utc(timestamp).isoformat()
+                if latest.status == "running":
+                    runtime_status = "running"
+                    current_step = f"sync:{latest.entity}"
+                    progress_pct = 50
+                elif latest.status == "failed":
+                    runtime_status = "error"
+                    current_step = f"failed:{latest.entity}"
+                    progress_pct = 100
+                elif latest.status == "completed":
+                    runtime_status = "idle"
+                    current_step = "completed"
+                    progress_pct = 100
+        finally:
+            db.close()
+
+        return {
+            "status": runtime_status,
+            "current_step": current_step,
+            "progress_pct": progress_pct,
+            "last_synced_at": last_synced_at,
+            "updated_at": now_utc.isoformat(),
+        }
 
     def get_release_readiness(self) -> Dict[str, Any]:
         now_utc = self._utcnow()

@@ -30,9 +30,11 @@ for redis_url in _candidate_urls(settings.REDIS_URL):
         client = redis.from_url(
             redis_url,
             decode_responses=True,
-            socket_connect_timeout=5,
-            socket_timeout=5,
-            retry_on_timeout=True,
+            # Fail fast when Redis is down (common in dev/VPS without Redis).
+            # Slow connect timeouts will block API responses that use caching.
+            socket_connect_timeout=0.2,
+            socket_timeout=0.5,
+            retry_on_timeout=False,
         )
         client.ping()
         redis_client = client

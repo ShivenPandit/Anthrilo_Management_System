@@ -11,14 +11,13 @@ import {
   ShoppingCart, DollarSign, TrendingUp, Package,
   Zap,
   BarChart3, Boxes, Receipt, Store,
-  RefreshCw, X, Bell, AlertTriangle,
+  RefreshCw, X, Bell,
 } from 'lucide-react';
 import { KPIStatCard } from '@/components/dashboard/KPIStatCard';
 import { ChartCard } from '@/components/dashboard/ChartCard';
 import { ComparisonCard } from '@/components/dashboard/ComparisonCard';
 import { InsightsPanel } from '@/components/dashboard/InsightsPanel';
 import { ChartSkeleton } from '@/components/dashboard/charts/ChartSkeleton';
-import { DashboardHealthCard } from '@/components/dashboard/DashboardHealthCard';
 import { getClosedWindowLast7DaysIst, getDayBeforeYesterdayIst, getYesterdayIst, toIstYmd } from '@/lib/ist-date';
 
 // -- Lazy-loaded Charts (React.lazy avoids next/dynamic _next/undefined chunk bug) --
@@ -37,19 +36,6 @@ const parseBackendUtcTimestamp = (isoValue?: string | null): Date | null => {
   const normalized = hasTimezone ? isoValue : `${isoValue}Z`;
   const parsed = new Date(normalized);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
-};
-
-const sourceDataAge = (isoValue?: string | null) => {
-  const parsed = parseBackendUtcTimestamp(isoValue);
-  if (!parsed) return 'unknown';
-
-  const totalMinutes = Math.max(0, Math.floor((Date.now() - parsed.getTime()) / 60000));
-  if (totalMinutes < 1) return 'just now';
-  if (totalMinutes < 60) return `${totalMinutes}m ago`;
-
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return minutes > 0 ? `${hours}h ${minutes}m ago` : `${hours}h ago`;
 };
 
 // ---
@@ -89,7 +75,6 @@ export default function DashboardPage() {
   const todayDate = useMemo(() => toIstYmd(new Date()), []);
   const yesterdayDate = useMemo(() => getYesterdayIst(), []);
   const dayBeforeDate = useMemo(() => getDayBeforeYesterdayIst(), []);
-  const parityWindowLabel = useMemo(() => `Yesterday (${yesterdayDate})`, [yesterdayDate]);
 
   // A) KPI source: single day only (today)
   const { data: kpiData, isLoading: loadingKpi, isFetching: fetchingKpi } = useQuery({
@@ -157,26 +142,6 @@ export default function DashboardPage() {
     refetchOnWindowFocus: true,
   });
 
-  const { data: parityData, isLoading: loadingParity } = useQuery({
-    // Compare against the last fully closed IST business day so health status
-    // never conflicts with the live "today" KPI cards shown beside it.
-    queryKey: ['dashboard-parity', yesterdayDate],
-    queryFn: async () =>
-      (
-        await unicommerceApi.getDbFirstParityCheck({
-          from_date: yesterdayDate,
-          to_date: yesterdayDate,
-          closed_window_mode: false,
-          revenue_drift_threshold_pct: 1,
-          orders_drift_threshold_pct: 1,
-        })
-      ).data,
-    refetchInterval: 60 * 1000,
-    staleTime: 0,
-    gcTime: 5 * 60 * 1000,
-    refetchOnWindowFocus: true,
-  });
-
   const { mutateAsync: syncNow, isPending: syncingNow } = useMutation({
     mutationFn: async () => (await unicommerceApi.runIncrementalSyncNow()).data,
     onSuccess: () => {
@@ -185,19 +150,8 @@ export default function DashboardPage() {
       queryClient.invalidateQueries({ queryKey: ['dashboard-trend-sales'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-compare-yesterday'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard-compare-day-before'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard-parity'] });
       if (wsConnected) requestRefresh();
     },
-  });
-
-  const { data: syncStatusData } = useQuery({
-    queryKey: ['dashboard-sync-status'],
-    queryFn: async () => (await unicommerceApi.getSyncStatus()).data,
-    refetchInterval: (query) => {
-      const status = String(query.state.data?.status || '').toLowerCase();
-      return status === 'running' ? 1500 : 5000;
-    },
-    staleTime: 0,
   });
 
   // -- Derived Values --
@@ -211,7 +165,7 @@ export default function DashboardPage() {
   const dayBeforeOrders = dayBeforeCompareData?.summary?.valid_orders || 0;
   const dayBeforeRevenue = dayBeforeCompareData?.summary?.total_revenue || 0;
   const dayBeforeItems = dayBeforeCompareData?.summary?.total_items || 0;
-  const isLoading = loadingKpi || loadingTrend || loadingYesterdayCompare || loadingDayBeforeCompare || loadingParity;
+  const isLoading = loadingKpi || loadingTrend || loadingYesterdayCompare || loadingDayBeforeCompare;
 
   const dataHealthBadge = useMemo(() => {
     if (!kpiData) {
@@ -234,32 +188,6 @@ export default function DashboardPage() {
     }
 
     return { label: 'Healthy', dotClass: 'bg-emerald-500' };
-  }, [kpiData]);
-
-  const sourceAgeLabel = useMemo(
-    () => sourceDataAge(kpiData?.last_synced_at),
-    [kpiData?.last_synced_at],
-  );
-
-  const healthStatus = useMemo(() => {
-    const revenueDrift = Number(parityData?.drift?.revenue_drift_pct || 0);
-    if (!parityData?.success) return 'error' as const;
-    if (revenueDrift > 1) return 'warning' as const;
-    return 'healthy' as const;
-  }, [parityData]);
-
-  const showDriftAlert = useMemo(() => {
-    const closed = parityData?.window_type === 'closed';
-    const drift = Number(parityData?.drift?.revenue_drift_pct || 0);
-    return Boolean(closed && drift > 1);
-  }, [parityData]);
-
-  const showSourceWarning = useMemo(() => {
-    const fallback = Boolean(kpiData?.fallback_used);
-    const health = (kpiData as any)?.data_health;
-    const healthStatus = typeof health === 'string' ? health : health?.coverage;
-    const unhealthy = Boolean(healthStatus) && String(healthStatus).toLowerCase() !== 'healthy' && String(healthStatus).toLowerCase() !== 'normalized';
-    return fallback || unhealthy;
   }, [kpiData]);
 
   // Growth calculations
@@ -359,12 +287,6 @@ export default function DashboardPage() {
     }
   };
 
-  const syncStatus = String(syncStatusData?.status || '').toLowerCase();
-  const syncRunning = syncingNow || syncStatus === 'running';
-  const syncStep = String(syncStatusData?.current_step || '').trim();
-  const syncPctRaw = Number(syncStatusData?.progress_pct || 0);
-  const syncPct = Number.isFinite(syncPctRaw) ? Math.max(0, Math.min(100, Math.round(syncPctRaw))) : 0;
-
   const quickLinks = [
     { title: 'Master Data', desc: 'Product catalog & SKUs', href: '/dashboard/garments/master', icon: Package, color: 'from-blue-500 to-indigo-500' },
     { title: 'Inventory', desc: 'Stock levels by SKU', href: '/dashboard/garments/inventory', icon: Boxes, color: 'from-emerald-500 to-teal-500' },
@@ -447,12 +369,10 @@ export default function DashboardPage() {
           <button
             onClick={handleSyncNow}
             className="btn btn-secondary w-auto self-start sm:self-auto !px-3.5 !py-2 !text-sm"
-            disabled={syncRunning}
+            disabled={syncingNow}
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${syncRunning ? 'animate-spin' : ''}`} />
-            {syncRunning
-              ? `Syncing ${syncStep ? `(${syncStep})` : ''} ${syncPct}%`
-              : 'Sync Now'}
+            <RefreshCw className={`w-3.5 h-3.5 ${syncingNow ? 'animate-spin' : ''}`} />
+            {syncingNow ? 'Syncing DB...' : 'Sync Now'}
           </button>
           <button
             onClick={handleRefresh}
@@ -462,47 +382,6 @@ export default function DashboardPage() {
             <RefreshCw className={`w-3.5 h-3.5 ${fetchingKpi ? 'animate-spin' : ''}`} />
             {fetchingKpi ? 'Refreshing...' : 'Refresh'}
           </button>
-        </div>
-      </div>
-
-      {syncRunning && (
-        <div className="rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 px-3 py-2">
-          <div className="flex items-center justify-between text-xs text-blue-700 dark:text-blue-300 mb-1">
-            <span>Incremental sync in progress{syncStep ? `: ${syncStep}` : ''}</span>
-            <span className="tabular-nums">{syncPct}%</span>
-          </div>
-          <div className="h-1.5 w-full rounded-full bg-blue-100 dark:bg-blue-950/40 overflow-hidden">
-            <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${syncPct}%` }} />
-          </div>
-        </div>
-      )}
-
-      {showDriftAlert && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300 px-3 py-2 text-sm flex items-center gap-2">
-          <AlertTriangle className="w-4 h-4" />
-          Data inconsistency detected (closed window drift {'>'} 1%).
-        </div>
-      )}
-
-      {showSourceWarning && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300 px-3 py-2 text-sm flex items-center gap-2">
-          <AlertTriangle className="w-4 h-4" />
-          Source warning: fallback data or unhealthy data coverage detected.
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-        <DashboardHealthCard
-          status={healthStatus}
-          drift={Number(parityData?.drift?.revenue_drift_pct || 0)}
-          windowLabel={parityData?.window || parityWindowLabel}
-          window={(parityData?.window_type || 'closed') as 'closed' | 'open'}
-          timezone={parityData?.timezone || 'IST'}
-        />
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 text-xs text-slate-600 dark:text-slate-300">
-          <p>Data source: {kpiData?.data_source || 'unknown'}</p>
-          <p>Fallback used: {kpiData?.fallback_used ? 'yes' : 'no'}</p>
-          <p>Last DB sync: {sourceAgeLabel}</p>
         </div>
       </div>
 

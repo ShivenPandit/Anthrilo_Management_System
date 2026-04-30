@@ -165,6 +165,16 @@ export default function ReturnReportPage() {
     if (nextLabel) setBackendLabel(nextLabel);
   }, [progressData]);
 
+  useEffect(() => {
+    if (isLoading || isFetching) return;
+    if (!activeProgressId) return;
+    setActiveProgressId(null);
+    if (!isError) {
+      setBackendPercent((prev) => (prev < 100 ? 100 : prev));
+      setBackendLabel((prev) => prev || 'Report ready');
+    }
+  }, [activeProgressId, isLoading, isFetching, isError]);
+
   const queryLoading = isLoading || isFetching;
 
   const handleGenerate = useCallback(() => {
@@ -434,8 +444,8 @@ export default function ReturnReportPage() {
         { at: 70, label: 'Building channel breakdown…' },
         { at: 90, label: 'Finalizing…' },
       ]}
-        progressPercent={Math.max(backendPercent, 0)}
-        progressLabel={backendLabel || undefined}
+        progressPercent={queryLoading && !!activeProgressId ? Math.max(backendPercent, 0) : undefined}
+        progressLabel={queryLoading && !!activeProgressId ? (backendLabel || undefined) : undefined}
       />
 
       {/* Error */}

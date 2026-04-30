@@ -1,4 +1,8 @@
 /** @type {import('next').NextConfig} */
+const normalizedApiUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000')
+  .replace(/\/+$/, '')
+  .replace(/\/api\/v1$/, '')
+
 const nextConfig = {
   reactStrictMode: true,
   output: 'standalone', // Required for Docker multi-stage build
@@ -10,7 +14,7 @@ const nextConfig = {
     ignoreDuringBuilds: true,
   },
   env: {
-    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000',
+    NEXT_PUBLIC_API_URL: normalizedApiUrl,
   },
 }
 
