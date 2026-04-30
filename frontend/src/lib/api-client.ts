@@ -1,14 +1,13 @@
 import axios from 'axios';
 
 function resolveApiUrl(): string {
-  if (process.env.NEXT_PUBLIC_API_URL) {
-    return process.env.NEXT_PUBLIC_API_URL;
+  const configured = process.env.NEXT_PUBLIC_API_URL?.trim();
+  if (configured) {
+    // Accept either http://host or http://host/api/v1 and normalize to origin.
+    return configured.replace(/\/+$/, '').replace(/\/api\/v1$/, '');
   }
 
-  if (typeof window !== 'undefined') {
-    return window.location.origin;
-  }
-
+  // Keep frontend calls pinned to backend API host in local dev.
   return 'http://127.0.0.1:8000';
 }
 

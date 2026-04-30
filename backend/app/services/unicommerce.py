@@ -347,6 +347,32 @@ class UnicommerceService:
         return normalized
 
     @staticmethod
+    def _to_snake_key(key: Any) -> str:
+        if not isinstance(key, str):
+            return ""
+        key = key.lower().strip()
+        key = re.sub(r"[^\w]+", "_", key)
+        key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+        key = re.sub(r"_+", "_", key).strip("_").lower()
+        return key
+
+    def _normalized_extra_fields(
+        self,
+        row: Dict[str, Any],
+        *,
+        known_keys: Optional[set[str]] = None,
+    ) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for k, v in row.items():
+            sk = self._to_snake_key(k)
+            if not sk:
+                continue
+            if known_keys and sk in known_keys:
+                continue
+            out[sk] = v
+        return out
+
+    @staticmethod
     def _row_hash(payload: Dict[str, Any]) -> str:
         serialized = json.dumps(
             payload,
@@ -553,11 +579,28 @@ class UnicommerceService:
         finally:
             db.close()
 
-    def _upsert_sales_order_rows(self, rows: List[Dict[str, Any]]) -> int:
+    def _upsert_sales_order_rows(
+        self,
+        rows: List[Dict[str, Any]],
+        *,
+        validation_context: str = "sync_import",
+    ) -> int:
         if not rows:
             return 0
 
         payloads: List[Dict[str, Any]] = []
+        known_sales_keys = {
+            "sale_order_item_code", "display_order_code", "sale_order_code", "channel_name", "item_sku_code",
+            "item_details", "selling_price", "discount", "tax", "refund", "category", "sale_order_status",
+            "order_date_as_dd_mm_yyyy_hh_mm_ss", "dispatch_date", "delivery_date", "cancel_date", "return_date",
+            "warehouse", "facility", "customer_name", "shipping_address_name", "shipping_address_city",
+            "invoice_code", "invoice_created", "sale_order_item_status", "shipping_provider", "tracking_number",
+            "payment_instrument", "currency", "currency_conversion_rate", "total_price", "mrp", "cost_price",
+            "subtotal", "tax", "tax_value", "tax_percent", "shipping_charges", "shipping_method_charges",
+            "cod_service_charges", "channel_product_id", "item_type_name", "item_type_color", "item_type_size",
+            "item_type_brand", "hsn_code", "bundle_sku_code_number", "seller_sku_code", "item_type_ean",
+            "parent_sale_order_code",
+        }
 
         for raw_row in rows:
             row = self._normalize_csv_row(raw_row)
@@ -595,7 +638,11 @@ class UnicommerceService:
                     f"Missing business order timestamp for order {order_id}. "
                     "Expected Order Date field; refusing Created fallback."
                 )
-            order_date = validate_order_date(order_date.replace(tzinfo=None), order_id, context="sync_import").replace(tzinfo=timezone.utc)
+            order_date = validate_order_date(
+                order_date.replace(tzinfo=None),
+                order_id,
+                context=validation_context,
+            ).replace(tzinfo=timezone.utc)
 
             # Normalize status and channel to prevent case/whitespace fragmentation
             status_raw = self._safe_str(
@@ -660,6 +707,36 @@ class UnicommerceService:
                         row.get("Shipping Address City")
                         or row.get("shippingAddressCity")
                     ),
+                    "display_order_code": self._safe_str(row.get("Display Order Code")),
+                    "invoice_code": self._safe_str(row.get("Invoice Code")),
+                    "invoice_created": self._safe_str(row.get("Invoice Created")),
+                    "sale_order_item_status": self._safe_str(row.get("Sale Order Item Status")),
+                    "shipping_provider": self._safe_str(row.get("Shipping provider") or row.get("Shipping Provider")),
+                    "tracking_number": self._safe_str(row.get("Tracking Number")),
+                    "payment_instrument": self._safe_str(row.get("Payment Instrument")),
+                    "currency": self._safe_str(row.get("Currency")),
+                    "currency_conversion_rate": self._safe_str(row.get("Currency Conversion Rate")),
+                    "total_price": self._safe_str(row.get("Total Price")),
+                    "mrp": self._safe_str(row.get("MRP")),
+                    "cost_price": self._safe_str(row.get("Cost Price")),
+                    "subtotal": self._safe_str(row.get("Subtotal")),
+                    "tax_percent": self._safe_str(row.get("Tax %")),
+                    "tax_value": self._safe_str(row.get("Tax Value")),
+                    "shipping_charges": self._safe_str(row.get("Shipping Charges")),
+                    "shipping_method_charges": self._safe_str(row.get("Shipping Method Charges")),
+                    "cod_service_charges": self._safe_str(row.get("COD Service Charges")),
+                    "channel_product_id": self._safe_str(row.get("Channel Product Id")),
+                    "item_type_name": self._safe_str(row.get("Item Type Name")),
+                    "item_type_color": self._safe_str(row.get("Item Type Color")),
+                    "item_type_size": self._safe_str(row.get("Item Type Size")),
+                    "item_type_brand": self._safe_str(row.get("Item Type Brand")),
+                    "hsn_code": self._safe_str(row.get("HSN Code")),
+                    "facility": self._safe_str(row.get("Facility")),
+                    "bundle_sku_code_number": self._safe_str(row.get("Bundle SKU Code Number")),
+                    "seller_sku_code": self._safe_str(row.get("Seller SKU Code")),
+                    "item_type_ean": self._safe_str(row.get("Item Type EAN")),
+                    "parent_sale_order_code": self._safe_str(row.get("Parent Sale Order Code")),
+                    "extra_fields": self._normalized_extra_fields(row, known_keys=known_sales_keys),
                     "raw_data": row,
                     "updated_at": datetime.utcnow(),
                     "partition_month": self._partition_month_from_dt(order_date),
@@ -696,6 +773,36 @@ class UnicommerceService:
                         "warehouse": stmt.excluded.warehouse,
                         "customer_name": stmt.excluded.customer_name,
                         "customer_city": stmt.excluded.customer_city,
+                        "display_order_code": stmt.excluded.display_order_code,
+                        "invoice_code": stmt.excluded.invoice_code,
+                        "invoice_created": stmt.excluded.invoice_created,
+                        "sale_order_item_status": stmt.excluded.sale_order_item_status,
+                        "shipping_provider": stmt.excluded.shipping_provider,
+                        "tracking_number": stmt.excluded.tracking_number,
+                        "payment_instrument": stmt.excluded.payment_instrument,
+                        "currency": stmt.excluded.currency,
+                        "currency_conversion_rate": stmt.excluded.currency_conversion_rate,
+                        "total_price": stmt.excluded.total_price,
+                        "mrp": stmt.excluded.mrp,
+                        "cost_price": stmt.excluded.cost_price,
+                        "subtotal": stmt.excluded.subtotal,
+                        "tax_percent": stmt.excluded.tax_percent,
+                        "tax_value": stmt.excluded.tax_value,
+                        "shipping_charges": stmt.excluded.shipping_charges,
+                        "shipping_method_charges": stmt.excluded.shipping_method_charges,
+                        "cod_service_charges": stmt.excluded.cod_service_charges,
+                        "channel_product_id": stmt.excluded.channel_product_id,
+                        "item_type_name": stmt.excluded.item_type_name,
+                        "item_type_color": stmt.excluded.item_type_color,
+                        "item_type_size": stmt.excluded.item_type_size,
+                        "item_type_brand": stmt.excluded.item_type_brand,
+                        "hsn_code": stmt.excluded.hsn_code,
+                        "facility": stmt.excluded.facility,
+                        "bundle_sku_code_number": stmt.excluded.bundle_sku_code_number,
+                        "seller_sku_code": stmt.excluded.seller_sku_code,
+                        "item_type_ean": stmt.excluded.item_type_ean,
+                        "parent_sale_order_code": stmt.excluded.parent_sale_order_code,
+                        "extra_fields": stmt.excluded.extra_fields,
                         "raw_data": stmt.excluded.raw_data,
                         "updated_at": datetime.utcnow(),
                     },
@@ -717,6 +824,7 @@ class UnicommerceService:
         *,
         requested_from: datetime,
         requested_to: datetime,
+        validation_context: str = "sync_import_best_effort",
     ) -> tuple[int, int]:
         """
         Best-effort upsert for a specific export window.
@@ -734,6 +842,18 @@ class UnicommerceService:
         req_to = requested_to if requested_to.tzinfo else requested_to.replace(tzinfo=timezone.utc)
 
         payloads: List[Dict[str, Any]] = []
+        known_sales_keys = {
+            "sale_order_item_code", "display_order_code", "sale_order_code", "channel_name", "item_sku_code",
+            "item_details", "selling_price", "discount", "tax", "refund", "category", "sale_order_status",
+            "order_date_as_dd_mm_yyyy_hh_mm_ss", "dispatch_date", "delivery_date", "cancel_date", "return_date",
+            "warehouse", "facility", "customer_name", "shipping_address_name", "shipping_address_city",
+            "invoice_code", "invoice_created", "sale_order_item_status", "shipping_provider", "tracking_number",
+            "payment_instrument", "currency", "currency_conversion_rate", "total_price", "mrp", "cost_price",
+            "subtotal", "tax", "tax_value", "tax_percent", "shipping_charges", "shipping_method_charges",
+            "cod_service_charges", "channel_product_id", "item_type_name", "item_type_color", "item_type_size",
+            "item_type_brand", "hsn_code", "bundle_sku_code_number", "seller_sku_code", "item_type_ean",
+            "parent_sale_order_code",
+        }
         skipped = 0
 
         for raw_row in rows:
@@ -790,7 +910,7 @@ class UnicommerceService:
             validated = validate_order_date(
                 order_date.astimezone(timezone.utc).replace(tzinfo=None),
                 order_id,
-                context="sync_import_best_effort",
+                context=validation_context,
             )
 
             status_raw = self._safe_str(
@@ -845,6 +965,36 @@ class UnicommerceService:
                         row.get("Shipping Address City")
                         or row.get("shippingAddressCity")
                     ),
+                    "display_order_code": self._safe_str(row.get("Display Order Code")),
+                    "invoice_code": self._safe_str(row.get("Invoice Code")),
+                    "invoice_created": self._safe_str(row.get("Invoice Created")),
+                    "sale_order_item_status": self._safe_str(row.get("Sale Order Item Status")),
+                    "shipping_provider": self._safe_str(row.get("Shipping provider") or row.get("Shipping Provider")),
+                    "tracking_number": self._safe_str(row.get("Tracking Number")),
+                    "payment_instrument": self._safe_str(row.get("Payment Instrument")),
+                    "currency": self._safe_str(row.get("Currency")),
+                    "currency_conversion_rate": self._safe_str(row.get("Currency Conversion Rate")),
+                    "total_price": self._safe_str(row.get("Total Price")),
+                    "mrp": self._safe_str(row.get("MRP")),
+                    "cost_price": self._safe_str(row.get("Cost Price")),
+                    "subtotal": self._safe_str(row.get("Subtotal")),
+                    "tax_percent": self._safe_str(row.get("Tax %")),
+                    "tax_value": self._safe_str(row.get("Tax Value")),
+                    "shipping_charges": self._safe_str(row.get("Shipping Charges")),
+                    "shipping_method_charges": self._safe_str(row.get("Shipping Method Charges")),
+                    "cod_service_charges": self._safe_str(row.get("COD Service Charges")),
+                    "channel_product_id": self._safe_str(row.get("Channel Product Id")),
+                    "item_type_name": self._safe_str(row.get("Item Type Name")),
+                    "item_type_color": self._safe_str(row.get("Item Type Color")),
+                    "item_type_size": self._safe_str(row.get("Item Type Size")),
+                    "item_type_brand": self._safe_str(row.get("Item Type Brand")),
+                    "hsn_code": self._safe_str(row.get("HSN Code")),
+                    "facility": self._safe_str(row.get("Facility")),
+                    "bundle_sku_code_number": self._safe_str(row.get("Bundle SKU Code Number")),
+                    "seller_sku_code": self._safe_str(row.get("Seller SKU Code")),
+                    "item_type_ean": self._safe_str(row.get("Item Type EAN")),
+                    "parent_sale_order_code": self._safe_str(row.get("Parent Sale Order Code")),
+                    "extra_fields": self._normalized_extra_fields(row, known_keys=known_sales_keys),
                     "raw_data": row,
                     "updated_at": datetime.utcnow(),
                     "partition_month": self._partition_month_from_dt(validated.replace(tzinfo=timezone.utc)),
@@ -881,6 +1031,36 @@ class UnicommerceService:
                         "warehouse": stmt.excluded.warehouse,
                         "customer_name": stmt.excluded.customer_name,
                         "customer_city": stmt.excluded.customer_city,
+                        "display_order_code": stmt.excluded.display_order_code,
+                        "invoice_code": stmt.excluded.invoice_code,
+                        "invoice_created": stmt.excluded.invoice_created,
+                        "sale_order_item_status": stmt.excluded.sale_order_item_status,
+                        "shipping_provider": stmt.excluded.shipping_provider,
+                        "tracking_number": stmt.excluded.tracking_number,
+                        "payment_instrument": stmt.excluded.payment_instrument,
+                        "currency": stmt.excluded.currency,
+                        "currency_conversion_rate": stmt.excluded.currency_conversion_rate,
+                        "total_price": stmt.excluded.total_price,
+                        "mrp": stmt.excluded.mrp,
+                        "cost_price": stmt.excluded.cost_price,
+                        "subtotal": stmt.excluded.subtotal,
+                        "tax_percent": stmt.excluded.tax_percent,
+                        "tax_value": stmt.excluded.tax_value,
+                        "shipping_charges": stmt.excluded.shipping_charges,
+                        "shipping_method_charges": stmt.excluded.shipping_method_charges,
+                        "cod_service_charges": stmt.excluded.cod_service_charges,
+                        "channel_product_id": stmt.excluded.channel_product_id,
+                        "item_type_name": stmt.excluded.item_type_name,
+                        "item_type_color": stmt.excluded.item_type_color,
+                        "item_type_size": stmt.excluded.item_type_size,
+                        "item_type_brand": stmt.excluded.item_type_brand,
+                        "hsn_code": stmt.excluded.hsn_code,
+                        "facility": stmt.excluded.facility,
+                        "bundle_sku_code_number": stmt.excluded.bundle_sku_code_number,
+                        "seller_sku_code": stmt.excluded.seller_sku_code,
+                        "item_type_ean": stmt.excluded.item_type_ean,
+                        "parent_sale_order_code": stmt.excluded.parent_sale_order_code,
+                        "extra_fields": stmt.excluded.extra_fields,
                         "raw_data": stmt.excluded.raw_data,
                         "partition_month": stmt.excluded.partition_month,
                         "updated_at": datetime.utcnow(),
@@ -901,6 +1081,12 @@ class UnicommerceService:
             return 0
 
         payload_map: Dict[str, Dict[str, Any]] = {}
+        known_return_keys = {
+            "date", "sale_order_number", "product_sku_code", "return_reason", "qty", "total", "sales", "return_type",
+            "rp_code", "invoice_number", "channel_entry", "product_name", "unit_price", "currency", "cgst", "sgst",
+            "igst", "utgst", "cess", "dispatch_date_cancellation_date", "customer_gstin", "channel_party_gstin",
+            "product_hsn_code",
+        }
 
         for raw_row in rows:
             row = self._normalize_csv_row(raw_row)
@@ -945,6 +1131,17 @@ class UnicommerceService:
 
             refund_amount = self._safe_float(row.get("Total") or row.get("total") or row.get("Sales") or 0)
             return_status = self._safe_str(row.get("Return Type") or row.get("returnType"))
+            return_type_upper = return_status.upper()
+            if "COURIER" in return_type_upper or "RTO" in return_type_upper:
+                normalized_return_type = "RTO"
+            elif (
+                "CUSTOMER" in return_type_upper
+                or "CIR" in return_type_upper
+                or "REVERSE" in return_type_upper
+            ):
+                normalized_return_type = "CIR"
+            else:
+                normalized_return_type = return_status or "UNKNOWN"
 
             payload = payload_map.get(normalized_return_code)
             if payload is None:
@@ -961,6 +1158,22 @@ class UnicommerceService:
                     "return_qty": qty,
                     "refund_amount": refund_amount,
                     "return_status": return_status,
+                    "invoice_number": self._safe_str(row.get("Invoice number")),
+                    "channel_entry": self._safe_str(row.get("Channel entry")),
+                    "product_name": self._safe_str(row.get("Product Name")),
+                    "unit_price": self._safe_str(row.get("Unit Price")),
+                    "currency": self._safe_str(row.get("Currency")),
+                    "sales": self._safe_str(row.get("Sales")),
+                    "cgst": self._safe_str(row.get("CGST")),
+                    "sgst": self._safe_str(row.get("SGST")),
+                    "igst": self._safe_str(row.get("IGST")),
+                    "utgst": self._safe_str(row.get("UTGST")),
+                    "cess": self._safe_str(row.get("CESS")),
+                    "dispatch_or_cancellation_date": self._safe_str(row.get("Dispatch Date/Cancellation Date")),
+                    "customer_gstin": self._safe_str(row.get("Customer GSTIN")),
+                    "channel_party_gstin": self._safe_str(row.get("Channel_Party GSTIN")),
+                    "product_hsn_code": self._safe_str(row.get("Product HSN Code")),
+                    "return_type": normalized_return_type,
                     "raw_data": row,
                     "updated_at": datetime.utcnow(),
                 }
@@ -968,7 +1181,6 @@ class UnicommerceService:
                 # Merge duplicate rows for the same return line key within the same batch.
                 payload["return_qty"] = int(payload.get("return_qty", 0) or 0) + qty
                 payload["refund_amount"] = float(payload.get("refund_amount", 0) or 0.0) + refund_amount
-                payload["raw_data"] = row
                 payload["updated_at"] = datetime.utcnow()
 
         payloads: List[Dict[str, Any]] = list(payload_map.values())
@@ -988,6 +1200,22 @@ class UnicommerceService:
                         "return_qty": stmt.excluded.return_qty,
                         "refund_amount": stmt.excluded.refund_amount,
                         "return_status": stmt.excluded.return_status,
+                        "invoice_number": stmt.excluded.invoice_number,
+                        "channel_entry": stmt.excluded.channel_entry,
+                        "product_name": stmt.excluded.product_name,
+                        "unit_price": stmt.excluded.unit_price,
+                        "currency": stmt.excluded.currency,
+                        "sales": stmt.excluded.sales,
+                        "cgst": stmt.excluded.cgst,
+                        "sgst": stmt.excluded.sgst,
+                        "igst": stmt.excluded.igst,
+                        "utgst": stmt.excluded.utgst,
+                        "cess": stmt.excluded.cess,
+                        "dispatch_or_cancellation_date": stmt.excluded.dispatch_or_cancellation_date,
+                        "customer_gstin": stmt.excluded.customer_gstin,
+                        "channel_party_gstin": stmt.excluded.channel_party_gstin,
+                        "product_hsn_code": stmt.excluded.product_hsn_code,
+                        "return_type": stmt.excluded.return_type,
                         "raw_data": stmt.excluded.raw_data,
                         "updated_at": datetime.utcnow(),
                     },
@@ -1034,7 +1262,23 @@ class UnicommerceService:
                         or 0,
                         default=0,
                     ),
-                    "raw_data": snap,
+                    "facility": self._safe_str(snap.get("Facility") or facility_code),
+                    "item_type_name": self._safe_str(snap.get("Item Type Name")),
+                    "ean": self._safe_str(snap.get("EAN")),
+                    "upc": self._safe_str(snap.get("UPC")),
+                    "isbn": self._safe_str(snap.get("ISBN")),
+                    "color": self._safe_str(snap.get("Color")),
+                    "size": self._safe_str(snap.get("Size")),
+                    "brand": self._safe_str(snap.get("Brand")),
+                    "category_name": self._safe_str(snap.get("Category Name")),
+                    "open_sale": self._safe_str(snap.get("Open Sale")),
+                    "bad_inventory": self._safe_str(snap.get("Bad Inventory")),
+                    "putaway_pending": self._safe_str(snap.get("Putaway Pending")),
+                    "pending_inventory_assessment": self._safe_str(snap.get("Pending Inventory Assessment")),
+                    "open_purchase": self._safe_str(snap.get("Open Purchase")),
+                    "enabled": self._safe_str(snap.get("Enabled")),
+                    "source_updated_at": self._safe_str(snap.get("Updated")),
+                    "cost_price_csv": self._safe_str(snap.get("Cost Price")),
                     "updated_at": datetime.utcnow(),
                 }
             )
@@ -1051,7 +1295,23 @@ class UnicommerceService:
                     "available_qty": stmt.excluded.available_qty,
                     "reserved_qty": stmt.excluded.reserved_qty,
                     "blocked_qty": stmt.excluded.blocked_qty,
-                    "raw_data": stmt.excluded.raw_data,
+                    "facility": stmt.excluded.facility,
+                    "item_type_name": stmt.excluded.item_type_name,
+                    "ean": stmt.excluded.ean,
+                    "upc": stmt.excluded.upc,
+                    "isbn": stmt.excluded.isbn,
+                    "color": stmt.excluded.color,
+                    "size": stmt.excluded.size,
+                    "brand": stmt.excluded.brand,
+                    "category_name": stmt.excluded.category_name,
+                    "open_sale": stmt.excluded.open_sale,
+                    "bad_inventory": stmt.excluded.bad_inventory,
+                    "putaway_pending": stmt.excluded.putaway_pending,
+                    "pending_inventory_assessment": stmt.excluded.pending_inventory_assessment,
+                    "open_purchase": stmt.excluded.open_purchase,
+                    "enabled": stmt.excluded.enabled,
+                    "source_updated_at": stmt.excluded.source_updated_at,
+                    "cost_price_csv": stmt.excluded.cost_price_csv,
                     "updated_at": datetime.utcnow(),
                 },
             )

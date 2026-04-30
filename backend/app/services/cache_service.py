@@ -1,9 +1,14 @@
 import json
+import time
 from typing import Any, Optional
 from app.core.redis import redis_client
 import logging
 
 logger = logging.getLogger(__name__)
+_local_cache: dict[str, tuple[float, str]] = {}
+_redis_unavailable = False
+_redis_retry_after = 0.0
+_LOCAL_CACHE_MAX_KEYS = 5000
 
 
 class CacheService:
@@ -16,55 +21,134 @@ class CacheService:
     TTL_VERY_LONG = 3600  # 1 hour
 
     @staticmethod
+    def _get_local_value(key: str) -> Optional[Any]:
+        cached = _local_cache.get(key)
+        if not cached:
+            return None
+        expires_at, payload = cached
+        if expires_at < time.time():
+            _local_cache.pop(key, None)
+            return None
+        try:
+            return json.loads(payload)
+        except Exception:
+            _local_cache.pop(key, None)
+            return None
+
+    @staticmethod
+    def _set_local_value(key: str, value: Any, ttl: int) -> bool:
+        try:
+            # Keep fallback cache bounded in long-running processes.
+            if len(_local_cache) >= _LOCAL_CACHE_MAX_KEYS:
+                now = time.time()
+                expired = [k for k, (exp, _) in _local_cache.items() if exp < now]
+                for k in expired:
+                    _local_cache.pop(k, None)
+                if len(_local_cache) >= _LOCAL_CACHE_MAX_KEYS:
+                    for k in list(_local_cache.keys())[: max(1, len(_local_cache) // 10)]:
+                        _local_cache.pop(k, None)
+            _local_cache[key] = (time.time() + max(1, int(ttl)), json.dumps(value, default=str))
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _should_try_redis() -> bool:
+        global _redis_unavailable
+        global _redis_retry_after
+        if not redis_client:
+            return False
+        if not _redis_unavailable:
+            return True
+        if time.time() < _redis_retry_after:
+            return False
+        try:
+            redis_client.ping()
+            _redis_unavailable = False
+            return True
+        except Exception:
+            _redis_retry_after = time.time() + 60
+            return False
+
+    @staticmethod
     def get(key: str) -> Optional[Any]:
         """Get value from Redis cache"""
-        if not redis_client:
-            return None
+        global _redis_unavailable
+        global _redis_retry_after
+        if not CacheService._should_try_redis():
+            return CacheService._get_local_value(key)
         try:
             cached = redis_client.get(key)
             if cached:
                 return json.loads(cached)
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
+            _redis_unavailable = True
+            _redis_retry_after = time.time() + 60
+            return CacheService._get_local_value(key)
         return None
 
     @staticmethod
     def set(key: str, value: Any, ttl: int = TTL_MEDIUM) -> bool:
         """Set value in Redis cache with TTL"""
-        if not redis_client:
-            return False
+        global _redis_unavailable
+        global _redis_retry_after
+        if not CacheService._should_try_redis():
+            return CacheService._set_local_value(key, value, ttl)
         try:
             redis_client.setex(key, ttl, json.dumps(value, default=str))
             return True
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
-            return False
+            _redis_unavailable = True
+            _redis_retry_after = time.time() + 60
+            return CacheService._set_local_value(key, value, ttl)
 
     @staticmethod
     def delete(key: str) -> bool:
         """Delete key from Redis cache"""
-        if not redis_client:
-            return False
+        global _redis_unavailable
+        if not redis_client or _redis_unavailable:
+            _local_cache.pop(key, None)
+            return True
         try:
             redis_client.delete(key)
             return True
         except Exception as e:
             logger.error(f"Redis delete error for key {key}: {e}")
-            return False
+            _redis_unavailable = True
+            _local_cache.pop(key, None)
+            return True
 
     @staticmethod
     def delete_pattern(pattern: str) -> bool:
         """Delete all keys matching pattern"""
-        if not redis_client:
-            return False
+        global _redis_unavailable
+        if not redis_client or _redis_unavailable:
+            if pattern.endswith("*"):
+                prefix = pattern[:-1]
+                for key in list(_local_cache.keys()):
+                    if key.startswith(prefix):
+                        _local_cache.pop(key, None)
+                return True
+            _local_cache.pop(pattern, None)
+            return True
         try:
-            keys = redis_client.keys(pattern)
+            keys = list(redis_client.scan_iter(match=pattern, count=500))
             if keys:
                 redis_client.delete(*keys)
             return True
         except Exception as e:
             logger.error(f"Redis delete pattern error for {pattern}: {e}")
-            return False
+            _redis_unavailable = True
+            if pattern.endswith("*"):
+                prefix = pattern[:-1]
+                for key in list(_local_cache.keys()):
+                    if key.startswith(prefix):
+                        _local_cache.pop(key, None)
+                return True
+            _local_cache.pop(pattern, None)
+            return True
 
     # Specific cache operations
 

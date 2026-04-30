@@ -167,7 +167,7 @@ export function useWebSocket() {
                         connect()
                     }, delay)
                 } else {
-                    console.warn('WebSocket: Unable to connect. Please ensure the backend is running on port 8000.')
+                    console.warn('WebSocket: Unable to connect. Please ensure the backend is running and NEXT_PUBLIC_WS_URL is set correctly.')
                 }
             }
 

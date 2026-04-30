@@ -240,13 +240,27 @@ def get_inventory_data(
 async def get_inventory_summary(
     warehouse: Optional[str] = Query(None, description="Warehouse/facility code"),
 ):
+    # Build cache key (warehouse is optional)
+    cache_key = f"uc:inventory-summary:v3:{warehouse or 'all'}"
+    
+    # Try cache first (5 minute TTL)
+    cached = CacheService.get(cache_key)
+    if isinstance(cached, dict):
+        return cached
+    
     service = get_unicommerce_data_service()
-    return await run_in_threadpool(service.get_inventory_summary_db, warehouse)
+    result = await run_in_threadpool(service.get_inventory_summary_db, warehouse)
+    
+    # Cache successful results
+    if result and result.get("successful"):
+        CacheService.set(cache_key, result, ttl=300)
+    
+    return result
 
 
 @router.post("/catalog-search")
 async def search_catalog_data(payload: Optional[Dict[str, Any]] = Body(None)):
-    service = get_unicommerce_data_service()
+    # Build cache key from search parameters
     body = payload or {}
     search_options = body.get("searchOptions") or {}
 
@@ -255,10 +269,24 @@ async def search_catalog_data(payload: Optional[Dict[str, Any]] = Body(None)):
     warehouse = body.get("warehouse") or body.get("facilityCode")
     category = body.get("category") or body.get("categoryName")
     stock_filter = body.get("stockFilter") or "all"
+    keyword = body.get("keyword") or ""
+    
+    # Cache key includes pagination to avoid stale page slicing issues.
+    cache_key = (
+        f"uc:catalog-search:v3:{warehouse or 'all'}:{category or 'all'}:{stock_filter}:{keyword.lower()}:"
+        f"{display_start}:{display_length}:{int(bool(body.get('getInventorySnapshot', False)))}"
+    )
+    
+    # Try cache first (5 minute TTL)
+    cached = CacheService.get(cache_key)
+    if isinstance(cached, dict):
+        return cached
+    
+    service = get_unicommerce_data_service()
 
     result = await run_in_threadpool(
         service.get_inventory_catalog_search,
-        body.get("keyword"),
+        keyword,
         display_start,
         display_length,
         warehouse,
@@ -266,6 +294,10 @@ async def search_catalog_data(payload: Optional[Dict[str, Any]] = Body(None)):
         stock_filter,
         bool(body.get("getInventorySnapshot", False)),
     )
+    
+    # Cache page result for 5 minutes.
+    if result and result.get("successful"):
+        CacheService.set(cache_key, result, ttl=300)
 
     return result
 
@@ -335,6 +367,12 @@ def get_return_report(
     return_type: str = Query("ALL", description="RTO | CIR | ALL"),
     progress_id: Optional[str] = Query(None, description="Client-generated progress tracker ID"),
 ):
+    cache_key = f"uc:return-report:v3:{date}:{from_date}:{to_date}:{period}:{return_type}"
+    cached = CacheService.get(cache_key)
+    if isinstance(cached, dict):
+        _finish_report_progress(progress_id, success=bool(cached.get("success", True)))
+        return cached
+
     service = get_unicommerce_data_service()
     progress_cb = _build_progress_callback(progress_id)
     result = service.get_return_report(
@@ -345,6 +383,9 @@ def get_return_report(
         return_type=return_type,
         progress_cb=progress_cb,
     )
+    if bool(result.get("success")):
+        CacheService.set(cache_key, result, ttl=120)
+
     _finish_report_progress(
         progress_id,
         success=bool(result.get("success")),
