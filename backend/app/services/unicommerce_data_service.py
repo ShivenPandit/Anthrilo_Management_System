@@ -4415,7 +4415,21 @@ class UnicommerceDataService:
             db = self._get_db()
             try:
                 normalized_records = (
-                    db.query(SalesOrderRecord)
+                    db.query(
+                        SalesOrderRecord.id,
+                        SalesOrderRecord.order_id,
+                        SalesOrderRecord.sale_order_item_code,
+                        SalesOrderRecord.status,
+                        SalesOrderRecord.channel,
+                        SalesOrderRecord.sku,
+                        SalesOrderRecord.product_name,
+                        SalesOrderRecord.qty,
+                        SalesOrderRecord.selling_price,
+                        SalesOrderRecord.order_date,
+                        SalesOrderRecord.created_at,
+                        SalesOrderRecord.raw_data,
+                        SalesOrderRecord.updated_at,
+                    )
                     .filter(
                         and_(
                             SalesOrderRecord.order_date.isnot(None),
@@ -4633,7 +4647,21 @@ class UnicommerceDataService:
         db = self._get_db()
         try:
             normalized_records = (
-                db.query(SalesOrderRecord)
+                db.query(
+                    SalesOrderRecord.id,
+                    SalesOrderRecord.order_id,
+                    SalesOrderRecord.sale_order_item_code,
+                    SalesOrderRecord.status,
+                    SalesOrderRecord.channel,
+                    SalesOrderRecord.sku,
+                    SalesOrderRecord.product_name,
+                    SalesOrderRecord.qty,
+                    SalesOrderRecord.selling_price,
+                    SalesOrderRecord.order_date,
+                    SalesOrderRecord.created_at,
+                    SalesOrderRecord.raw_data,
+                    SalesOrderRecord.updated_at,
+                )
                 .filter(
                     SalesOrderRecord.order_id == code,
                 )
@@ -4717,7 +4745,20 @@ class UnicommerceDataService:
         db = self._get_db()
         try:
             normalized_records = (
-                db.query(SalesOrderRecord)
+                db.query(
+                    SalesOrderRecord.id,
+                    SalesOrderRecord.order_id,
+                    SalesOrderRecord.status,
+                    SalesOrderRecord.channel,
+                    SalesOrderRecord.qty,
+                    SalesOrderRecord.selling_price,
+                    SalesOrderRecord.order_date,
+                    SalesOrderRecord.created_at,
+                    SalesOrderRecord.sku,
+                    SalesOrderRecord.product_name,
+                    SalesOrderRecord.raw_data,
+                    SalesOrderRecord.updated_at,
+                )
                 .filter(
                     and_(
                         SalesOrderRecord.order_date.isnot(None),
