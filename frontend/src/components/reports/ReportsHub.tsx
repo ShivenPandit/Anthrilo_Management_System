@@ -251,6 +251,16 @@ const REPORTS: ReportDef[] = [
     category: 'Inventory',
     frequency: 'Daily',
   },
+  {
+    id: 'garment-planning',
+    title: 'Production Planning Report',
+    description: 'Garment planning output for simple SKUs',
+    href: '/dashboard/garments/planning-report',
+    icon: FileText,
+    category: 'Inventory',
+    frequency: 'Daily',
+    badge: 'New',
+  },
 ];
 
 /*  */

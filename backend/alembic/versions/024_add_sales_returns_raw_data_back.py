@@ -1,7 +1,7 @@
 """Add raw_data JSONB back to sales_returns.
 
-Revision ID: 024_add_sales_returns_raw_data_back
-Revises: 023_jsonb_guardrails_indexes
+Revision ID: 024_returns_raw_data_back
+Revises: 023_jsonb_guardrails
 Create Date: 2026-04-30
 """
 
@@ -11,8 +11,8 @@ from sqlalchemy.dialects import postgresql
 
 
 # revision identifiers, used by Alembic.
-revision = "024_add_sales_returns_raw_data_back"
-down_revision = "023_jsonb_guardrails_indexes"
+revision = "024_returns_raw_data_back"
+down_revision = "023_jsonb_guardrails"
 branch_labels = None
 depends_on = None
 

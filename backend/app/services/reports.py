@@ -1,5 +1,7 @@
-from datetime import date, datetime
-from typing import Optional, Dict, Any
+import csv
+import io
+from datetime import date, datetime, timedelta
+from typing import Optional, Dict, Any, List
 from collections import defaultdict
 from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_
@@ -7,6 +9,37 @@ from app.db.models import (
     Fabric, Yarn, Garment, Inventory, Sale,
     ProductionPlan, ProductionActivity, Panel
 )
+from app.db.export_models import InventorySnapshotRecord, SalesOrderRecord, ShopifyMasterData
+
+
+EXCLUDED_ORDER_STATUSES = {
+    "CANCELLED",
+    "CANCELED",
+    "RETURNED",
+    "REFUNDED",
+    "FAILED",
+    "UNFULFILLABLE",
+    "ERROR",
+    "PENDING_VERIFICATION",
+}
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(str(value).replace(",", "").strip()))
+    except (TypeError, ValueError):
+        return default
 
 
 class ReportsService:
@@ -274,6 +307,247 @@ class ReportsService:
             "total_stock_value": sum(item["total_value"] for item in cost_data),
             "detailed_costs": cost_data
         }
+
+
+    def _collect_garment_planning_rows(
+        self,
+        start_date: date,
+        end_date: date,
+        season: str = "both",
+    ) -> List[Dict[str, Any]]:
+        """Full row list. Net sale qty = sum(sales_orders.qty) with order_date in [start_date, end_date] only (UTC midnight bounds)."""
+        season_filter = (season or "both").strip().lower()
+        start_dt = datetime.combine(start_date, datetime.min.time())
+        end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+        days_count = max((end_date - start_date).days + 1, 1)
+
+        simple_bundle_filter = or_(
+            ShopifyMasterData.simple_bundle.is_(None),
+            ShopifyMasterData.simple_bundle == "",
+            ShopifyMasterData.simple_bundle == "SIMPLE",
+            ShopifyMasterData.simple_bundle == "Simple",
+            ShopifyMasterData.simple_bundle == "simple",
+        )
+
+        sales_sku_key = func.upper(func.trim(SalesOrderRecord.sku))
+        sold_subq = (
+            self.db.query(
+                sales_sku_key.label("sku_key"),
+                func.sum(SalesOrderRecord.qty).label("net_sale_qty"),
+                func.max(SalesOrderRecord.item_type_size).label("size"),
+            )
+            .filter(
+                SalesOrderRecord.sku.isnot(None),
+                SalesOrderRecord.sku != "",
+                SalesOrderRecord.order_date.isnot(None),
+                SalesOrderRecord.order_date >= start_dt,
+                SalesOrderRecord.order_date < end_dt,
+                or_(
+                    SalesOrderRecord.status.is_(None),
+                    SalesOrderRecord.status.notin_(EXCLUDED_ORDER_STATUSES),
+                ),
+            )
+            .group_by(sales_sku_key)
+            .having(func.sum(SalesOrderRecord.qty) > 0)
+        ).subquery()
+
+        master_sku_key = func.upper(func.trim(ShopifyMasterData.variant_sku))
+
+        masters_query = (
+            self.db.query(
+                ShopifyMasterData,
+                sold_subq.c.net_sale_qty,
+                sold_subq.c.size,
+            )
+            .join(sold_subq, master_sku_key == sold_subq.c.sku_key)
+            .filter(simple_bundle_filter)
+        )
+
+        if season_filter in {"winter", "summer"}:
+            masters_query = masters_query.filter(
+                func.upper(func.coalesce(ShopifyMasterData.season, "")).like(f"%{season_filter.upper()}%")
+            )
+
+        masters_rows = masters_query.order_by(ShopifyMasterData.variant_sku.asc()).all()
+
+        sku_keys = [
+            (m.variant_sku or "").strip().upper()
+            for m, _, _ in masters_rows
+            if (m.variant_sku or "").strip()
+        ]
+
+        inventory_map: Dict[str, int] = {}
+        if sku_keys:
+            inv_sku_key = func.upper(func.trim(InventorySnapshotRecord.sku))
+            chunk_size = 3000
+            for i in range(0, len(sku_keys), chunk_size):
+                chunk = sku_keys[i : i + chunk_size]
+                inventory_rows = (
+                    self.db.query(
+                        inv_sku_key.label("sku_key"),
+                        func.coalesce(func.sum(InventorySnapshotRecord.available_qty), 0).label("good_inventory"),
+                    )
+                    .filter(
+                        InventorySnapshotRecord.sku.isnot(None),
+                        InventorySnapshotRecord.sku != "",
+                        inv_sku_key.in_(chunk),
+                    )
+                    .group_by(inv_sku_key)
+                    .all()
+                )
+                for row in inventory_rows:
+                    if row.sku_key:
+                        inventory_map[(row.sku_key or "").strip()] = int(row.good_inventory or 0)
+
+        items: List[Dict[str, Any]] = []
+
+        for master, net_sale_raw, size_raw in masters_rows:
+            sku = (master.variant_sku or "").strip()
+            if not sku:
+                continue
+
+            sku_key = sku.upper()
+            net_sale_qty = int(net_sale_raw or 0)
+            good_inventory = int(inventory_map.get(sku_key, 0) or 0)
+
+            season_value = (master.season or "").strip().upper()
+            season_factor = 1.2 if "WINTER" in season_value else 1.0
+            style_factor = _safe_float(master.garment_2, default=1.0)
+            lead_time = _safe_int(master.amazon_asin, default=0)
+            buffer_days = 0
+            average_daily_sales = net_sale_qty / days_count if days_count else 0.0
+            adjusted_ads = average_daily_sales * season_factor * style_factor
+            required_qty = adjusted_ads * (lead_time + buffer_days)
+            plan_qty = required_qty - good_inventory
+            percent_available = (good_inventory / required_qty) * 100 if required_qty > 0 else 0.0
+            if percent_available < 33:
+                status = "RED"
+            elif percent_available <= 66:
+                status = "YELLOW"
+            else:
+                status = "GREEN"
+
+            items.append({
+                "style_code": master.style_code,
+                "sku": sku,
+                "name": master.title,
+                "size": size_raw or "-",
+                "net_sale_qty": net_sale_qty,
+                "good_inventory": good_inventory,
+                "average_daily_sales": round(average_daily_sales, 2),
+                "season_factor": round(season_factor, 2),
+                "style_factor": round(style_factor, 2),
+                "adjusted_ads": round(adjusted_ads, 2),
+                "lead_time": lead_time,
+                "buffer": buffer_days,
+                "required_qty": round(required_qty, 2),
+                "plan": round(plan_qty, 2),
+                "percent_available": round(percent_available, 2),
+                "status": status,
+            })
+
+        return items
+
+    def garment_planning_report(
+        self,
+        start_date: date,
+        end_date: date,
+        season: str = "both",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Dict[str, Any]:
+        """Paginated planning report; aggregates and status counts reflect all SKUs in range."""
+
+        if end_date < start_date:
+            start_date, end_date = end_date, start_date
+
+        season_filter = (season or "both").strip().lower()
+        days_count = max((end_date - start_date).days + 1, 1)
+
+        items = self._collect_garment_planning_rows(start_date, end_date, season)
+
+        status_breakdown = {"RED": 0, "YELLOW": 0, "GREEN": 0}
+        total_net_sale_qty = 0
+        total_good_inventory = 0
+        total_required_qty = 0.0
+        total_plan_qty = 0.0
+
+        for it in items:
+            status_breakdown[it["status"]] += 1
+            total_net_sale_qty += int(it["net_sale_qty"])
+            total_good_inventory += int(it["good_inventory"])
+            total_required_qty += float(it["required_qty"])
+            total_plan_qty += float(it["plan"])
+
+        total_skus = len(items)
+        ps = max(1, min(int(page_size), 500))
+        pg = max(1, int(page))
+        total_pages = (total_skus + ps - 1) // ps if total_skus else 0
+        if total_pages:
+            pg = min(pg, total_pages)
+        start_idx = (pg - 1) * ps
+        page_items = items[start_idx:start_idx + ps]
+
+        return {
+            "report_type": "Garment Planning Report",
+            "generated_at": datetime.utcnow().isoformat(),
+            "period": {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "days": days_count,
+            },
+            "season_filter": season_filter,
+            "summary": {
+                "total_skus": total_skus,
+                "total_net_sale_qty": total_net_sale_qty,
+                "total_good_inventory": total_good_inventory,
+                "total_required_qty": round(total_required_qty, 2),
+                "total_plan_qty": round(total_plan_qty, 2),
+                "status_breakdown": status_breakdown,
+            },
+            "pagination": {
+                "page": pg,
+                "page_size": ps,
+                "total_skus": total_skus,
+                "total_pages": total_pages,
+            },
+            "items": page_items,
+        }
+
+    def garment_planning_report_csv(
+        self,
+        start_date: date,
+        end_date: date,
+        season: str = "both",
+    ) -> bytes:
+        if end_date < start_date:
+            start_date, end_date = end_date, start_date
+
+        rows = self._collect_garment_planning_rows(start_date, end_date, season)
+        headers = [
+            "style_code",
+            "sku",
+            "name",
+            "size",
+            "net_sale_qty",
+            "good_inventory",
+            "average_daily_sales",
+            "season_factor",
+            "style_factor",
+            "adjusted_ads",
+            "lead_time",
+            "buffer",
+            "required_qty",
+            "plan",
+            "percent_available",
+            "status",
+        ]
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(headers)
+        for r in rows:
+            writer.writerow([r.get(h, "") for h in headers])
+        return buf.getvalue().encode("utf-8-sig")
 
 
     def daily_sales_report(self, report_date: date) -> Dict[str, Any]:

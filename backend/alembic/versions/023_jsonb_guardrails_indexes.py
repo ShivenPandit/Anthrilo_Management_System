@@ -9,7 +9,28 @@ branch_labels = None
 depends_on = None
 
 
+def _add_jsonb_if_missing(table: str, column: str) -> None:
+    op.execute(
+        f"""
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name='{table}' AND column_name='{column}'
+          ) THEN
+            ALTER TABLE {table} ADD COLUMN {column} JSONB;
+          END IF;
+        END $$;
+        """
+    )
+
+
 def upgrade() -> None:
+    _add_jsonb_if_missing("sales_orders", "extra_fields")
+    _add_jsonb_if_missing("sales_returns", "extra_fields")
+    _add_jsonb_if_missing("inventory_snapshots", "extra_fields")
+
     # Keep JSONB columns non-breaking but predictable for reads.
     op.execute(
         """
