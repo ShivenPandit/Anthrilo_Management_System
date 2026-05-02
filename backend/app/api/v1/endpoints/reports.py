@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from datetime import date
 from typing import Optional
@@ -146,6 +147,38 @@ def get_daily_production_variance_report(
     """Get daily production variance report (calculated vs actual gross weight)"""
     service = ReportsService(db)
     return service.daily_production_variance_report(report_date)
+
+
+@router.get("/garments/planning-report")
+def get_garment_planning_report(
+    start_date: date = Query(..., description="Start date (YYYY-MM-DD)"),
+    end_date: date = Query(..., description="End date (YYYY-MM-DD)"),
+    season: str = Query("both", description="Season filter: summer, winter, or both"),
+    page: int = Query(1, ge=1, description="Page number (20 SKUs per page)"),
+    page_size: int = Query(20, ge=1, le=500, description="Rows per page"),
+    db: Session = Depends(get_db)
+):
+    """Get garment planning report for simple Shopify SKUs with sales in range (paginated)."""
+    service = ReportsService(db)
+    return service.garment_planning_report(start_date, end_date, season, page=page, page_size=page_size)
+
+
+@router.get("/garments/planning-report/export.csv")
+def export_garment_planning_report_csv(
+    start_date: date = Query(..., description="Start date (YYYY-MM-DD)"),
+    end_date: date = Query(..., description="End date (YYYY-MM-DD)"),
+    season: str = Query("both", description="Season filter: summer, winter, or both"),
+    db: Session = Depends(get_db),
+):
+    """Download full garment planning report as CSV (same filters as the table)."""
+    service = ReportsService(db)
+    body = service.garment_planning_report_csv(start_date, end_date, season)
+    fname = f"garment-planning_{start_date.isoformat()}_{end_date.isoformat()}.csv"
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 @router.get("/summary/all")

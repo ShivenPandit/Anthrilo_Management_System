@@ -42,6 +42,13 @@ export default function GarmentsPage() {
       color: 'from-blue-500 to-indigo-500',
     },
     {
+      title: 'Planning Report',
+      description: 'Generate simple SKU planning output for garments',
+      icon: '📐',
+      href: '/dashboard/garments/planning-report',
+      color: 'from-orange-500 to-amber-500',
+    },
+    {
       title: 'Inventory',
       description: 'Track finished goods inventory',
       icon: '📦',

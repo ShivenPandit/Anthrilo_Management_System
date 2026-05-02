@@ -1,17 +1,15 @@
 import axios from 'axios';
 
-function resolveApiUrl(): string {
+/** Backend origin without `/api/v1` (use for CSV download URLs, etc.). */
+export function getApiOrigin(): string {
   const configured = process.env.NEXT_PUBLIC_API_URL?.trim();
   if (configured) {
-    // Accept either http://host or http://host/api/v1 and normalize to origin.
     return configured.replace(/\/+$/, '').replace(/\/api\/v1$/, '');
   }
-
-  // Keep frontend calls pinned to backend API host in local dev.
   return 'http://127.0.0.1:8000';
 }
 
-const API_URL = resolveApiUrl();
+const API_URL = getApiOrigin();
 
 export const apiClient = axios.create({
   baseURL: `${API_URL}/api/v1`,
