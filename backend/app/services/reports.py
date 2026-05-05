@@ -315,107 +315,96 @@ class ReportsService:
         end_date: date,
         season: str = "both",
     ) -> List[Dict[str, Any]]:
-        """Full row list. Net sale qty = sum(sales_orders.qty) with order_date in [start_date, end_date] only (UTC midnight bounds)."""
+        """Collect full garment planning rows for ALL Shopify SKUs from master data."""
+
+        if end_date < start_date:
+            start_date, end_date = end_date, start_date
+
         season_filter = (season or "both").strip().lower()
         start_dt = datetime.combine(start_date, datetime.min.time())
         end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
         days_count = max((end_date - start_date).days + 1, 1)
 
-        simple_bundle_filter = or_(
-            ShopifyMasterData.simple_bundle.is_(None),
-            ShopifyMasterData.simple_bundle == "",
-            ShopifyMasterData.simple_bundle == "SIMPLE",
-            ShopifyMasterData.simple_bundle == "Simple",
-            ShopifyMasterData.simple_bundle == "simple",
-        )
+        # Query ALL SKUs from master data WITHOUT filtering by season or bundle type
+        # This ensures every SKU in the master catalog is included in the report
+        masters = self.db.query(ShopifyMasterData).order_by(
+            ShopifyMasterData.variant_sku.asc(),
+        ).all()
 
-        sales_sku_key = func.upper(func.trim(SalesOrderRecord.sku))
-        sold_subq = (
+        sku_values = [
+            (row.variant_sku or "").strip()
+            for row in masters
+            if (row.variant_sku or "").strip()
+        ]
+        unique_sku_values = list(dict.fromkeys(sku_values))
+
+        sales_map: Dict[str, Dict[str, Any]] = {}
+        if unique_sku_values:
+            sales_rows = (
+                self.db.query(
+                    SalesOrderRecord.sku.label("sku"),
+                    func.sum(SalesOrderRecord.qty).label("net_sales"),
+                    func.max(SalesOrderRecord.item_type_size).label("size"),
+                )
+                .filter(
+                    SalesOrderRecord.sku.isnot(None),
+                    SalesOrderRecord.sku != "",
+                    or_(
+                        SalesOrderRecord.status.is_(None),
+                        SalesOrderRecord.status.notin_(EXCLUDED_ORDER_STATUSES),
+                    ),
+                    SalesOrderRecord.order_date >= start_dt,
+                    SalesOrderRecord.order_date < end_dt,
+                    SalesOrderRecord.sku.in_(unique_sku_values),
+                )
+                .group_by(SalesOrderRecord.sku)
+                .all()
+            )
+            sales_map = {
+                (row.sku or "").strip().upper(): {
+                    "net_sales": int(row.net_sales or 0),
+                    "size": row.size,
+                }
+                for row in sales_rows
+                if row.sku
+            }
+
+        inventory_rows = (
             self.db.query(
-                sales_sku_key.label("sku_key"),
-                func.sum(SalesOrderRecord.qty).label("net_sale_qty"),
-                func.max(SalesOrderRecord.item_type_size).label("size"),
+                InventorySnapshotRecord.sku.label("sku"),
+                func.coalesce(func.sum(InventorySnapshotRecord.available_qty), 0).label("good_inventory"),
             )
             .filter(
-                SalesOrderRecord.sku.isnot(None),
-                SalesOrderRecord.sku != "",
-                SalesOrderRecord.order_date.isnot(None),
-                SalesOrderRecord.order_date >= start_dt,
-                SalesOrderRecord.order_date < end_dt,
-                or_(
-                    SalesOrderRecord.status.is_(None),
-                    SalesOrderRecord.status.notin_(EXCLUDED_ORDER_STATUSES),
-                ),
+                InventorySnapshotRecord.sku.isnot(None),
+                InventorySnapshotRecord.sku != "",
             )
-            .group_by(sales_sku_key)
-            .having(func.sum(SalesOrderRecord.qty) > 0)
-        ).subquery()
-
-        master_sku_key = func.upper(func.trim(ShopifyMasterData.variant_sku))
-
-        masters_query = (
-            self.db.query(
-                ShopifyMasterData,
-                sold_subq.c.net_sale_qty,
-                sold_subq.c.size,
-            )
-            .join(sold_subq, master_sku_key == sold_subq.c.sku_key)
-            .filter(simple_bundle_filter)
+            .group_by(InventorySnapshotRecord.sku)
+            .all()
         )
-
-        if season_filter in {"winter", "summer"}:
-            masters_query = masters_query.filter(
-                func.upper(func.coalesce(ShopifyMasterData.season, "")).like(f"%{season_filter.upper()}%")
-            )
-
-        masters_rows = masters_query.order_by(ShopifyMasterData.variant_sku.asc()).all()
-
-        sku_keys = [
-            (m.variant_sku or "").strip().upper()
-            for m, _, _ in masters_rows
-            if (m.variant_sku or "").strip()
-        ]
-
-        inventory_map: Dict[str, int] = {}
-        if sku_keys:
-            inv_sku_key = func.upper(func.trim(InventorySnapshotRecord.sku))
-            chunk_size = 3000
-            for i in range(0, len(sku_keys), chunk_size):
-                chunk = sku_keys[i : i + chunk_size]
-                inventory_rows = (
-                    self.db.query(
-                        inv_sku_key.label("sku_key"),
-                        func.coalesce(func.sum(InventorySnapshotRecord.available_qty), 0).label("good_inventory"),
-                    )
-                    .filter(
-                        InventorySnapshotRecord.sku.isnot(None),
-                        InventorySnapshotRecord.sku != "",
-                        inv_sku_key.in_(chunk),
-                    )
-                    .group_by(inv_sku_key)
-                    .all()
-                )
-                for row in inventory_rows:
-                    if row.sku_key:
-                        inventory_map[(row.sku_key or "").strip()] = int(row.good_inventory or 0)
+        inventory_map: Dict[str, int] = {
+            (row.sku or "").strip().upper(): int(row.good_inventory or 0)
+            for row in inventory_rows
+            if row.sku
+        }
 
         items: List[Dict[str, Any]] = []
 
-        for master, net_sale_raw, size_raw in masters_rows:
+        for master in masters:
             sku = (master.variant_sku or "").strip()
             if not sku:
                 continue
 
             sku_key = sku.upper()
-            net_sale_qty = int(net_sale_raw or 0)
+            sales_row = sales_map.get(sku_key, {})
+            net_sales = int(sales_row.get("net_sales") or 0)
             good_inventory = int(inventory_map.get(sku_key, 0) or 0)
 
             season_value = (master.season or "").strip().upper()
             season_factor = 1.2 if "WINTER" in season_value else 1.0
             style_factor = _safe_float(master.garment_2, default=1.0)
             lead_time = _safe_int(master.amazon_asin, default=0)
-            buffer_days = 0
-            average_daily_sales = net_sale_qty / days_count if days_count else 0.0
+            buffer_days = _safe_int(master.buffer or master.production_time, default=0)
+            average_daily_sales = net_sales / days_count if days_count else 0.0
             adjusted_ads = average_daily_sales * season_factor * style_factor
             required_qty = adjusted_ads * (lead_time + buffer_days)
             plan_qty = required_qty - good_inventory
@@ -427,12 +416,13 @@ class ReportsService:
             else:
                 status = "GREEN"
 
-            items.append({
+            item = {
                 "style_code": master.style_code,
                 "sku": sku,
                 "name": master.title,
-                "size": size_raw or "-",
-                "net_sale_qty": net_sale_qty,
+                "size": (master.size or "-").strip() or (sales_row.get("size") or "-"),
+                "net_sale_qty": net_sales,
+                "net_sales": net_sales,
                 "good_inventory": good_inventory,
                 "average_daily_sales": round(average_daily_sales, 2),
                 "season_factor": round(season_factor, 2),
@@ -444,7 +434,8 @@ class ReportsService:
                 "plan": round(plan_qty, 2),
                 "percent_available": round(percent_available, 2),
                 "status": status,
-            })
+            }
+            items.append(item)
 
         return items
 
@@ -456,15 +447,13 @@ class ReportsService:
         page: int = 1,
         page_size: int = 20,
     ) -> Dict[str, Any]:
-        """Paginated planning report; aggregates and status counts reflect all SKUs in range."""
+        """Generate garment planning report with pagination for the dashboard page."""
 
         if end_date < start_date:
             start_date, end_date = end_date, start_date
 
         season_filter = (season or "both").strip().lower()
-        days_count = max((end_date - start_date).days + 1, 1)
-
-        items = self._collect_garment_planning_rows(start_date, end_date, season)
+        all_items = self._collect_garment_planning_rows(start_date, end_date, season)
 
         status_breakdown = {"RED": 0, "YELLOW": 0, "GREEN": 0}
         total_net_sale_qty = 0
@@ -472,21 +461,20 @@ class ReportsService:
         total_required_qty = 0.0
         total_plan_qty = 0.0
 
-        for it in items:
-            status_breakdown[it["status"]] += 1
-            total_net_sale_qty += int(it["net_sale_qty"])
-            total_good_inventory += int(it["good_inventory"])
-            total_required_qty += float(it["required_qty"])
-            total_plan_qty += float(it["plan"])
+        for row in all_items:
+            status_breakdown[row["status"]] += 1
+            total_net_sale_qty += int(row["net_sale_qty"])
+            total_good_inventory += int(row["good_inventory"])
+            total_required_qty += float(row["required_qty"])
+            total_plan_qty += float(row["plan"])
 
-        total_skus = len(items)
-        ps = max(1, min(int(page_size), 500))
-        pg = max(1, int(page))
-        total_pages = (total_skus + ps - 1) // ps if total_skus else 0
-        if total_pages:
-            pg = min(pg, total_pages)
-        start_idx = (pg - 1) * ps
-        page_items = items[start_idx:start_idx + ps]
+        total_skus = len(all_items)
+        safe_page_size = max(1, min(int(page_size), 500))
+        safe_page = max(1, int(page))
+        total_pages = max(1, (total_skus + safe_page_size - 1) // safe_page_size) if total_skus else 1
+        safe_page = min(safe_page, total_pages)
+        start_idx = (safe_page - 1) * safe_page_size
+        page_items = all_items[start_idx : start_idx + safe_page_size]
 
         return {
             "report_type": "Garment Planning Report",
@@ -494,20 +482,21 @@ class ReportsService:
             "period": {
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
-                "days": days_count,
+                "days": max((end_date - start_date).days + 1, 1),
             },
             "season_filter": season_filter,
             "summary": {
                 "total_skus": total_skus,
                 "total_net_sale_qty": total_net_sale_qty,
+                "total_net_sales": total_net_sale_qty,
                 "total_good_inventory": total_good_inventory,
                 "total_required_qty": round(total_required_qty, 2),
                 "total_plan_qty": round(total_plan_qty, 2),
                 "status_breakdown": status_breakdown,
             },
             "pagination": {
-                "page": pg,
-                "page_size": ps,
+                "page": safe_page,
+                "page_size": safe_page_size,
                 "total_skus": total_skus,
                 "total_pages": total_pages,
             },
@@ -520,9 +509,6 @@ class ReportsService:
         end_date: date,
         season: str = "both",
     ) -> bytes:
-        if end_date < start_date:
-            start_date, end_date = end_date, start_date
-
         rows = self._collect_garment_planning_rows(start_date, end_date, season)
         headers = [
             "style_code",
@@ -545,8 +531,8 @@ class ReportsService:
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(headers)
-        for r in rows:
-            writer.writerow([r.get(h, "") for h in headers])
+        for row in rows:
+            writer.writerow([row.get(header, "") for header in headers])
         return buf.getvalue().encode("utf-8-sig")
 
 
