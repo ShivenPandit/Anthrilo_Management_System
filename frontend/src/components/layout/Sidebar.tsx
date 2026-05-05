@@ -85,6 +85,7 @@ export const NAVIGATION_ITEMS: NavItem[] = [
       { name: 'SKU Velocity', href: '/dashboard/garments/sku-velocity', icon: Gauge },
       { name: 'Bundle SKUs', href: '/dashboard/garments/bundle-skus', icon: Layers },
       { name: 'Bundle Sales', href: '/dashboard/garments/bundle-sales', icon: TrendingUp },
+      { name: 'Fabric Planning', href: '/dashboard/garments/fabric-planning', icon: FileText },
       { name: 'Fabric', href: '/dashboard/garments/fabric', icon: Boxes },
     ],
   },

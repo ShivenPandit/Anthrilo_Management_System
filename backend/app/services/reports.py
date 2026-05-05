@@ -535,6 +535,93 @@ class ReportsService:
             writer.writerow([row.get(header, "") for header in headers])
         return buf.getvalue().encode("utf-8-sig")
 
+    def fabric_planning_report(
+        self,
+        as_of_date: Optional[date] = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Dict[str, Any]:
+        """Build fabric planning rows using required qty from garment planning over last 30 days."""
+        effective_end = as_of_date or date.today()
+        effective_start = effective_end - timedelta(days=29)
+
+        garment_rows = self._collect_garment_planning_rows(
+            effective_start,
+            effective_end,
+            season="both",
+        )
+        required_qty_map: Dict[str, float] = {
+            (str(row.get("sku", "")).strip().upper()): float(row.get("required_qty") or 0.0)
+            for row in garment_rows
+            if str(row.get("sku", "")).strip()
+        }
+
+        masters = self.db.query(ShopifyMasterData).order_by(
+            ShopifyMasterData.variant_sku.asc(),
+        ).all()
+
+        items: List[Dict[str, Any]] = []
+        total_required_qty = 0.0
+        total_qty_required = 0.0
+
+        for master in masters:
+            sku = (master.variant_sku or "").strip()
+            if not sku:
+                continue
+
+            sku_key = sku.upper()
+            required_qty = float(required_qty_map.get(sku_key, 0.0) or 0.0)
+            net_weight = _safe_float(master.net_weight, default=0.0)
+            base_qty = net_weight * required_qty
+            qty_required = base_qty + (0.25 * base_qty)
+
+            total_required_qty += required_qty
+            total_qty_required += qty_required
+
+            items.append(
+                {
+                    "style_code": master.style_code,
+                    "sku": sku,
+                    "name": master.title,
+                    "size": (master.size or "-").strip() or "-",
+                    "required_qty": round(required_qty, 2),
+                    "fabric": (master.fabric_type or "-").strip() or "-",
+                    "print": (master.print_name or "-").strip() or "-",
+                    "net_weight": round(net_weight, 4),
+                    "qty_required": round(qty_required, 2),
+                }
+            )
+
+        total_skus = len(items)
+        safe_page_size = max(1, min(int(page_size), 500))
+        safe_page = max(1, int(page))
+        total_pages = max(1, (total_skus + safe_page_size - 1) // safe_page_size) if total_skus else 1
+        safe_page = min(safe_page, total_pages)
+        start_idx = (safe_page - 1) * safe_page_size
+        page_items = items[start_idx : start_idx + safe_page_size]
+
+        return {
+            "report_type": "Fabric Planning Report",
+            "generated_at": datetime.utcnow().isoformat(),
+            "period": {
+                "start_date": effective_start.isoformat(),
+                "end_date": effective_end.isoformat(),
+                "days": 30,
+            },
+            "summary": {
+                "total_skus": total_skus,
+                "total_required_qty": round(total_required_qty, 2),
+                "total_qty_required": round(total_qty_required, 2),
+            },
+            "pagination": {
+                "page": safe_page,
+                "page_size": safe_page_size,
+                "total_skus": total_skus,
+                "total_pages": total_pages,
+            },
+            "items": page_items,
+        }
+
 
     def daily_sales_report(self, report_date: date) -> Dict[str, Any]:
         """Generate daily sales report for a specific date"""
