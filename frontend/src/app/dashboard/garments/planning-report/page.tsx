@@ -64,6 +64,40 @@ interface PlanningReportResponse {
     items: PlanningReportItem[];
 }
 
+interface FabricPlanningReportItem {
+    style_code: string;
+    sku: string;
+    name: string;
+    size: string;
+    required_qty: number;
+    fabric: string;
+    print: string;
+    net_weight: number;
+    qty_required: number;
+}
+
+interface FabricPlanningReportResponse {
+    report_type: string;
+    generated_at: string;
+    period: {
+        start_date: string;
+        end_date: string;
+        days: number;
+    };
+    summary: {
+        total_skus: number;
+        total_required_qty: number;
+        total_qty_required: number;
+    };
+    pagination: {
+        page: number;
+        page_size: number;
+        total_skus: number;
+        total_pages: number;
+    };
+    items: FabricPlanningReportItem[];
+}
+
 const PAGE_SIZE = 20;
 
 const badgeClasses: Record<PlanningReportItem['status'], string> = {
@@ -99,6 +133,8 @@ export default function GarmentPlanningReportPage() {
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [csvLoading, setCsvLoading] = useState(false);
+    const [fabricReport, setFabricReport] = useState<FabricPlanningReportResponse | null>(null);
+    const [fabricLoading, setFabricLoading] = useState(false);
 
     const loadReport = useCallback(
         async (nextPage: number) => {
@@ -138,7 +174,32 @@ export default function GarmentPlanningReportPage() {
 
     const handleGenerate = () => {
         void loadReport(1);
+        void loadFabricReport(1);
     };
+
+    const loadFabricReport = useCallback(
+        async (nextPage: number) => {
+            setFabricLoading(true);
+            try {
+                const { data } = await apiClient.get<FabricPlanningReportResponse>(
+                    '/reports/garments/fabric-planning-report',
+                    {
+                        params: {
+                            as_of_date: endDate,
+                            page: nextPage,
+                            page_size: PAGE_SIZE,
+                        },
+                    },
+                );
+                setFabricReport(data);
+            } catch {
+                setFabricReport(null);
+            } finally {
+                setFabricLoading(false);
+            }
+        },
+        [endDate],
+    );
 
     const handleDownloadCsv = async () => {
         const params = new URLSearchParams({
@@ -300,6 +361,7 @@ export default function GarmentPlanningReportPage() {
                         type="button"
                         onClick={() => {
                             setReport(null);
+                            setFabricReport(null);
                             setErrorMessage(null);
                             setStartDate(defaultStart);
                             setEndDate(defaultEnd);
@@ -473,6 +535,144 @@ export default function GarmentPlanningReportPage() {
                                 >
                                     Next <ChevronRight className="h-4 w-4" />
                                 </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="mt-8">
+                        <div className="mb-3">
+                            <h2 className="text-xl font-semibold text-slate-900 dark:text-white">Fabric Planning Report</h2>
+                            <p className="text-sm text-slate-500 dark:text-slate-400">
+                                Required quantity is sourced from garment planning required qty for the rolling last 30 days.
+                                QTY REQUIRED is calculated as (NET WEIGHT x Required QTY) + 25%.
+                            </p>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+                            <div className="card">
+                                <div className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">SKUs</div>
+                                <div className="mt-2 text-3xl font-bold text-slate-900 dark:text-white">
+                                    {formatNumber(fabricReport?.summary.total_skus ?? 0)}
+                                </div>
+                            </div>
+                            <div className="card">
+                                <div className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                                    Required Qty (30d)
+                                </div>
+                                <div className="mt-2 text-3xl font-bold text-slate-900 dark:text-white">
+                                    {formatNumber(fabricReport?.summary.total_required_qty ?? 0, 2)}
+                                </div>
+                            </div>
+                            <div className="card">
+                                <div className="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                                    Total Qty Required
+                                </div>
+                                <div className="mt-2 text-3xl font-bold text-slate-900 dark:text-white">
+                                    {formatNumber(fabricReport?.summary.total_qty_required ?? 0, 2)}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="card p-0 overflow-hidden relative">
+                            {fabricLoading && (
+                                <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/70 dark:bg-slate-900/70">
+                                    <Loader2 className="h-8 w-8 animate-spin text-primary-600" />
+                                </div>
+                            )}
+                            <div className="overflow-x-auto">
+                                <table className="min-w-full text-sm">
+                                    <thead className="bg-slate-50 dark:bg-slate-800/60">
+                                        <tr>
+                                            {[
+                                                'STYLE CODE',
+                                                'SKU',
+                                                'NAME',
+                                                'Size',
+                                                'Required QTY',
+                                                'FABRIC',
+                                                'PRINT',
+                                                'NET WEIGHT',
+                                                'QTY REQUIRED',
+                                            ].map((column) => (
+                                                <th
+                                                    key={column}
+                                                    className="px-4 py-3 text-left whitespace-nowrap font-semibold text-slate-600 dark:text-slate-300"
+                                                >
+                                                    {column}
+                                                </th>
+                                            ))}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {(fabricReport?.items ?? []).map((item) => (
+                                            <tr
+                                                key={`fabric-${item.sku}`}
+                                                className="border-t border-slate-200 dark:border-slate-800 hover:bg-slate-50/60 dark:hover:bg-slate-800/40"
+                                            >
+                                                <td className="px-4 py-3 whitespace-nowrap">{item.style_code || '-'}</td>
+                                                <td className="px-4 py-3 whitespace-nowrap font-mono text-xs">{item.sku}</td>
+                                                <td className="px-4 py-3 min-w-[280px]">{item.name || '-'}</td>
+                                                <td className="px-4 py-3 whitespace-nowrap">{item.size || '-'}</td>
+                                                <td className="px-4 py-3 text-right whitespace-nowrap">
+                                                    {formatNumber(item.required_qty, 2)}
+                                                </td>
+                                                <td className="px-4 py-3 whitespace-nowrap">{item.fabric || '-'}</td>
+                                                <td className="px-4 py-3 whitespace-nowrap">{item.print || '-'}</td>
+                                                <td className="px-4 py-3 text-right whitespace-nowrap">
+                                                    {formatNumber(item.net_weight, 4)}
+                                                </td>
+                                                <td className="px-4 py-3 text-right whitespace-nowrap">
+                                                    {formatNumber(item.qty_required, 2)}
+                                                </td>
+                                            </tr>
+                                        ))}
+                                        {!(fabricReport?.items?.length ?? 0) && (
+                                            <tr>
+                                                <td colSpan={9} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
+                                                    No fabric planning rows found.
+                                                </td>
+                                            </tr>
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 dark:border-slate-800 px-4 py-3 text-sm text-slate-600 dark:text-slate-300">
+                                <div>
+                                    Page{' '}
+                                    <span className="font-semibold text-slate-900 dark:text-white">
+                                        {fabricReport?.pagination.page ?? 1}
+                                    </span>{' '}
+                                    of{' '}
+                                    <span className="font-semibold text-slate-900 dark:text-white">
+                                        {fabricReport?.pagination.total_pages ?? 0}
+                                    </span>
+                                    <span className="text-slate-400 dark:text-slate-500 ml-2">
+                                        ({fabricReport?.pagination.total_skus ?? 0} SKUs total, {PAGE_SIZE} per page)
+                                    </span>
+                                </div>
+                                <div className="flex gap-2">
+                                    <button
+                                        type="button"
+                                        disabled={(fabricReport?.pagination.page ?? 1) <= 1 || fabricLoading}
+                                        onClick={() => void loadFabricReport((fabricReport?.pagination.page ?? 1) - 1)}
+                                        className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-600 px-3 py-1.5 font-medium hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-40 disabled:pointer-events-none"
+                                    >
+                                        <ChevronLeft className="h-4 w-4" /> Previous
+                                    </button>
+                                    <button
+                                        type="button"
+                                        disabled={
+                                            !fabricReport ||
+                                            (fabricReport.pagination.page >= fabricReport.pagination.total_pages) ||
+                                            fabricLoading
+                                        }
+                                        onClick={() => void loadFabricReport((fabricReport?.pagination.page ?? 1) + 1)}
+                                        className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-600 px-3 py-1.5 font-medium hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-40 disabled:pointer-events-none"
+                                    >
+                                        Next <ChevronRight className="h-4 w-4" />
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>

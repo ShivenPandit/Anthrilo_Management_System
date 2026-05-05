@@ -49,6 +49,13 @@ export default function GarmentsPage() {
       color: 'from-orange-500 to-amber-500',
     },
     {
+      title: 'Fabric Planning',
+      description: 'Fabric requirement from last 30-day garment required qty',
+      icon: '🧾',
+      href: '/dashboard/garments/fabric-planning',
+      color: 'from-indigo-500 to-blue-500',
+    },
+    {
       title: 'Inventory',
       description: 'Track finished goods inventory',
       icon: '📦',

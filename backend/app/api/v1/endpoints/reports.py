@@ -181,6 +181,18 @@ def export_garment_planning_report_csv(
     )
 
 
+@router.get("/garments/fabric-planning-report")
+def get_fabric_planning_report(
+    as_of_date: Optional[date] = Query(None, description="Anchor date for rolling last 30 days (YYYY-MM-DD)"),
+    page: int = Query(1, ge=1, description="Page number (20 SKUs per page)"),
+    page_size: int = Query(20, ge=1, le=500, description="Rows per page"),
+    db: Session = Depends(get_db),
+):
+    """Get fabric planning report using required qty from garment planning over last 30 days."""
+    service = ReportsService(db)
+    return service.fabric_planning_report(as_of_date=as_of_date, page=page, page_size=page_size)
+
+
 @router.get("/summary/all")
 def get_summary_report(db: Session = Depends(get_db)):
     """Get a comprehensive summary report combining key metrics"""
