@@ -1568,6 +1568,8 @@ class UnicommerceDataService:
                             SalesOrderRecord.created_at,
                             SalesOrderRecord.selling_price,
                             SalesOrderRecord.status,
+                            SalesOrderRecord.item_type_size.label("item_type_size"),
+                            SalesOrderRecord.bundle_sku_code_number.label("bundle_sku_code_number"),
                         )
                         .filter(
                             and_(
@@ -1598,10 +1600,10 @@ class UnicommerceDataService:
                             "item_sku_code": self._safe_str(row.sku),
                             "sale_order_item_code": self._safe_str(row.sale_order_item_code),
                             "item_type_name": self._safe_str(row.product_name),
-                            "size": "",
+                            "size": self._safe_str(getattr(row, "item_type_size", "") or ""),
                             "channel_name": self._safe_str(row.channel) or "UNKNOWN",
                             "order_date": order_date,
-                            "bundle_sku_code_number": "",
+                            "bundle_sku_code_number": self._safe_str(getattr(row, "bundle_sku_code_number", "") or ""),
                             "selling_price": round(self._safe_float(row.selling_price, default=0.0), 2),
                         }
                     )
