@@ -69,6 +69,49 @@ const createProgressId = () => {
   return `report-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 };
 
+const deriveSizeFromItemTypeName = (itemTypeName: unknown) => {
+  const name = String(itemTypeName ?? '').trim();
+  if (!name) return '';
+
+  // 1) Year / range patterns (commonly end of item type name).
+  // Examples: "5-6 YEARS", "6-7 YEARS", "12 YEARS"
+  const yearRange = name.match(/(\d+\s*-\s*\d+\s*YEARS?)\s*$/i);
+  if (yearRange?.[1]) return yearRange[1].replace(/\s*-\s*/g, '-').toUpperCase();
+  const yearSingle = name.match(/(\d+\s*YEARS?)\s*$/i);
+  if (yearSingle?.[1]) return yearSingle[1].replace(/\s+/g, ' ').toUpperCase();
+
+  // 2) Common apparel sizes.
+  const apparelSize = name.match(/\b(XXS|XS|S|M|L|XL|XXL|3XL|4XL|5XL|6XL|7XL|2XL)\b\s*$/i);
+  if (apparelSize?.[1]) return apparelSize[1].toUpperCase();
+
+  // 3) Pure numeric trailing sizes (e.g. "30", "32").
+  const numericSize = name.match(/(\d{2,3})\s*$/);
+  if (numericSize?.[1]) return numericSize[1];
+
+  // 4) Fallback: slice from the last segment separated by common delimiters.
+  // Use " - " (with spaces) to avoid breaking ranges like "5-6 YEARS".
+  const lastSeg = name
+    .split(' - ')
+    .pop()
+    ?.split(/\/|\|/)[0]
+    .split(',')
+    .pop();
+  if (!lastSeg) return '';
+
+  const seg = String(lastSeg).trim();
+  if (!seg) return '';
+
+  // If segment ends with YEARS, return the preceding number/range token.
+  if (/^YEARS$/i.test(seg)) {
+    const tokens = name.split(/\s+/).filter(Boolean);
+    const prev = tokens.at(-2);
+    return prev ? prev.toUpperCase() : '';
+  }
+
+  // Accept the segment if it's not ridiculously long.
+  return seg.length <= 50 ? seg.toUpperCase() : '';
+};
+
 type ReportMode = 'daily' | 'weekly' | 'monthly' | 'custom';
 type SortKey = 'channel_name' | 'quantity' | 'selling_price' | 'orders' | 'avg' | 'pct';
 type ItemSortKey = 'item_sku_code' | 'sale_order_item_code' | 'item_type_name' | 'channel_name' | 'order_date' | 'bundle_sku_code_number' | 'selling_price' | 'size' | 'good_inventory' | 'virtual_inventory';
@@ -272,7 +315,11 @@ export default function DailySalesReportPage() {
   /* CSV download */
   const handleCSV = useCallback(() => {
     if (!raw) return;
-    const items = raw.items || [];
+    const items = (raw.items || []).map((it: any) => {
+      const derived = deriveSizeFromItemTypeName(it?.item_type_name);
+      const fallbackSize = String(it?.size ?? '').trim();
+      return { ...it, size: derived || fallbackSize };
+    });
     const report = raw.report || [];
     const comparison = raw.comparison;
 
@@ -374,7 +421,17 @@ export default function DailySalesReportPage() {
   /* derived data */
   const totals = raw?.totals;
   const totalRev = totals?.total_revenue || 1;
-  const items: any[] = useMemo(() => raw?.items ?? [], [raw?.items]);
+  const items: any[] = useMemo(() => {
+    const base = (raw?.items ?? []) as any[];
+    return base.map((it) => {
+      // Always derive size from Item Type Name as per your requirement.
+      // Keep item_type_name untouched, just overwrite/normalize `size`.
+      const derived = deriveSizeFromItemTypeName(it?.item_type_name);
+      const fallbackSize = String(it?.size ?? '').trim();
+      const nextSize = derived || fallbackSize;
+      return { ...it, size: nextSize };
+    });
+  }, [raw?.items]);
 
   const enriched = useMemo(() => {
     if (!raw?.report) return [];

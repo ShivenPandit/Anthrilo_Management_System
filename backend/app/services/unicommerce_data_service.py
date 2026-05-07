@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import logging
+import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from sqlalchemy import Float, and_, bindparam, case, func, or_, text
@@ -66,6 +67,44 @@ class UnicommerceDataService:
     @staticmethod
     def _safe_str(value: Any) -> str:
         return str(value).strip() if value is not None else ""
+
+    def _derive_size_from_text(self, *candidates: Any) -> str:
+        """
+        Normalize a product size token from the first usable candidate.
+        Priority should be: explicit size field -> item type name -> item details -> product name.
+        """
+        patterns = (
+            re.compile(r"(\d+\s*-\s*\d+\s*YEARS?)\s*$", re.IGNORECASE),
+            re.compile(r"(\d+\s*YEARS?)\s*$", re.IGNORECASE),
+            re.compile(r"\b(XXS|XS|S|M|L|XL|XXL|2XL|3XL|4XL|5XL|6XL|7XL)\b\s*$", re.IGNORECASE),
+            re.compile(r"(\d{2,3})\s*$"),
+        )
+        token_pattern = re.compile(r"^(XXS|XS|S|M|L|XL|XXL|2XL|3XL|4XL|5XL|6XL|7XL|\d{2,3}|\d+\s*-\s*\d+\s*YEARS?|\d+\s*YEARS?)$", re.IGNORECASE)
+
+        for candidate in candidates:
+            text = self._safe_str(candidate)
+            if not text:
+                continue
+            if text.upper() in {"UNKNOWN", "NA", "N/A", "-"}:
+                continue
+
+            for pattern in patterns:
+                match = pattern.search(text)
+                if match and match.group(1):
+                    return self._safe_str(match.group(1)).replace(" - ", "-").upper()
+
+            # Delimiter fallback for "STYLE - SIZE"
+            if " - " in text:
+                tail = self._safe_str(text.rsplit(" - ", 1)[-1])
+                if (
+                    tail
+                    and tail.upper() not in {"UNKNOWN", "NA", "N/A", "-"}
+                    and len(tail) <= 50
+                    and token_pattern.match(tail)
+                ):
+                    return tail.replace(" - ", "-").upper()
+
+        return ""
 
     @staticmethod
     def _safe_int(value: Any, default: int = 0) -> int:
@@ -1562,6 +1601,9 @@ class UnicommerceDataService:
                         db.query(
                             SalesOrderRecord.sku,
                             SalesOrderRecord.sale_order_item_code,
+                            # Prefer DB item_type_name (more reliable for our pipeline).
+                            # product_name is kept as fallback because some imports only populate that.
+                            SalesOrderRecord.item_type_name,
                             SalesOrderRecord.product_name,
                             SalesOrderRecord.channel,
                             SalesOrderRecord.order_date,
@@ -1570,6 +1612,8 @@ class UnicommerceDataService:
                             SalesOrderRecord.status,
                             SalesOrderRecord.item_type_size.label("item_type_size"),
                             SalesOrderRecord.bundle_sku_code_number.label("bundle_sku_code_number"),
+                            SalesOrderRecord.raw_data["Item Details"].astext.label("raw_item_details"),
+                            SalesOrderRecord.raw_data["itemDetails"].astext.label("raw_item_details_alt"),
                         )
                         .filter(
                             and_(
@@ -1599,8 +1643,14 @@ class UnicommerceDataService:
                         {
                             "item_sku_code": self._safe_str(row.sku),
                             "sale_order_item_code": self._safe_str(row.sale_order_item_code),
-                            "item_type_name": self._safe_str(row.product_name),
-                            "size": self._safe_str(getattr(row, "item_type_size", "") or ""),
+                            "item_type_name": self._safe_str(getattr(row, "item_type_name", None) or row.product_name),
+                            "size": self._derive_size_from_text(
+                                getattr(row, "item_type_size", ""),
+                                getattr(row, "item_type_name", None),
+                                getattr(row, "raw_item_details", ""),
+                                getattr(row, "raw_item_details_alt", ""),
+                                row.product_name,
+                            ),
                             "channel_name": self._safe_str(row.channel) or "UNKNOWN",
                             "order_date": order_date,
                             "bundle_sku_code_number": self._safe_str(getattr(row, "bundle_sku_code_number", "") or ""),
@@ -1626,12 +1676,18 @@ class UnicommerceDataService:
 
                     for item in list(order.get("saleOrderItems") or []):
                         selling_price = self._safe_float(item.get("sellingPrice"), default=0.0)
+                        item_type_name = self._safe_str(item.get("itemTypeName"))
                         items_detail.append(
                             {
                                 "item_sku_code": self._safe_str(item.get("itemSku")),
                                 "sale_order_item_code": self._safe_str(item.get("code")),
-                                "item_type_name": self._safe_str(item.get("itemTypeName")),
-                                "size": self._safe_str(item.get("size")),
+                                "item_type_name": item_type_name,
+                                "size": self._derive_size_from_text(
+                                    item.get("size"),
+                                    item_type_name,
+                                    item.get("itemDetails"),
+                                    item.get("Item Details"),
+                                ),
                                 "channel_name": channel,
                                 "order_date": order_date,
                                 "bundle_sku_code_number": self._safe_str(item.get("bundleSkuCodeNumber")),
@@ -1648,27 +1704,38 @@ class UnicommerceDataService:
             )
             inventory_map: Dict[str, Dict[str, int]] = {}
 
-            max_inventory_skus = 1200
-            if unique_skus and len(unique_skus) <= max_inventory_skus:
+            # Enrich item rows with inventory snapshot.
+            # Previously this was skipped for SKU sets larger than `max_inventory_skus`, which caused
+            # `Good Inventory` / `Virtual Inventory` to show as N/A.
+            max_inventory_skus = 800
+            if unique_skus:
                 self._emit_progress(progress_cb, 70, "Fetching inventory snapshot for SKUs…")
-                inventory_result = self.get_inventory_data(skus=unique_skus)
-                if inventory_result.get("success"):
+
+                unique_skus_list = list(unique_skus)
+                for i in range(0, len(unique_skus_list), max_inventory_skus):
+                    sku_batch = unique_skus_list[i : i + max_inventory_skus]
+                    inventory_result = self.get_inventory_data(skus=sku_batch)
+                    if not inventory_result.get("success"):
+                        continue
+
                     for inventory_item in list(inventory_result.get("items") or []):
                         sku_code = self._safe_str(inventory_item.get("sku"))
                         if not sku_code:
                             continue
-                        inventory_map[sku_code] = {
-                            "good_inventory": int(inventory_item.get("available_qty", 0) or 0),
-                            "virtual_inventory": int(inventory_item.get("reserved_qty", 0) or 0),
-                        }
-            elif unique_skus:
-                self._emit_progress(progress_cb, 70, "Skipping inventory enrichment for large SKU set…")
+
+                        # Aggregate across warehouses, if present.
+                        if sku_code not in inventory_map:
+                            inventory_map[sku_code] = {"good_inventory": 0, "virtual_inventory": 0}
+
+                        inventory_map[sku_code]["good_inventory"] += int(inventory_item.get("available_qty", 0) or 0)
+                        inventory_map[sku_code]["virtual_inventory"] += int(inventory_item.get("reserved_qty", 0) or 0)
 
             for item in items_detail:
                 sku = self._safe_str(item.get("item_sku_code"))
                 inv = inventory_map.get(sku, {})
-                item["good_inventory"] = inv.get("good_inventory")
-                item["virtual_inventory"] = inv.get("virtual_inventory")
+                # Default to 0 so UI never renders N/A for missing enrichment.
+                item["good_inventory"] = int(inv.get("good_inventory", 0) or 0)
+                item["virtual_inventory"] = int(inv.get("virtual_inventory", 0) or 0)
 
             comparison = None
             if not is_range and date:
