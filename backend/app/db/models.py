@@ -874,3 +874,38 @@ class BarcodeLabel(Base):
     printed_at = Column(DateTime)
     is_printed = Column(Boolean, default=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+
+class ProductionPlanningReport(Base):
+    __tablename__ = "production_planning_reports"
+    __table_args__ = (
+        UniqueConstraint("sku", name="uq_production_planning_reports_sku"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    sku = Column(String(120), nullable=False, index=True)
+    style_code = Column(String(120), nullable=True)
+    cutting_plan = Column(Integer, nullable=False, default=0)
+    cutting = Column(Integer, nullable=False, default=0)
+    stitching = Column(Integer, nullable=False, default=0)
+    finishing = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False, index=True)
+
+
+class ProductionPlanningHistory(Base):
+    __tablename__ = "production_planning_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sku = Column(String(120), nullable=False, index=True)
+    old_cutting_plan = Column(Integer, nullable=False, default=0)
+    new_cutting_plan = Column(Integer, nullable=False, default=0)
+    old_cutting = Column(Integer, nullable=False, default=0)
+    new_cutting = Column(Integer, nullable=False, default=0)
+    old_stitching = Column(Integer, nullable=False, default=0)
+    new_stitching = Column(Integer, nullable=False, default=0)
+    old_finishing = Column(Integer, nullable=False, default=0)
+    new_finishing = Column(Integer, nullable=False, default=0)
+    updated_quantity_difference = Column(Integer, nullable=False, default=0)
+    update_source = Column(String(20), nullable=False)  # CSV | MANUAL
+    updated_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)

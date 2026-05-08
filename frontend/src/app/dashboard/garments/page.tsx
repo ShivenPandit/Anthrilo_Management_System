@@ -49,6 +49,13 @@ export default function GarmentsPage() {
       color: 'from-orange-500 to-amber-500',
     },
     {
+      title: 'Production Planning',
+      description: 'SKU-wise cumulative production planning with CSV/manual upserts',
+      icon: '🏭',
+      href: '/dashboard/garments/production-planning-report',
+      color: 'from-sky-500 to-cyan-500',
+    },
+    {
       title: 'Fabric Planning',
       description: 'Fabric requirement from last 30-day garment required qty',
       icon: '🧾',
