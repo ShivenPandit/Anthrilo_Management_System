@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import auth, yarns, fabrics, processes, garments, inventory, sales, panels, production, discounts, ads, reports
 from app.api.v1.endpoints import integrations
 from app.api.v1.endpoints import unicommerce_data
+from app.api.v1.endpoints import production_planning
 # Manufacturing Module
 from app.api.v1.endpoints import (
     suppliers, purchase_orders, gate_entry, mrns,
@@ -79,6 +80,8 @@ api_router.include_router(
     processing.router, prefix="/processing", tags=["Processing"])
 api_router.include_router(
     garment_production.router, prefix="/garment-production", tags=["Garment Production"])
+api_router.include_router(
+    production_planning.router, prefix="/production-planning", tags=["Garment Production Planning"])
 
 # Reports (All Modules)
 api_router.include_router(

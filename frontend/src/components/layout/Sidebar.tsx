@@ -80,6 +80,7 @@ export const NAVIGATION_ITEMS: NavItem[] = [
     children: [
       { name: 'Master Data', href: '/dashboard/garments/master', icon: Package },
       { name: 'Planning Report', href: '/dashboard/garments/planning-report', icon: FileText },
+      { name: 'Production Planning', href: '/dashboard/garments/production-planning-report', icon: Factory },
       { name: 'Orders', href: '/dashboard/garments/production', icon: ShoppingCart },
       { name: 'Best SKUs', href: '/dashboard/garments/best-skus', icon: Zap },
       { name: 'SKU Velocity', href: '/dashboard/garments/sku-velocity', icon: Gauge },
