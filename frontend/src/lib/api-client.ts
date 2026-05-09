@@ -22,6 +22,10 @@ export const apiClient = axios.create({
 // Attach the auth token to every outgoing request
 apiClient.interceptors.request.use(
   (config) => {
+    if (config.data instanceof FormData) {
+      // Let browser/axios set multipart boundary automatically.
+      delete config.headers['Content-Type'];
+    }
     const token = localStorage.getItem('access_token');
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
