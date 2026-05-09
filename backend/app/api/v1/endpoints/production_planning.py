@@ -1,8 +1,8 @@
 from datetime import date
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from fastapi.responses import Response as FileResponse
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -46,8 +46,44 @@ def upsert_production_planning_manual(
         raise HTTPException(status_code=500, detail=f"Manual upsert failed: {exc}")
 
 
+@router.put("/{sku}")
+def update_production_planning_row(
+    sku: str,
+    body: ProductionPlanningManualEntry,
+    db: Session = Depends(get_db),
+):
+    service = ProductionPlanningService(db)
+    try:
+        return service.update_row(sku=sku, payload=body.model_dump())
+    except ValueError as exc:
+        message = str(exc)
+        if "not found" in message.lower():
+            raise HTTPException(status_code=404, detail=message)
+        raise HTTPException(status_code=400, detail=message)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Update failed: {exc}")
+
+
+@router.delete("/{sku}")
+def delete_production_planning_row(
+    sku: str,
+    db: Session = Depends(get_db),
+):
+    service = ProductionPlanningService(db)
+    try:
+        return service.delete_row(sku=sku)
+    except ValueError as exc:
+        message = str(exc)
+        if "not found" in message.lower():
+            raise HTTPException(status_code=404, detail=message)
+        raise HTTPException(status_code=400, detail=message)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {exc}")
+
+
 @router.get("")
 def list_production_planning_rows(
+    response: Response,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     search: Optional[str] = Query(None),
@@ -55,6 +91,9 @@ def list_production_planning_rows(
     updated_to: Optional[date] = Query(None),
     db: Session = Depends(get_db),
 ):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     service = ProductionPlanningService(db)
     return service.list_rows(
         page=page,
@@ -86,7 +125,7 @@ def export_production_planning_csv(
     service = ProductionPlanningService(db)
     body = service.export_csv(search=search, updated_from=updated_from, updated_to=updated_to)
     filename = "production-planning-report.csv"
-    return Response(
+    return FileResponse(
         content=body,
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},

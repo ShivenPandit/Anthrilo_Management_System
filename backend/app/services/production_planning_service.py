@@ -14,6 +14,7 @@ from app.db.models import ProductionPlanningHistory, ProductionPlanningReport
 
 class ProductionPlanningService:
     REQUIRED_COLUMNS = {"sku", "cutting_plan", "cutting", "stitching", "finishing"}
+    OPTIONAL_COLUMNS = {"style_code"}
     HISTORY_RETENTION_DAYS = 30
 
     def __init__(self, db: Session):
@@ -43,6 +44,14 @@ class ProductionPlanningService:
         if parsed < 0:
             raise ValueError(f"{field_name} cannot be negative")
         return parsed
+
+    @staticmethod
+    def _canonical_column_name(value: Any) -> str:
+        # Accept common CSV naming variants like "Style Code" and "cutting-plan".
+        col = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        while "__" in col:
+            col = col.replace("__", "_")
+        return col
 
     def _cleanup_old_history(self) -> None:
         cutoff = datetime.utcnow() - timedelta(days=self.HISTORY_RETENTION_DAYS)
@@ -177,19 +186,113 @@ class ProductionPlanningService:
             "item": saved,
         }
 
+    def update_row(self, sku: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sku_norm = self._normalize_sku(sku)
+        if not sku_norm:
+            raise ValueError("SKU is required")
+
+        style_code = self._normalize_style_code(payload.get("style_code"))
+        cutting_plan = self._parse_non_negative_int(payload.get("cutting_plan"), "cutting_plan")
+        cutting = self._parse_non_negative_int(payload.get("cutting"), "cutting")
+        stitching = self._parse_non_negative_int(payload.get("stitching"), "stitching")
+        finishing = self._parse_non_negative_int(payload.get("finishing"), "finishing")
+
+        row = (
+            self.db.query(ProductionPlanningReport)
+            .filter(ProductionPlanningReport.sku == sku_norm)
+            .with_for_update()
+            .first()
+        )
+        if row is None:
+            raise ValueError("SKU not found")
+
+        old_cutting_plan = int(row.cutting_plan or 0)
+        old_cutting = int(row.cutting or 0)
+        old_stitching = int(row.stitching or 0)
+        old_finishing = int(row.finishing or 0)
+
+        row.style_code = style_code
+        row.cutting_plan = cutting_plan
+        row.cutting = cutting
+        row.stitching = stitching
+        row.finishing = finishing
+
+        diff = (cutting_plan - old_cutting_plan) + (cutting - old_cutting) + (stitching - old_stitching) + (finishing - old_finishing)
+        self.db.add(
+            ProductionPlanningHistory(
+                sku=sku_norm,
+                old_cutting_plan=old_cutting_plan,
+                new_cutting_plan=cutting_plan,
+                old_cutting=old_cutting,
+                new_cutting=cutting,
+                old_stitching=old_stitching,
+                new_stitching=stitching,
+                old_finishing=old_finishing,
+                new_finishing=finishing,
+                updated_quantity_difference=diff,
+                update_source="MANUAL",
+            )
+        )
+        self.db.commit()
+        self.db.refresh(row)
+        return {"success": True, "operation": "updated", "item": row}
+
+    def delete_row(self, sku: str) -> dict[str, Any]:
+        sku_norm = self._normalize_sku(sku)
+        if not sku_norm:
+            raise ValueError("SKU is required")
+
+        row = (
+            self.db.query(ProductionPlanningReport)
+            .filter(ProductionPlanningReport.sku == sku_norm)
+            .with_for_update()
+            .first()
+        )
+        if row is None:
+            raise ValueError("SKU not found")
+
+        old_cutting_plan = int(row.cutting_plan or 0)
+        old_cutting = int(row.cutting or 0)
+        old_stitching = int(row.stitching or 0)
+        old_finishing = int(row.finishing or 0)
+
+        self.db.add(
+            ProductionPlanningHistory(
+                sku=sku_norm,
+                old_cutting_plan=old_cutting_plan,
+                new_cutting_plan=0,
+                old_cutting=old_cutting,
+                new_cutting=0,
+                old_stitching=old_stitching,
+                new_stitching=0,
+                old_finishing=old_finishing,
+                new_finishing=0,
+                updated_quantity_difference=-(old_cutting_plan + old_cutting + old_stitching + old_finishing),
+                update_source="MANUAL",
+            )
+        )
+        self.db.delete(row)
+        self.db.commit()
+        return {"success": True, "operation": "deleted", "sku": sku_norm}
+
     def upload_csv(self, file_bytes: bytes) -> dict[str, Any]:
         text = file_bytes.decode("utf-8-sig")
         reader = csv.DictReader(io.StringIO(text))
         if not reader.fieldnames:
             raise ValueError("CSV is empty")
 
-        headers = [str(h or "").strip().lower() for h in reader.fieldnames]
+        headers = [self._canonical_column_name(h) for h in reader.fieldnames]
         missing = [c for c in sorted(self.REQUIRED_COLUMNS) if c not in headers]
         if missing:
             raise ValueError(f"Missing required columns: {', '.join(missing)}")
 
-        duplicate_in_file: set[str] = set()
-        seen_skus: set[str] = set()
+        allowed_columns = self.REQUIRED_COLUMNS | self.OPTIONAL_COLUMNS
+        column_key_map = {
+            str(raw_key or ""): self._canonical_column_name(raw_key)
+            for raw_key in reader.fieldnames
+            if self._canonical_column_name(raw_key) in allowed_columns
+        }
+
         rows = list(reader)
 
         new_count = 0
@@ -201,19 +304,22 @@ class ProductionPlanningService:
         try:
             for idx, raw in enumerate(rows, start=2):
                 try:
-                    sku = self._normalize_sku(raw.get("sku"))
+                    normalized_raw = {
+                        normalized_key: value
+                        for raw_key, value in (raw or {}).items()
+                        for normalized_key in [column_key_map.get(str(raw_key or ""))]
+                        if normalized_key
+                    }
+
+                    sku = self._normalize_sku(normalized_raw.get("sku"))
                     if not sku:
                         raise ValueError("SKU is required")
-                    if sku in seen_skus:
-                        duplicate_in_file.add(sku)
-                        raise ValueError("Duplicate SKU found in CSV")
-                    seen_skus.add(sku)
 
-                    style_code = self._normalize_style_code(raw.get("style_code"))
-                    cutting_plan = self._parse_non_negative_int(raw.get("cutting_plan"), "cutting_plan")
-                    cutting = self._parse_non_negative_int(raw.get("cutting"), "cutting")
-                    stitching = self._parse_non_negative_int(raw.get("stitching"), "stitching")
-                    finishing = self._parse_non_negative_int(raw.get("finishing"), "finishing")
+                    style_code = self._normalize_style_code(normalized_raw.get("style_code"))
+                    cutting_plan = self._parse_non_negative_int(normalized_raw.get("cutting_plan"), "cutting_plan")
+                    cutting = self._parse_non_negative_int(normalized_raw.get("cutting"), "cutting")
+                    stitching = self._parse_non_negative_int(normalized_raw.get("stitching"), "stitching")
+                    finishing = self._parse_non_negative_int(normalized_raw.get("finishing"), "finishing")
 
                     op_type = self._upsert_additive(
                         sku=sku,
@@ -249,7 +355,7 @@ class ProductionPlanningService:
             "existing_skus_updated": updated_count,
             "failed_rows_count": len(failed_rows),
             "failed_rows": failed_rows,
-            "duplicate_skus_in_file": sorted(duplicate_in_file),
+            "duplicate_skus_in_file": [],
         }
 
     def list_rows(

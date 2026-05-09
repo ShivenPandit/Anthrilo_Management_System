@@ -2,9 +2,9 @@
 
 import { ChangeEvent, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Download, History, Loader2, Plus, RefreshCw, Search, Upload } from 'lucide-react';
+import { History, Loader2, Pencil, Plus, RefreshCw, Search, Trash2, Upload } from 'lucide-react';
 
-import { apiClient, getApiOrigin } from '@/lib/api-client';
+import { apiClient } from '@/lib/api-client';
 import { useToast } from '@/shared/components';
 
 type PlanningRow = {
@@ -50,25 +50,28 @@ export default function ProductionPlanningReportPage() {
 
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
-  const [updatedFrom, setUpdatedFrom] = useState('');
-  const [updatedTo, setUpdatedTo] = useState('');
 
   const [showManualModal, setShowManualModal] = useState(false);
   const [manualForm, setManualForm] = useState(initialManual);
+  const [editingSku, setEditingSku] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState(initialManual);
 
   const [historySku, setHistorySku] = useState<string | null>(null);
   const [historyPage, setHistoryPage] = useState(1);
 
   const listQuery = useQuery({
-    queryKey: ['production-planning-list', page, search, updatedFrom, updatedTo],
+    queryKey: ['production-planning-list', page, search],
     queryFn: async () => {
       const response = await apiClient.get('/production-planning', {
         params: {
           page,
           page_size: PAGE_SIZE,
           search: search || undefined,
-          updated_from: updatedFrom || undefined,
-          updated_to: updatedTo || undefined,
+          _t: Date.now(),
+        },
+        headers: {
+          'Cache-Control': 'no-cache',
+          Pragma: 'no-cache',
         },
       });
       return response.data as {
@@ -132,9 +135,7 @@ export default function ProductionPlanningReportPage() {
     mutationFn: async (file: File) => {
       const form = new FormData();
       form.append('file', file);
-      const response = await apiClient.post('/production-planning/upload-csv', form, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
+      const response = await apiClient.post('/production-planning/upload-csv', form);
       return response.data as {
         total_rows_processed: number;
         new_skus_created: number;
@@ -143,13 +144,56 @@ export default function ProductionPlanningReportPage() {
       };
     },
     onSuccess: (data) => {
+      setPage(1);
+      setSearch('');
       listQuery.refetch();
       success(
-        `${data.new_skus_created} new SKUs added, ${data.existing_skus_updated} SKUs updated, ${data.failed_rows_count} rows failed`,
+        `${data.total_rows_processed} rows processed: ${data.new_skus_created} new SKUs, ${data.existing_skus_updated} updated, ${data.failed_rows_count} failed`,
       );
     },
     onError: (err: any) => {
       const message = err?.response?.data?.detail || 'CSV upload failed';
+      toastError(String(message));
+    },
+  });
+
+  const editMutation = useMutation({
+    mutationFn: async () => {
+      if (!editingSku) throw new Error('No SKU selected');
+      const payload = {
+        sku: editingSku,
+        style_code: editForm.style_code || null,
+        cutting_plan: Number(editForm.cutting_plan || 0),
+        cutting: Number(editForm.cutting || 0),
+        stitching: Number(editForm.stitching || 0),
+        finishing: Number(editForm.finishing || 0),
+      };
+      const response = await apiClient.put(`/production-planning/${encodeURIComponent(editingSku)}`, payload);
+      return response.data;
+    },
+    onSuccess: (data) => {
+      setEditingSku(null);
+      setEditForm(initialManual);
+      listQuery.refetch();
+      success(`SKU ${data?.item?.sku} updated successfully`);
+    },
+    onError: (err: any) => {
+      const message = err?.response?.data?.detail || 'Edit failed';
+      toastError(String(message));
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async (sku: string) => {
+      const response = await apiClient.delete(`/production-planning/${encodeURIComponent(sku)}`);
+      return response.data;
+    },
+    onSuccess: (data) => {
+      listQuery.refetch();
+      success(`SKU ${data?.sku || ''} deleted successfully`);
+    },
+    onError: (err: any) => {
+      const message = err?.response?.data?.detail || 'Delete failed';
       toastError(String(message));
     },
   });
@@ -163,37 +207,17 @@ export default function ProductionPlanningReportPage() {
     return nums.every((n) => Number(n) >= 0);
   }, [manualForm]);
 
+  const canSubmitEdit = useMemo(() => {
+    if (!editingSku) return false;
+    const nums = [editForm.cutting_plan, editForm.cutting, editForm.stitching, editForm.finishing];
+    return nums.every((n) => Number(n) >= 0);
+  }, [editForm, editingSku]);
+
   const onCsvSelected = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     uploadMutation.mutate(file);
     e.target.value = '';
-  };
-
-  const handleExportCsv = async () => {
-    try {
-      const params = new URLSearchParams();
-      if (search) params.set('search', search);
-      if (updatedFrom) params.set('updated_from', updatedFrom);
-      if (updatedTo) params.set('updated_to', updatedTo);
-
-      const origin = getApiOrigin();
-      const token = localStorage.getItem('access_token');
-      const res = await fetch(`${origin}/api/v1/production-planning/export/csv?${params.toString()}`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
-      if (!res.ok) throw new Error('Export failed');
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'production-planning-report.csv';
-      a.click();
-      URL.revokeObjectURL(url);
-      success('CSV exported successfully');
-    } catch (e: any) {
-      toastError(e?.message || 'Export failed');
-    }
   };
 
   return (
@@ -206,8 +230,8 @@ export default function ProductionPlanningReportPage() {
       </div>
 
       <div className="card space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-          <div className="relative md:col-span-2">
+        <div className="grid grid-cols-1 gap-3">
+          <div className="relative">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               value={search}
@@ -219,24 +243,6 @@ export default function ProductionPlanningReportPage() {
               className="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
             />
           </div>
-          <input
-            type="date"
-            value={updatedFrom}
-            onChange={(e) => {
-              setUpdatedFrom(e.target.value);
-              setPage(1);
-            }}
-            className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
-          />
-          <input
-            type="date"
-            value={updatedTo}
-            onChange={(e) => {
-              setUpdatedTo(e.target.value);
-              setPage(1);
-            }}
-            className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
-          />
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -262,15 +268,6 @@ export default function ProductionPlanningReportPage() {
 
           <button
             type="button"
-            onClick={handleExportCsv}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-300 dark:border-slate-700 px-4 py-2 text-sm font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
-          >
-            <Download className="h-4 w-4" />
-            Export CSV
-          </button>
-
-          <button
-            type="button"
             onClick={() => listQuery.refetch()}
             className="inline-flex items-center gap-2 rounded-lg border border-slate-300 dark:border-slate-700 px-4 py-2 text-sm font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
           >
@@ -285,9 +282,21 @@ export default function ProductionPlanningReportPage() {
           <table className="min-w-full text-sm">
             <thead className="bg-slate-50 dark:bg-slate-800/60">
               <tr>
-                {['SKU', 'Style Code', 'Cutting Plan', 'Cutting', 'Stitching', 'Finishing', 'Last Updated', 'Actions'].map((h) => (
-                  <th key={h} className="px-4 py-3 text-left whitespace-nowrap font-semibold text-slate-600 dark:text-slate-300">
-                    {h}
+                {[
+                  { label: 'SKU', className: 'text-left' },
+                  { label: 'Style Code', className: 'text-left' },
+                  { label: 'Cutting Plan', className: 'text-right' },
+                  { label: 'Cutting', className: 'text-right' },
+                  { label: 'Stitching', className: 'text-right' },
+                  { label: 'Finishing', className: 'text-right' },
+                  { label: 'Last Updated', className: 'text-left' },
+                  { label: 'Actions', className: 'text-left' },
+                ].map((h) => (
+                  <th
+                    key={h.label}
+                    className={`px-4 py-3 whitespace-nowrap font-semibold text-slate-600 dark:text-slate-300 ${h.className}`}
+                  >
+                    {h.label}
                   </th>
                 ))}
               </tr>
@@ -311,17 +320,49 @@ export default function ProductionPlanningReportPage() {
                     <td className="px-4 py-3 text-right">{row.finishing}</td>
                     <td className="px-4 py-3 whitespace-nowrap">{new Date(row.updated_at).toLocaleString()}</td>
                     <td className="px-4 py-3">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setHistorySku(row.sku);
-                          setHistoryPage(1);
-                        }}
-                        className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 px-2.5 py-1.5 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
-                      >
-                        <History className="h-3.5 w-3.5" />
-                        History
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setHistorySku(row.sku);
+                            setHistoryPage(1);
+                          }}
+                          className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 px-2.5 py-1.5 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
+                        >
+                          <History className="h-3.5 w-3.5" />
+                          History
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingSku(row.sku);
+                            setEditForm({
+                              sku: row.sku,
+                              style_code: row.style_code || '',
+                              cutting_plan: String(row.cutting_plan),
+                              cutting: String(row.cutting),
+                              stitching: String(row.stitching),
+                              finishing: String(row.finishing),
+                            });
+                          }}
+                          className="inline-flex items-center gap-1 rounded-lg border border-slate-300 dark:border-slate-700 px-2.5 py-1.5 text-xs font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!window.confirm(`Delete SKU ${row.sku}? This cannot be undone.`)) return;
+                            deleteMutation.mutate(row.sku);
+                          }}
+                          disabled={deleteMutation.isPending}
+                          className="inline-flex items-center gap-1 rounded-lg border border-rose-300 text-rose-700 dark:border-rose-800 dark:text-rose-300 px-2.5 py-1.5 text-xs font-medium hover:bg-rose-50 dark:hover:bg-rose-900/20 disabled:opacity-60"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          Delete
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -407,6 +448,60 @@ export default function ProductionPlanningReportPage() {
             >
               {manualMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
               Save (Additive Upsert)
+            </button>
+          </div>
+        </div>
+      )}
+
+      {editingSku && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+          <div className="w-full max-w-xl rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Edit SKU · {editingSku}</h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingSku(null);
+                  setEditForm(initialManual);
+                }}
+                className="text-sm text-slate-500"
+              >
+                Close
+              </button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <input
+                value={editingSku}
+                disabled
+                className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-500"
+              />
+              <input
+                placeholder="Style Code (optional)"
+                value={editForm.style_code}
+                onChange={(e) => setEditForm((s) => ({ ...s, style_code: e.target.value }))}
+                className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+              />
+              {(['cutting_plan', 'cutting', 'stitching', 'finishing'] as const).map((field) => (
+                <input
+                  key={field}
+                  type="number"
+                  min={0}
+                  step={1}
+                  placeholder={field.replace('_', ' ')}
+                  value={editForm[field]}
+                  onChange={(e) => setEditForm((s) => ({ ...s, [field]: e.target.value }))}
+                  className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+                />
+              ))}
+            </div>
+            <button
+              type="button"
+              disabled={!canSubmitEdit || editMutation.isPending}
+              onClick={() => editMutation.mutate()}
+              className="inline-flex items-center gap-2 rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white hover:bg-primary-700 disabled:opacity-60"
+            >
+              {editMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              Save Changes
             </button>
           </div>
         </div>
