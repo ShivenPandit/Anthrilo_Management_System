@@ -193,6 +193,34 @@ def get_fabric_planning_report(
     return service.fabric_planning_report(as_of_date=as_of_date, page=page, page_size=page_size)
 
 
+@router.get("/garments/production-planning-status-report")
+def get_production_planning_status_report(
+    start_date: date = Query(..., description="Start date (YYYY-MM-DD)"),
+    end_date: date = Query(..., description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+):
+    """Get production planning & status report."""
+    service = ReportsService(db)
+    return service.production_planning_status_report(start_date=start_date, end_date=end_date)
+
+
+@router.get("/garments/production-planning-status-report/export.csv")
+def export_production_planning_status_report_csv(
+    start_date: date = Query(..., description="Start date (YYYY-MM-DD)"),
+    end_date: date = Query(..., description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+):
+    """Download production planning & status report as CSV."""
+    service = ReportsService(db)
+    body = service.production_planning_status_report_csv(start_date=start_date, end_date=end_date)
+    fname = f"production-planning-status_{start_date.isoformat()}_{end_date.isoformat()}.csv"
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @router.get("/summary/all")
 def get_summary_report(db: Session = Depends(get_db)):
     """Get a comprehensive summary report combining key metrics"""
