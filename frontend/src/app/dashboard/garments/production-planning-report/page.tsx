@@ -10,6 +10,9 @@ import { useToast } from '@/shared/components';
 type PlanningRow = {
   sku: string;
   style_code: string | null;
+  name: string | null;
+  size: string | null;
+  type: string | null;
   cutting_plan: number;
   cutting: number;
   stitching: number;
@@ -38,6 +41,9 @@ const PAGE_SIZE = 20;
 const initialManual = {
   sku: '',
   style_code: '',
+  name: '',
+  size: '',
+  type: '',
   cutting_plan: '0',
   cutting: '0',
   stitching: '0',
@@ -107,6 +113,9 @@ export default function ProductionPlanningReportPage() {
       const payload = {
         sku: manualForm.sku,
         style_code: manualForm.style_code || null,
+        name: manualForm.name || null,
+        size: manualForm.size || null,
+        type: manualForm.type || null,
         cutting_plan: Number(manualForm.cutting_plan || 0),
         cutting: Number(manualForm.cutting || 0),
         stitching: Number(manualForm.stitching || 0),
@@ -163,6 +172,9 @@ export default function ProductionPlanningReportPage() {
       const payload = {
         sku: editingSku,
         style_code: editForm.style_code || null,
+        name: editForm.name || null,
+        size: editForm.size || null,
+        type: editForm.type || null,
         cutting_plan: Number(editForm.cutting_plan || 0),
         cutting: Number(editForm.cutting || 0),
         stitching: Number(editForm.stitching || 0),
@@ -223,9 +235,9 @@ export default function ProductionPlanningReportPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Production Planning Report</h1>
+        <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Production Planning Raw Data</h1>
         <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-          SKU-wise cumulative production tracking for cutting plan, cutting, stitching, and finishing.
+          SKU-wise cumulative raw entries for cutting plan, cutting, stitching, and finishing.
         </p>
       </div>
 
@@ -284,8 +296,10 @@ export default function ProductionPlanningReportPage() {
               <tr>
                 {[
                   { label: 'SKU', className: 'text-left' },
-                  { label: 'Style Code', className: 'text-left' },
-                  { label: 'Cutting Plan', className: 'text-right' },
+                  { label: 'Style Code Name', className: 'text-left' },
+                  { label: 'Size', className: 'text-left' },
+                  { label: 'Type', className: 'text-left' },
+                  { label: 'Cutting Pcs', className: 'text-right' },
                   { label: 'Cutting', className: 'text-right' },
                   { label: 'Stitching', className: 'text-right' },
                   { label: 'Finishing', className: 'text-right' },
@@ -304,7 +318,7 @@ export default function ProductionPlanningReportPage() {
             <tbody>
               {listQuery.isLoading ? (
                 <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center text-slate-500">
+                  <td colSpan={10} className="px-4 py-10 text-center text-slate-500">
                     <Loader2 className="h-5 w-5 animate-spin inline mr-2" />
                     Loading rows...
                   </td>
@@ -313,7 +327,9 @@ export default function ProductionPlanningReportPage() {
                 rows.map((row) => (
                   <tr key={row.sku} className="border-t border-slate-200 dark:border-slate-800">
                     <td className="px-4 py-3 font-mono text-xs">{row.sku}</td>
-                    <td className="px-4 py-3">{row.style_code || '-'}</td>
+                    <td className="px-4 py-3">{row.name || row.style_code || '-'}</td>
+                    <td className="px-4 py-3">{row.size || '-'}</td>
+                    <td className="px-4 py-3">{row.type || '-'}</td>
                     <td className="px-4 py-3 text-right">{row.cutting_plan}</td>
                     <td className="px-4 py-3 text-right">{row.cutting}</td>
                     <td className="px-4 py-3 text-right">{row.stitching}</td>
@@ -339,6 +355,9 @@ export default function ProductionPlanningReportPage() {
                             setEditForm({
                               sku: row.sku,
                               style_code: row.style_code || '',
+                              name: row.name || '',
+                              size: row.size || '',
+                              type: row.type || '',
                               cutting_plan: String(row.cutting_plan),
                               cutting: String(row.cutting),
                               stitching: String(row.stitching),
@@ -368,7 +387,7 @@ export default function ProductionPlanningReportPage() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={8} className="px-4 py-10 text-center text-slate-500">
+                  <td colSpan={10} className="px-4 py-10 text-center text-slate-500">
                     No rows found.
                   </td>
                 </tr>
@@ -427,6 +446,24 @@ export default function ProductionPlanningReportPage() {
                 onChange={(e) => setManualForm((s) => ({ ...s, style_code: e.target.value }))}
                 className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
               />
+              <input
+                placeholder="Name (optional)"
+                value={manualForm.name}
+                onChange={(e) => setManualForm((s) => ({ ...s, name: e.target.value }))}
+                className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+              />
+              <input
+                placeholder="Size (optional)"
+                value={manualForm.size}
+                onChange={(e) => setManualForm((s) => ({ ...s, size: e.target.value }))}
+                className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+              />
+              <input
+                placeholder="Type (optional)"
+                value={manualForm.type}
+                onChange={(e) => setManualForm((s) => ({ ...s, type: e.target.value }))}
+                className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+              />
               {(['cutting_plan', 'cutting', 'stitching', 'finishing'] as const).map((field) => (
                 <input
                   key={field}
@@ -479,6 +516,24 @@ export default function ProductionPlanningReportPage() {
                 placeholder="Style Code (optional)"
                 value={editForm.style_code}
                 onChange={(e) => setEditForm((s) => ({ ...s, style_code: e.target.value }))}
+                className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+              />
+              <input
+                placeholder="Name (optional)"
+                value={editForm.name}
+                onChange={(e) => setEditForm((s) => ({ ...s, name: e.target.value }))}
+                className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+              />
+              <input
+                placeholder="Size (optional)"
+                value={editForm.size}
+                onChange={(e) => setEditForm((s) => ({ ...s, size: e.target.value }))}
+                className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+              />
+              <input
+                placeholder="Type (optional)"
+                value={editForm.type}
+                onChange={(e) => setEditForm((s) => ({ ...s, type: e.target.value }))}
                 className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
               />
               {(['cutting_plan', 'cutting', 'stitching', 'finishing'] as const).map((field) => (

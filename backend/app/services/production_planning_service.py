@@ -14,8 +14,21 @@ from app.db.models import ProductionPlanningHistory, ProductionPlanningReport
 
 class ProductionPlanningService:
     REQUIRED_COLUMNS = {"sku", "cutting_plan", "cutting", "stitching", "finishing"}
-    OPTIONAL_COLUMNS = {"style_code"}
+    OPTIONAL_COLUMNS = {"style_code", "name", "size", "type"}
     HISTORY_RETENTION_DAYS = 30
+    COLUMN_ALIASES = {
+        "sku_code": "sku",
+        "sku": "sku",
+        "style_code": "style_code",
+        "name": "name",
+        "size": "size",
+        "type": "type",
+        "cutting_pcs": "cutting_plan",
+        "cutting_plan": "cutting_plan",
+        "cutting": "cutting",
+        "stitching": "stitching",
+        "finishing": "finishing",
+    }
 
     def __init__(self, db: Session):
         self.db = db
@@ -29,6 +42,11 @@ class ProductionPlanningService:
     def _normalize_style_code(value: Any) -> Optional[str]:
         style = str(value or "").strip()
         return style or None
+
+    @staticmethod
+    def _normalize_string(value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        return text or None
 
     @staticmethod
     def _parse_non_negative_int(value: Any, field_name: str) -> int:
@@ -66,6 +84,9 @@ class ProductionPlanningService:
         *,
         sku: str,
         style_code: Optional[str],
+        name: Optional[str],
+        size: Optional[str],
+        type: Optional[str],
         cutting_plan: int,
         cutting: int,
         stitching: int,
@@ -88,6 +109,9 @@ class ProductionPlanningService:
             row = ProductionPlanningReport(
                 sku=sku_norm,
                 style_code=style_code,
+                name=name,
+                size=size,
+                type=type,
                 cutting_plan=cutting_plan,
                 cutting=cutting,
                 stitching=stitching,
@@ -116,6 +140,12 @@ class ProductionPlanningService:
             old.finishing = old_finishing + finishing
             if style_code:
                 old.style_code = style_code
+            if name:
+                old.name = name
+            if size:
+                old.size = size
+            if type:
+                old.type = type
 
             new_cutting_plan = int(old.cutting_plan or 0)
             new_cutting = int(old.cutting or 0)
@@ -142,6 +172,9 @@ class ProductionPlanningService:
     def upsert_manual(self, payload: dict[str, Any]) -> dict[str, Any]:
         sku = self._normalize_sku(payload.get("sku"))
         style_code = self._normalize_style_code(payload.get("style_code"))
+        name = self._normalize_string(payload.get("name"))
+        size = self._normalize_string(payload.get("size"))
+        type_val = self._normalize_string(payload.get("type"))
         cutting_plan = self._parse_non_negative_int(payload.get("cutting_plan"), "cutting_plan")
         cutting = self._parse_non_negative_int(payload.get("cutting"), "cutting")
         stitching = self._parse_non_negative_int(payload.get("stitching"), "stitching")
@@ -155,6 +188,9 @@ class ProductionPlanningService:
             op_type = self._upsert_additive(
                 sku=sku,
                 style_code=style_code,
+                name=name,
+                size=size,
+                type=type_val,
                 cutting_plan=cutting_plan,
                 cutting=cutting,
                 stitching=stitching,
@@ -168,6 +204,9 @@ class ProductionPlanningService:
             op_type = self._upsert_additive(
                 sku=sku,
                 style_code=style_code,
+                name=name,
+                size=size,
+                type=type_val,
                 cutting_plan=cutting_plan,
                 cutting=cutting,
                 stitching=stitching,
@@ -192,6 +231,9 @@ class ProductionPlanningService:
             raise ValueError("SKU is required")
 
         style_code = self._normalize_style_code(payload.get("style_code"))
+        name = self._normalize_string(payload.get("name"))
+        size = self._normalize_string(payload.get("size"))
+        type_val = self._normalize_string(payload.get("type"))
         cutting_plan = self._parse_non_negative_int(payload.get("cutting_plan"), "cutting_plan")
         cutting = self._parse_non_negative_int(payload.get("cutting"), "cutting")
         stitching = self._parse_non_negative_int(payload.get("stitching"), "stitching")
@@ -212,6 +254,9 @@ class ProductionPlanningService:
         old_finishing = int(row.finishing or 0)
 
         row.style_code = style_code
+        row.name = name
+        row.size = size
+        row.type = type_val
         row.cutting_plan = cutting_plan
         row.cutting = cutting
         row.stitching = stitching
@@ -282,15 +327,16 @@ class ProductionPlanningService:
             raise ValueError("CSV is empty")
 
         headers = [self._canonical_column_name(h) for h in reader.fieldnames]
-        missing = [c for c in sorted(self.REQUIRED_COLUMNS) if c not in headers]
+        normalized_headers = [self.COLUMN_ALIASES.get(h, h) for h in headers]
+        missing = [c for c in sorted(self.REQUIRED_COLUMNS) if c not in normalized_headers]
         if missing:
             raise ValueError(f"Missing required columns: {', '.join(missing)}")
 
         allowed_columns = self.REQUIRED_COLUMNS | self.OPTIONAL_COLUMNS
         column_key_map = {
-            str(raw_key or ""): self._canonical_column_name(raw_key)
+            str(raw_key or ""): self.COLUMN_ALIASES.get(self._canonical_column_name(raw_key), self._canonical_column_name(raw_key))
             for raw_key in reader.fieldnames
-            if self._canonical_column_name(raw_key) in allowed_columns
+            if self.COLUMN_ALIASES.get(self._canonical_column_name(raw_key), self._canonical_column_name(raw_key)) in allowed_columns
         }
 
         rows = list(reader)
@@ -316,6 +362,9 @@ class ProductionPlanningService:
                         raise ValueError("SKU is required")
 
                     style_code = self._normalize_style_code(normalized_raw.get("style_code"))
+                    name = self._normalize_string(normalized_raw.get("name"))
+                    size = self._normalize_string(normalized_raw.get("size"))
+                    type_val = self._normalize_string(normalized_raw.get("type"))
                     cutting_plan = self._parse_non_negative_int(normalized_raw.get("cutting_plan"), "cutting_plan")
                     cutting = self._parse_non_negative_int(normalized_raw.get("cutting"), "cutting")
                     stitching = self._parse_non_negative_int(normalized_raw.get("stitching"), "stitching")
@@ -324,6 +373,9 @@ class ProductionPlanningService:
                     op_type = self._upsert_additive(
                         sku=sku,
                         style_code=style_code,
+                        name=name,
+                        size=size,
+                        type=type_val,
                         cutting_plan=cutting_plan,
                         cutting=cutting,
                         stitching=stitching,
@@ -444,6 +496,9 @@ class ProductionPlanningService:
             [
                 "sku",
                 "style_code",
+                "name",
+                "size",
+                "type",
                 "cutting_plan",
                 "cutting",
                 "stitching",
@@ -457,6 +512,9 @@ class ProductionPlanningService:
                 [
                     row.sku,
                     row.style_code or "",
+                    row.name or "",
+                    row.size or "",
+                    row.type or "",
                     int(row.cutting_plan or 0),
                     int(row.cutting or 0),
                     int(row.stitching or 0),

@@ -7,6 +7,9 @@ from pydantic import BaseModel, Field
 class ProductionPlanningManualEntry(BaseModel):
     sku: str = Field(min_length=1)
     style_code: Optional[str] = None
+    name: Optional[str] = None
+    size: Optional[str] = None
+    type: Optional[str] = None
     cutting_plan: int = 0
     cutting: int = 0
     stitching: int = 0
@@ -16,6 +19,9 @@ class ProductionPlanningManualEntry(BaseModel):
 class ProductionPlanningRow(BaseModel):
     sku: str
     style_code: Optional[str] = None
+    name: Optional[str] = None
+    size: Optional[str] = None
+    type: Optional[str] = None
     cutting_plan: int
     cutting: int
     stitching: int
