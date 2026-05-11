@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, and_, or_
 from app.db.models import (
     Fabric, Yarn, Garment, Inventory, Sale,
-    ProductionPlan, ProductionActivity, Panel
+    ProductionPlan, ProductionActivity, Panel, ProductionPlanningReport
 )
 from app.db.export_models import InventorySnapshotRecord, SalesOrderRecord, ShopifyMasterData
 
@@ -621,6 +621,153 @@ class ReportsService:
             },
             "items": page_items,
         }
+
+    def production_planning_status_report(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> Dict[str, Any]:
+        """Combine production planning raw data with required qty and scanning inventory."""
+
+        if end_date < start_date:
+            start_date, end_date = end_date, start_date
+
+        # Required quantity source: garment planning report logic for same date window.
+        garment_rows = self._collect_garment_planning_rows(start_date, end_date, season="both")
+        required_qty_map: Dict[str, float] = {
+            str(row.get("sku") or "").strip().upper(): float(row.get("required_qty") or 0.0)
+            for row in garment_rows
+            if str(row.get("sku") or "").strip()
+        }
+
+        scanning_rows = (
+            self.db.query(
+                InventorySnapshotRecord.sku.label("sku"),
+                func.coalesce(func.sum(InventorySnapshotRecord.available_qty), 0).label("scanning"),
+            )
+            .filter(
+                InventorySnapshotRecord.sku.isnot(None),
+                InventorySnapshotRecord.sku != "",
+            )
+            .group_by(InventorySnapshotRecord.sku)
+            .all()
+        )
+        scanning_map: Dict[str, int] = {
+            str(row.sku or "").strip().upper(): int(row.scanning or 0)
+            for row in scanning_rows
+            if row.sku
+        }
+
+        start_dt = datetime.combine(start_date, datetime.min.time())
+        end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+
+        planning_rows = (
+            self.db.query(ProductionPlanningReport)
+            .filter(
+                ProductionPlanningReport.updated_at >= start_dt,
+                ProductionPlanningReport.updated_at < end_dt,
+            )
+            .order_by(ProductionPlanningReport.updated_at.desc(), ProductionPlanningReport.sku.asc())
+            .all()
+        )
+
+        items: List[Dict[str, Any]] = []
+        total_required_qty = 0.0
+        total_balance = 0.0
+
+        for row in planning_rows:
+            sku = str(row.sku or "").strip()
+            sku_key = sku.upper()
+
+            required_qty = float(required_qty_map.get(sku_key, 0.0) or 0.0)
+            scanning = int(scanning_map.get(sku_key, 0) or 0)
+
+            cutting_plan = int(row.cutting_plan or 0)
+            cutting = int(row.cutting or 0)
+            stitching = int(row.stitching or 0)
+            finishing = int(row.finishing or 0)
+            balance = required_qty - cutting_plan - cutting - stitching - finishing - scanning
+
+            total_required_qty += required_qty
+            total_balance += balance
+
+            items.append(
+                {
+                    "date": row.updated_at.date().isoformat() if row.updated_at else "",
+                    "style_code": row.style_code or "",
+                    "sku": sku,
+                    "size": row.size or "",
+                    "name": row.name or "",
+                    "required_qty": round(required_qty, 2),
+                    "cutting_plan": cutting_plan,
+                    "cutting": cutting,
+                    "stitching": stitching,
+                    "finishing": finishing,
+                    "scanning": scanning,
+                    "balance": round(balance, 2),
+                }
+            )
+
+        return {
+            "report_type": "Production Planning & Status Report",
+            "generated_at": datetime.utcnow().isoformat(),
+            "period": {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+            },
+            "summary": {
+                "total_rows": len(items),
+                "total_required_qty": round(total_required_qty, 2),
+                "total_balance": round(total_balance, 2),
+            },
+            "items": items,
+        }
+
+    def production_planning_status_report_csv(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> bytes:
+        payload = self.production_planning_status_report(start_date=start_date, end_date=end_date)
+        rows = payload.get("items") or []
+
+        headers = [
+            "DATE",
+            "Style_Code",
+            "SKU",
+            "Size",
+            "NAME",
+            "Required QTY",
+            "Cutting Plan",
+            "Cutting",
+            "stitching",
+            "finishing",
+            "scanning",
+            "BALANCE",
+        ]
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(headers)
+        for row in rows:
+            writer.writerow(
+                [
+                    row.get("date", ""),
+                    row.get("style_code", ""),
+                    row.get("sku", ""),
+                    row.get("size", ""),
+                    row.get("name", ""),
+                    row.get("required_qty", 0),
+                    row.get("cutting_plan", 0),
+                    row.get("cutting", 0),
+                    row.get("stitching", 0),
+                    row.get("finishing", 0),
+                    row.get("scanning", 0),
+                    row.get("balance", 0),
+                ]
+            )
+
+        return buf.getvalue().encode("utf-8-sig")
 
 
     def daily_sales_report(self, report_date: date) -> Dict[str, Any]:
