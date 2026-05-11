@@ -1201,7 +1201,7 @@ class UnicommerceDataService:
                 last_synced_at = completed_at.isoformat() if completed_at else None
                 for raw in raw_rows:
                     parsed_dt = self._parse_return_report_dt(
-                        self._pick(raw, "Date", "Return Date", "returnDate", "Dispatch Date/Cancellation Date")
+                        self._pick(raw, "Return Date", "returnDate", "Dispatch Date/Cancellation Date", "Date")
                     )
                     if parsed_dt is None:
                         continue
@@ -1259,6 +1259,7 @@ class UnicommerceDataService:
                     SalesReturnRecord.order_id,
                     SalesReturnRecord.return_code,
                     SalesReturnRecord.channel_entry,
+                    SalesReturnRecord.channel,
                     SalesReturnRecord.return_type,
                     SalesReturnRecord.return_status,
                     SalesReturnRecord.sku,
@@ -1270,25 +1271,10 @@ class UnicommerceDataService:
                     SalesReturnRecord.updated_at,
                 )
                 .filter(
-                    or_(
-                        and_(
-                            return_event_date.isnot(None),
-                            return_event_date >= from_day,
-                            return_event_date <= to_day,
-                        ),
-                        and_(
-                            return_event_date.is_(None),
-                            or_(
-                                and_(
-                                    SalesReturnRecord.updated_at >= from_date,
-                                    SalesReturnRecord.updated_at <= to_date,
-                                ),
-                                and_(
-                                    SalesReturnRecord.created_at >= from_date,
-                                    SalesReturnRecord.created_at <= to_date,
-                                ),
-                            ),
-                        ),
+                    and_(
+                        return_event_date.isnot(None),
+                        return_event_date >= from_day,
+                        return_event_date <= to_day,
                     )
                 )
                 .all()
@@ -1296,8 +1282,10 @@ class UnicommerceDataService:
 
             for record in normalized_records:
                 parsed_dt = self.uc_service._parse_datetime(record.dispatch_or_cancellation_date)
-                parsed_dt = self._normalize_dt(parsed_dt or record.updated_at or record.created_at)
-                if parsed_dt and (parsed_dt < from_date or parsed_dt > to_date):
+                parsed_dt = self._normalize_dt(parsed_dt)
+                if parsed_dt is None:
+                    continue
+                if parsed_dt < from_date or parsed_dt > to_date:
                     continue
                 rtype = self._normalize_return_type(record.return_type or record.return_status)
                 if type_norm != "ALL" and rtype != type_norm:
@@ -1307,11 +1295,17 @@ class UnicommerceDataService:
                     quantity = 1
                 refund_amount = float(record.refund_amount or 0.0)
                 unit_price = round(refund_amount / quantity, 2) if quantity > 0 else 0.0
+                
+                # Prioritize channel field (from sales export) > channel_entry (description) > UNKNOWN
+                channel_value = self._safe_str(record.channel) if record.channel else self._safe_str(record.channel_entry)
+                if not channel_value:
+                    channel_value = "UNKNOWN"
+                
                 items.append(
                     {
                         "saleOrderCode": self._safe_str(record.order_id),
                         "invoiceCode": self._safe_str(record.return_code),
-                        "channel": self._safe_str(record.channel_entry or "UNKNOWN"),
+                        "channel": channel_value,
                         "returnType": rtype,
                         "sku": self._safe_str(record.sku),
                         "itemName": self._safe_str(record.product_name) or self._safe_str(record.sku),
@@ -1333,6 +1327,8 @@ class UnicommerceDataService:
                             raw,
                             "Return Date",
                             "returnDate",
+                            "Dispatch Date/Cancellation Date",
+                            "Date",
                             "Invoice Date",
                             "invoiceDate",
                             "Created",
@@ -1340,8 +1336,9 @@ class UnicommerceDataService:
                         )
                     )
                     parsed_dt = self._normalize_dt(parsed_dt)
-
-                    if parsed_dt and (parsed_dt < from_date or parsed_dt > to_date):
+                    if parsed_dt is None:
+                        continue
+                    if parsed_dt < from_date or parsed_dt > to_date:
                         continue
 
                     rtype = self._normalize_return_type(
@@ -1365,7 +1362,9 @@ class UnicommerceDataService:
                             "invoiceCode": self._safe_str(
                                 self._pick(raw, "Invoice number", "Invoice Code", "invoiceCode")
                             ),
-                            "channel": self._safe_str(self._pick(raw, "Channel Name", "channel") or "UNKNOWN"),
+                            "channel": self._safe_str(
+                                self._pick(raw, "Channel entry", "Channel Name", "channel") or "UNKNOWN"
+                            ),
                             "returnType": rtype,
                             "sku": self._safe_str(self._pick(raw, "Product SKU Code", "Product SKU", "sku")),
                             "itemName": self._safe_str(

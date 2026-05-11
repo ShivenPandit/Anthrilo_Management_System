@@ -270,6 +270,7 @@ class SalesReturnRecord(Base):
 
     invoice_number = Column(Text, nullable=True)
     channel_entry = Column(Text, nullable=True)
+    channel = Column(String(120), nullable=True, index=True)
     product_name = Column(Text, nullable=True)
     unit_price = Column(Text, nullable=True)
     currency = Column(Text, nullable=True)
