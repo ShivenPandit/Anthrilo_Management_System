@@ -1145,6 +1145,14 @@ class UnicommerceService:
 
             payload = payload_map.get(normalized_return_code)
             if payload is None:
+                channel_raw = self._safe_str(
+                    row.get("Channel entry")
+                    or row.get("Channel Name")
+                    or row.get("channelName")
+                    or "UNKNOWN"
+                )
+                channel_normalized = channel_raw.replace(" ", "_")
+
                 payload_map[normalized_return_code] = {
                     "return_code": normalized_return_code,
                     "order_id": order_id or "UNKNOWN",
@@ -1159,7 +1167,8 @@ class UnicommerceService:
                     "refund_amount": refund_amount,
                     "return_status": return_status,
                     "invoice_number": self._safe_str(row.get("Invoice number")),
-                    "channel_entry": self._safe_str(row.get("Channel entry")),
+                    "channel_entry": channel_raw,
+                    "channel": channel_normalized,
                     "product_name": self._safe_str(row.get("Product Name")),
                     "unit_price": self._safe_str(row.get("Unit Price")),
                     "currency": self._safe_str(row.get("Currency")),
@@ -1169,7 +1178,13 @@ class UnicommerceService:
                     "igst": self._safe_str(row.get("IGST")),
                     "utgst": self._safe_str(row.get("UTGST")),
                     "cess": self._safe_str(row.get("CESS")),
-                    "dispatch_or_cancellation_date": self._safe_str(row.get("Dispatch Date/Cancellation Date")),
+                    "dispatch_or_cancellation_date": self._safe_str(
+                        row.get("Dispatch Date/Cancellation Date")
+                        or row.get("Return Date")
+                        or row.get("returnDate")
+                        or row.get("Invoice Date")
+                        or row.get("invoiceDate")
+                    ),
                     "customer_gstin": self._safe_str(row.get("Customer GSTIN")),
                     "channel_party_gstin": self._safe_str(row.get("Channel_Party GSTIN")),
                     "product_hsn_code": self._safe_str(row.get("Product HSN Code")),
@@ -1202,6 +1217,7 @@ class UnicommerceService:
                         "return_status": stmt.excluded.return_status,
                         "invoice_number": stmt.excluded.invoice_number,
                         "channel_entry": stmt.excluded.channel_entry,
+                        "channel": stmt.excluded.channel,
                         "product_name": stmt.excluded.product_name,
                         "unit_price": stmt.excluded.unit_price,
                         "currency": stmt.excluded.currency,
