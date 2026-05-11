@@ -16,19 +16,6 @@ class ProductionPlanningService:
     REQUIRED_COLUMNS = {"sku", "cutting_plan", "cutting", "stitching", "finishing"}
     OPTIONAL_COLUMNS = {"style_code", "name", "size", "type"}
     HISTORY_RETENTION_DAYS = 30
-    COLUMN_ALIASES = {
-        "sku_code": "sku",
-        "sku": "sku",
-        "style_code": "style_code",
-        "name": "name",
-        "size": "size",
-        "type": "type",
-        "cutting_pcs": "cutting_plan",
-        "cutting_plan": "cutting_plan",
-        "cutting": "cutting",
-        "stitching": "stitching",
-        "finishing": "finishing",
-    }
 
     def __init__(self, db: Session):
         self.db = db
@@ -327,16 +314,15 @@ class ProductionPlanningService:
             raise ValueError("CSV is empty")
 
         headers = [self._canonical_column_name(h) for h in reader.fieldnames]
-        normalized_headers = [self.COLUMN_ALIASES.get(h, h) for h in headers]
-        missing = [c for c in sorted(self.REQUIRED_COLUMNS) if c not in normalized_headers]
+        missing = [c for c in sorted(self.REQUIRED_COLUMNS) if c not in headers]
         if missing:
             raise ValueError(f"Missing required columns: {', '.join(missing)}")
 
         allowed_columns = self.REQUIRED_COLUMNS | self.OPTIONAL_COLUMNS
         column_key_map = {
-            str(raw_key or ""): self.COLUMN_ALIASES.get(self._canonical_column_name(raw_key), self._canonical_column_name(raw_key))
+            str(raw_key or ""): self._canonical_column_name(raw_key)
             for raw_key in reader.fieldnames
-            if self.COLUMN_ALIASES.get(self._canonical_column_name(raw_key), self._canonical_column_name(raw_key)) in allowed_columns
+            if self._canonical_column_name(raw_key) in allowed_columns
         }
 
         rows = list(reader)
