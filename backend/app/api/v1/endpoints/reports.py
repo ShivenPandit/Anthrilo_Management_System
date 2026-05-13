@@ -154,13 +154,14 @@ def get_garment_planning_report(
     start_date: date = Query(..., description="Start date (YYYY-MM-DD)"),
     end_date: date = Query(..., description="End date (YYYY-MM-DD)"),
     season: str = Query("both", description="Season filter: summer, winter, or both"),
+    type: Optional[str] = Query(None, description="Type filter (comma-separated for multiple)"),
     page: int = Query(1, ge=1, description="Page number (20 SKUs per page)"),
     page_size: int = Query(20, ge=1, le=500, description="Rows per page"),
     db: Session = Depends(get_db)
 ):
     """Get garment planning report for simple Shopify SKUs with sales in range (paginated)."""
     service = ReportsService(db)
-    return service.garment_planning_report(start_date, end_date, season, page=page, page_size=page_size)
+    return service.garment_planning_report(start_date, end_date, season, type_filter=type, page=page, page_size=page_size)
 
 
 @router.get("/garments/planning-report/export.csv")
@@ -168,11 +169,12 @@ def export_garment_planning_report_csv(
     start_date: date = Query(..., description="Start date (YYYY-MM-DD)"),
     end_date: date = Query(..., description="End date (YYYY-MM-DD)"),
     season: str = Query("both", description="Season filter: summer, winter, or both"),
+    type: Optional[str] = Query(None, description="Type filter (comma-separated for multiple)"),
     db: Session = Depends(get_db),
 ):
     """Download full garment planning report as CSV (same filters as the table)."""
     service = ReportsService(db)
-    body = service.garment_planning_report_csv(start_date, end_date, season)
+    body = service.garment_planning_report_csv(start_date, end_date, season, type_filter=type)
     fname = f"garment-planning_{start_date.isoformat()}_{end_date.isoformat()}.csv"
     return Response(
         content=body,
@@ -197,22 +199,24 @@ def get_fabric_planning_report(
 def get_production_planning_status_report(
     start_date: date = Query(..., description="Start date (YYYY-MM-DD)"),
     end_date: date = Query(..., description="End date (YYYY-MM-DD)"),
+    type: Optional[str] = Query(None, description="Type filter (comma-separated for multiple)"),
     db: Session = Depends(get_db),
 ):
     """Get production planning & status report."""
     service = ReportsService(db)
-    return service.production_planning_status_report(start_date=start_date, end_date=end_date)
+    return service.production_planning_status_report(start_date=start_date, end_date=end_date, type_filter=type)
 
 
 @router.get("/garments/production-planning-status-report/export.csv")
 def export_production_planning_status_report_csv(
     start_date: date = Query(..., description="Start date (YYYY-MM-DD)"),
     end_date: date = Query(..., description="End date (YYYY-MM-DD)"),
+    type: Optional[str] = Query(None, description="Type filter (comma-separated for multiple)"),
     db: Session = Depends(get_db),
 ):
     """Download production planning & status report as CSV."""
     service = ReportsService(db)
-    body = service.production_planning_status_report_csv(start_date=start_date, end_date=end_date)
+    body = service.production_planning_status_report_csv(start_date=start_date, end_date=end_date, type_filter=type)
     fname = f"production-planning-status_{start_date.isoformat()}_{end_date.isoformat()}.csv"
     return Response(
         content=body,

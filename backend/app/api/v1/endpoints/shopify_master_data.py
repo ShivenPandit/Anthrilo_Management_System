@@ -22,6 +22,30 @@ from app.services.cache_service import CacheService
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+CACHE_PREFIX = "shopify_master_data"
+
+
+def _invalidate_cache():
+    CacheService.delete_pattern(f"{CACHE_PREFIX}*")
+
+
+@router.get("/meta/filter-options", response_model=dict)
+def get_filter_options(db: Session = Depends(get_db)):
+    """Return distinct values for type."""
+    cache_key = f"{CACHE_PREFIX}:filter_options"
+    cached = CacheService.get(cache_key)
+    if cached:
+        return cached
+
+    def distinct_vals(col):
+        return sorted([r[0] for r in db.query(col).distinct().all() if r[0]])
+
+    result = {
+        "types": distinct_vals(ShopifyMasterData.type),
+    }
+    CacheService.set(cache_key, result, CacheService.TTL_MEDIUM)
+    return result
+
 
 HEADER_MAP = {
     "variant sku": "variant_sku",

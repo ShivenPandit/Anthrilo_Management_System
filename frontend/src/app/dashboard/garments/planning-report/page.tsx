@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     AlertCircle,
     CalendarDays,
@@ -18,6 +18,7 @@ interface PlanningReportItem {
     style_code: string;
     sku: string;
     name: string;
+    type: string;
     size: string;
     /** Sum of sales_orders.qty for order_date in the selected range (same rules as backend). */
     net_sale_qty: number;
@@ -129,6 +130,8 @@ export default function GarmentPlanningReportPage() {
     const [startDate, setStartDate] = useState(defaultStart);
     const [endDate, setEndDate] = useState(defaultEnd);
     const [season, setSeason] = useState<'both' | 'summer' | 'winter'>('both');
+    const [selectedType, setSelectedType] = useState<string>('all');
+    const [typeOptions, setTypeOptions] = useState<string[]>([]);
     const [report, setReport] = useState<PlanningReportResponse | null>(null);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
@@ -136,19 +139,37 @@ export default function GarmentPlanningReportPage() {
     const [fabricReport, setFabricReport] = useState<FabricPlanningReportResponse | null>(null);
     const [fabricLoading, setFabricLoading] = useState(false);
 
+    // Fetch type options on mount
+    useEffect(() => {
+        const fetchTypes = async () => {
+            try {
+                const { data } = await apiClient.get<{ types: string[] }>('/shopify-master-data/meta/filter-options');
+                setTypeOptions(data.types ?? []);
+            } catch {
+                setTypeOptions([]);
+            }
+        };
+        fetchTypes();
+    }, []);
+
     const loadReport = useCallback(
         async (nextPage: number) => {
             setLoading(true);
             setErrorMessage(null);
             try {
+                const params: Record<string, string | number> = {
+                    start_date: startDate,
+                    end_date: endDate,
+                    season,
+                    page: nextPage,
+                    page_size: PAGE_SIZE,
+                };
+                // Add type filter if not "all"
+                if (selectedType !== 'all') {
+                    params.type = selectedType;
+                }
                 const { data } = await apiClient.get<PlanningReportResponse>('/reports/garments/planning-report', {
-                    params: {
-                        start_date: startDate,
-                        end_date: endDate,
-                        season,
-                        page: nextPage,
-                        page_size: PAGE_SIZE,
-                    },
+                    params,
                 });
                 setReport(data);
             } catch (error: unknown) {
@@ -169,7 +190,7 @@ export default function GarmentPlanningReportPage() {
                 setLoading(false);
             }
         },
-        [startDate, endDate, season],
+        [startDate, endDate, season, selectedType],
     );
 
     const handleGenerate = () => {
@@ -207,6 +228,10 @@ export default function GarmentPlanningReportPage() {
             end_date: endDate,
             season,
         });
+        // Add type filter if not "all"
+        if (selectedType !== 'all') {
+            params.append('type', selectedType);
+        }
         const origin = getApiOrigin();
         const url = `${origin}/api/v1/reports/garments/planning-report/export.csv?${params.toString()}`;
         const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
@@ -299,7 +324,7 @@ export default function GarmentPlanningReportPage() {
             </div>
 
             <div className="card space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                     <label className="space-y-2 text-sm">
                         <span className="flex items-center gap-2 font-medium text-slate-600 dark:text-slate-300">
                             <CalendarDays className="h-4 w-4" /> Start Date
@@ -336,6 +361,23 @@ export default function GarmentPlanningReportPage() {
                             <option value="winter">Winter</option>
                         </select>
                     </label>
+                    <label className="space-y-2 text-sm">
+                        <span className="flex items-center gap-2 font-medium text-slate-600 dark:text-slate-300">
+                            <Filter className="h-4 w-4" /> Type
+                        </span>
+                        <select
+                            value={selectedType}
+                            onChange={(e) => setSelectedType(e.target.value)}
+                            className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2"
+                        >
+                            <option value="all">Select All</option>
+                            {typeOptions.map((type) => (
+                                <option key={type} value={type}>
+                                    {type}
+                                </option>
+                            ))}
+                        </select>
+                    </label>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
@@ -366,6 +408,7 @@ export default function GarmentPlanningReportPage() {
                             setStartDate(defaultStart);
                             setEndDate(defaultEnd);
                             setSeason('both');
+                            setSelectedType('all');
                         }}
                         className="inline-flex items-center gap-2 rounded-lg border border-slate-300 dark:border-slate-700 px-4 py-2 text-sm font-medium hover:bg-slate-50 dark:hover:bg-slate-800"
                     >
@@ -420,6 +463,7 @@ export default function GarmentPlanningReportPage() {
                                             'STYLE CODE',
                                             'SKU',
                                             'NAME',
+                                            'TYPE',
                                             'Size',
                                             'Net sale (qty)',
                                             'good inventory',
@@ -452,6 +496,7 @@ export default function GarmentPlanningReportPage() {
                                             <td className="px-4 py-3 whitespace-nowrap">{item.style_code || '-'}</td>
                                             <td className="px-4 py-3 whitespace-nowrap font-mono text-xs">{item.sku}</td>
                                             <td className="px-4 py-3 min-w-[280px]">{item.name || '-'}</td>
+                                            <td className="px-4 py-3 whitespace-nowrap">{item.type || '-'}</td>
                                             <td className="px-4 py-3 whitespace-nowrap">{item.size || '-'}</td>
                                             <td className="px-4 py-3 text-right whitespace-nowrap">
                                                 {formatNumber(item.net_sale_qty)}
@@ -497,7 +542,7 @@ export default function GarmentPlanningReportPage() {
                                     ))}
                                     {!items.length && (
                                         <tr>
-                                            <td colSpan={16} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
+                                            <td colSpan={17} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
                                                 No planning rows on this page for the selected filters.
                                             </td>
                                         </tr>
