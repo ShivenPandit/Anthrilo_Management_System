@@ -1,7 +1,7 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { ChevronLeft, ChevronRight, Download, Loader2, RefreshCw, Search } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { ChevronLeft, ChevronRight, Download, Filter, Loader2, RefreshCw, Search } from 'lucide-react';
 
 import { apiClient, getApiOrigin } from '@/lib/api-client';
 import { useToast } from '@/shared/components';
@@ -12,6 +12,7 @@ type StatusRow = {
     sku: string;
     size: string;
     name: string;
+    type: string;
     required_qty: number;
     cutting_plan: number;
     cutting: number;
@@ -51,11 +52,26 @@ export default function ProductionPlanningStatusReportPage() {
 
     const [startDate, setStartDate] = useState(DEFAULT_START_DATE);
     const [endDate, setEndDate] = useState(DEFAULT_END_DATE);
+    const [selectedType, setSelectedType] = useState<string>('all');
+    const [typeOptions, setTypeOptions] = useState<string[]>([]);
     const [report, setReport] = useState<StatusReportResponse | null>(null);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [csvLoading, setCsvLoading] = useState(false);
     const [currentPage, setCurrentPage] = useState(1);
+
+    // Fetch type options on mount
+    useEffect(() => {
+        const fetchTypes = async () => {
+            try {
+                const { data } = await apiClient.get<{ types: string[] }>('/shopify-master-data/meta/filter-options');
+                setTypeOptions(data.types ?? []);
+            } catch {
+                setTypeOptions([]);
+            }
+        };
+        fetchTypes();
+    }, []);
 
     const totalRows = report?.items.length ?? 0;
     const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
@@ -68,11 +84,15 @@ export default function ProductionPlanningStatusReportPage() {
         setLoading(true);
         setErrorMessage(null);
         try {
+            const params: Record<string, string> = {
+                start_date: startDate,
+                end_date: endDate,
+            };
+            if (selectedType !== 'all') {
+                params.type = selectedType;
+            }
             const response = await apiClient.get<StatusReportResponse>('/reports/garments/production-planning-status-report', {
-                params: {
-                    start_date: startDate,
-                    end_date: endDate,
-                },
+                params,
             });
             setReport(response.data);
             setCurrentPage(1);
@@ -93,6 +113,9 @@ export default function ProductionPlanningStatusReportPage() {
             start_date: startDate,
             end_date: endDate,
         });
+        if (selectedType !== 'all') {
+            params.append('type', selectedType);
+        }
 
         const origin = getApiOrigin();
         const url = `${origin}/api/v1/reports/garments/production-planning-status-report/export.csv?${params.toString()}`;
@@ -138,6 +161,7 @@ export default function ProductionPlanningStatusReportPage() {
     const handleReset = () => {
         setStartDate(DEFAULT_START_DATE);
         setEndDate(DEFAULT_END_DATE);
+        setSelectedType('all');
         setReport(null);
         setErrorMessage(null);
         setCurrentPage(1);
@@ -153,7 +177,7 @@ export default function ProductionPlanningStatusReportPage() {
             </div>
 
             <div className="card space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                     <div>
                         <label className="mb-1.5 block text-xs font-medium text-slate-500 dark:text-slate-400">Start Date</label>
                         <input
@@ -171,6 +195,23 @@ export default function ProductionPlanningStatusReportPage() {
                             onChange={(e) => setEndDate(e.target.value)}
                             className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
                         />
+                    </div>
+                    <div>
+                        <label className="mb-1.5 block text-xs font-medium text-slate-500 dark:text-slate-400">
+                            <Filter className="inline h-3 w-3 mr-1" /> Type
+                        </label>
+                        <select
+                            value={selectedType}
+                            onChange={(e) => setSelectedType(e.target.value)}
+                            className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2 text-sm"
+                        >
+                            <option value="all">Select All</option>
+                            {typeOptions.map((type) => (
+                                <option key={type} value={type}>
+                                    {type}
+                                </option>
+                            ))}
+                        </select>
                     </div>
                 </div>
 
@@ -240,6 +281,7 @@ export default function ProductionPlanningStatusReportPage() {
                                             'SKU',
                                             'Size',
                                             'NAME',
+                                            'TYPE',
                                             'Required QTY',
                                             'Cutting Plan',
                                             'Cutting',
@@ -266,6 +308,7 @@ export default function ProductionPlanningStatusReportPage() {
                                                 <td className="px-4 py-3 font-mono text-xs whitespace-nowrap">{row.sku}</td>
                                                 <td className="px-4 py-3 whitespace-nowrap">{row.size || '-'}</td>
                                                 <td className="px-4 py-3 whitespace-nowrap">{row.name || '-'}</td>
+                                                <td className="px-4 py-3 whitespace-nowrap">{row.type || '-'}</td>
                                                 <td className="px-4 py-3 text-right whitespace-nowrap">{formatNumber(row.required_qty, 2)}</td>
                                                 <td className="px-4 py-3 text-right whitespace-nowrap">{formatNumber(row.cutting_plan)}</td>
                                                 <td className="px-4 py-3 text-right whitespace-nowrap">{formatNumber(row.cutting)}</td>
@@ -277,7 +320,7 @@ export default function ProductionPlanningStatusReportPage() {
                                         ))
                                     ) : (
                                         <tr>
-                                            <td colSpan={12} className="px-4 py-10 text-center text-slate-500">
+                                            <td colSpan={13} className="px-4 py-10 text-center text-slate-500">
                                                 No rows found for selected date range.
                                             </td>
                                         </tr>

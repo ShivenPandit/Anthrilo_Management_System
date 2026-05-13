@@ -314,6 +314,7 @@ class ReportsService:
         start_date: date,
         end_date: date,
         season: str = "both",
+        type_filter: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Collect full garment planning rows for ALL Shopify SKUs from master data."""
 
@@ -327,9 +328,17 @@ class ReportsService:
 
         # Query ALL SKUs from master data WITHOUT filtering by season or bundle type
         # This ensures every SKU in the master catalog is included in the report
-        masters = self.db.query(ShopifyMasterData).order_by(
+        masters_query = self.db.query(ShopifyMasterData).order_by(
             ShopifyMasterData.variant_sku.asc(),
-        ).all()
+        )
+
+        # Apply type filter if provided (comma-separated list of types)
+        if type_filter:
+            type_list = [t.strip() for t in type_filter.split(",") if t.strip()]
+            if type_list:
+                masters_query = masters_query.filter(ShopifyMasterData.type.in_(type_list))
+
+        masters = masters_query.all()
 
         sku_values = [
             (row.variant_sku or "").strip()
@@ -420,6 +429,7 @@ class ReportsService:
                 "style_code": master.style_code,
                 "sku": sku,
                 "name": master.title,
+                "type": master.type,
                 "size": (master.size or "-").strip() or (sales_row.get("size") or "-"),
                 "net_sale_qty": net_sales,
                 "net_sales": net_sales,
@@ -444,6 +454,7 @@ class ReportsService:
         start_date: date,
         end_date: date,
         season: str = "both",
+        type_filter: Optional[str] = None,
         page: int = 1,
         page_size: int = 20,
     ) -> Dict[str, Any]:
@@ -453,7 +464,7 @@ class ReportsService:
             start_date, end_date = end_date, start_date
 
         season_filter = (season or "both").strip().lower()
-        all_items = self._collect_garment_planning_rows(start_date, end_date, season)
+        all_items = self._collect_garment_planning_rows(start_date, end_date, season, type_filter=type_filter)
 
         status_breakdown = {"RED": 0, "YELLOW": 0, "GREEN": 0}
         total_net_sale_qty = 0
@@ -508,12 +519,14 @@ class ReportsService:
         start_date: date,
         end_date: date,
         season: str = "both",
+        type_filter: Optional[str] = None,
     ) -> bytes:
-        rows = self._collect_garment_planning_rows(start_date, end_date, season)
+        rows = self._collect_garment_planning_rows(start_date, end_date, season, type_filter=type_filter)
         headers = [
             "style_code",
             "sku",
             "name",
+            "type",
             "size",
             "net_sale_qty",
             "good_inventory",
@@ -626,6 +639,7 @@ class ReportsService:
         self,
         start_date: date,
         end_date: date,
+        type_filter: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Combine production planning raw data with required qty and scanning inventory."""
 
@@ -633,7 +647,7 @@ class ReportsService:
             start_date, end_date = end_date, start_date
 
         # Required quantity source: garment planning report logic for same date window.
-        garment_rows = self._collect_garment_planning_rows(start_date, end_date, season="both")
+        garment_rows = self._collect_garment_planning_rows(start_date, end_date, season="both", type_filter=type_filter)
         required_qty_map: Dict[str, float] = {
             str(row.get("sku") or "").strip().upper(): float(row.get("required_qty") or 0.0)
             for row in garment_rows
@@ -698,6 +712,7 @@ class ReportsService:
                     "sku": sku,
                     "size": row.size or "",
                     "name": row.name or "",
+                    "type": row.type or "",
                     "required_qty": round(required_qty, 2),
                     "cutting_plan": cutting_plan,
                     "cutting": cutting,
@@ -727,8 +742,9 @@ class ReportsService:
         self,
         start_date: date,
         end_date: date,
+        type_filter: Optional[str] = None,
     ) -> bytes:
-        payload = self.production_planning_status_report(start_date=start_date, end_date=end_date)
+        payload = self.production_planning_status_report(start_date=start_date, end_date=end_date, type_filter=type_filter)
         rows = payload.get("items") or []
 
         headers = [
@@ -737,6 +753,7 @@ class ReportsService:
             "SKU",
             "Size",
             "NAME",
+            "TYPE",
             "Required QTY",
             "Cutting Plan",
             "Cutting",
@@ -757,6 +774,7 @@ class ReportsService:
                     row.get("sku", ""),
                     row.get("size", ""),
                     row.get("name", ""),
+                    row.get("type", ""),
                     row.get("required_qty", 0),
                     row.get("cutting_plan", 0),
                     row.get("cutting", 0),
