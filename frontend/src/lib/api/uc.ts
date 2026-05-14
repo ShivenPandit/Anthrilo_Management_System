@@ -85,14 +85,14 @@ export const ucCatalog = {
 
     // Inventory totals (independent of pagination)
     getInventorySummary: () => {
-        return apiClient.get('/unicommerce-data/inventory-summary');
+        return apiClient.get('/uc/catalog/inventory/summary');
     },
 };
 
 // Inventory (used by the stock-analysis page)
 export const ucInventory = {
     getSummary: () =>
-        apiClient.get('/unicommerce-data/inventory-summary').then((res) => {
+        apiClient.get('/uc/catalog/inventory/summary').then((res) => {
             const d = res.data || {};
             return {
                 data: {

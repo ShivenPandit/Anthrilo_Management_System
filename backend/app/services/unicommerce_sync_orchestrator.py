@@ -29,6 +29,7 @@ from app.services.cache_service import CacheService
 from app.services.websocket_manager import ws_manager
 from app.services.unicommerce_data_service import get_unicommerce_data_service
 from app.services.unicommerce import get_unicommerce_service
+from app.services.parity_validator import ParityValidator
 
 logger = logging.getLogger(__name__)
 
@@ -443,7 +444,37 @@ class UnicommerceSyncOrchestrator:
 
     async def _run_inventory_scheduler_job(self) -> Dict[str, Any]:
         facility = str(settings.UNICOMMERCE_SYNC_INVENTORY_FACILITY_CODE or "anthrilo").strip() or "anthrilo"
-        return await self.sync_inventory(facility_code=facility)
+        
+        lock = await self._acquire_lock("inventory")
+        if not lock:
+            return {
+                "success": False,
+                "message": "Inventory sync lock is already held",
+            }
+            
+        try:
+            # Check retry safety limit
+            retry_key = f"uc:sync:retries:inventory_snapshot:{facility}"
+            if redis_client:
+                retries = int(redis_client.get(retry_key) or 0)
+                if retries >= 3:
+                    logger.error(f"Inventory sync blocked: exceeded max retries (3) for facility {facility}")
+                    return {"success": False, "error": "Max retries exceeded"}
+
+            from app.services.sync_inventory_snapshot import fetch_and_sync_inventory
+            res = await fetch_and_sync_inventory(facility)
+            
+            if res.get("success"):
+                if redis_client:
+                    redis_client.delete(retry_key)  # Reset on success
+            else:
+                if redis_client:
+                    redis_client.incr(retry_key)
+                    redis_client.expire(retry_key, 3600)  # 1 hour cooldown window
+
+            return res
+        finally:
+            await self._release_lock(lock)
 
     async def run_due_scheduler_jobs(self) -> Dict[str, Any]:
         self._bootstrap_scheduler_state()
@@ -649,11 +680,51 @@ class UnicommerceSyncOrchestrator:
         returns = await self.sync_returns_window(from_date, now_utc)
         inventory = await self.sync_inventory()
 
+        # --- Data Parity Validation & Auto Recovery ---
+        db = SessionLocal()
+        parity_results = {}
+        try:
+            parity_results = ParityValidator.validate_recent_parity(db, days_back=safe_days)
+            
+            # Cache for API to avoid synchronous heavy queries
+            CacheService.set("system:parity_health", parity_results, ttl=86400)
+            
+            # Record audit log
+            total_fetched = int((orders.get("total_records") or 0) + (returns.get("total_items") or 0))
+            total_inserted = int((orders.get("normalized_rows") or 0) + (returns.get("normalized_rows") or 0))
+            ParityValidator.record_sync_audit(
+                db=db,
+                entity="incremental_sync",
+                rows_fetched=total_fetched,
+                rows_inserted=total_inserted,
+                duration=0.0, 
+            )
+            
+            if not parity_results.get("healthy", True):
+                window_key = f"uc:sync:auto_recover:{start_day_ist.isoformat()}"
+                retry_count = int(CacheService.get(window_key) or 0)
+                
+                if retry_count < 3:
+                    logger.warning(f"Parity mismatch detected: {parity_results}. Triggering automatic recovery (Attempt {retry_count + 1}/3).")
+                    CacheService.set(window_key, retry_count + 1, ttl=86400)
+                    await self.run_backfill(
+                        from_date=from_date - timedelta(days=2), # deeper backfill
+                        to_date=now_utc,
+                        include_inventory=False,
+                    )
+                else:
+                    logger.error(f"Auto-recovery aborted: Max retries (3) reached for window {window_key}. System overload protection active.")
+        except Exception as e:
+            logger.error(f"Failed to run parity validation: {e}")
+        finally:
+            db.close()
+
         return {
             "success": bool(orders.get("success")) and bool(returns.get("success")) and bool(inventory.get("success")),
             "profile": "incremental",
             "from_date": from_date.isoformat(),
             "to_date": now_utc.isoformat(),
+            "parity": parity_results,
             "orders": orders,
             "returns": returns,
             "inventory": inventory,

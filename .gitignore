@@ -67,6 +67,9 @@ backend/app/data/unicommerce_tokens.json
 .DS_Store
 Thumbs.db
 
+# --- Claude Code -------------------------------------------
+.claude/
+
 # --- Database ---------------------------------------------
 *.db
 *.sqlite

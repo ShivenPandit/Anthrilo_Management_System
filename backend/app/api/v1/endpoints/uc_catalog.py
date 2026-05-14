@@ -553,7 +553,45 @@ async def get_inventory_summary(force_refresh: bool = False):
             return {"successful": False, "error": "Inventory export CSV was empty"}
 
         # ── Step 4: Aggregate ──
-        total_skus = len(rows)
+        # The CSV may contain multiple rows per SKU (e.g., if present in multiple facilities)
+        # We must deduplicate by 'itemTypeName' (SKU code) and sum their inventory
+        aggregated_rows = {}
+        for row in rows:
+            sku = (row.get("Item Type Name") or row.get("itemTypeName") or "").strip()
+            if not sku:
+                continue
+                
+            if sku not in aggregated_rows:
+                aggregated_rows[sku] = {
+                    "cat": (row.get("Category Name") or row.get("categoryName") or row.get("Category") or "Uncategorized").strip() or "Uncategorized",
+                    "enabled": False,
+                    "cost_price": _safe_float(row.get("Cost Price") or row.get("costPrice")),
+                    "inv": 0,
+                    "open_sale": 0,
+                    "inv_blocked": 0,
+                    "bad_inv": 0,
+                    "putaway": 0,
+                    "open_purchase": 0,
+                    "pending_assess": 0,
+                }
+                
+            # If any row says it's enabled, we consider it enabled globally
+            enabled_raw = (row.get("Enabled") or row.get("enabled") or "").strip().lower()
+            if enabled_raw in ("true", "1", "yes", "y"):
+                aggregated_rows[sku]["enabled"] = True
+                
+            # Accumulate
+            aggregated_rows[sku]["inv"] += _safe_int(row.get("Inventory") or row.get("inventory"))
+            aggregated_rows[sku]["open_sale"] += _safe_int(row.get("Open Sale") or row.get("openSale"))
+            aggregated_rows[sku]["inv_blocked"] += _safe_int(row.get("Inventory Blocked") or row.get("inventoryBlocked"))
+            aggregated_rows[sku]["bad_inv"] += _safe_int(row.get("Bad Inventory") or row.get("badInventory"))
+            aggregated_rows[sku]["putaway"] += _safe_int(row.get("Putaway Pending") or row.get("putawayPending"))
+            aggregated_rows[sku]["open_purchase"] += _safe_int(row.get("Open Purchase") or row.get("openPurchase"))
+            aggregated_rows[sku]["pending_assess"] += _safe_int(row.get("Pending Inventory Assessment") or row.get("pendingInventoryAssessment"))
+
+        unique_skus = list(aggregated_rows.values())
+        total_skus = len(unique_skus)
+        
         active_count = 0
         facility_skus = 0
         skus_with_stock = 0
@@ -564,55 +602,17 @@ async def get_inventory_summary(force_refresh: bool = False):
 
         category_totals: Dict[str, Dict[str, int]] = {}
 
-        for row in rows:
-            # Column names are Title Case from UC export CSV
-            # Try multiple possible header names
-            cat = (
-                row.get("Category Name")
-                or row.get("categoryName")
-                or row.get("Category")
-                or "Uncategorized"
-            ).strip() or "Uncategorized"
-
-            enabled_raw = (
-                row.get("Enabled")
-                or row.get("enabled")
-                or ""
-            ).strip().lower()
-            enabled = enabled_raw in ("true", "1", "yes", "y")
-
-            inv = _safe_int(
-                row.get("Inventory")
-                or row.get("inventory")
-            )
-            open_sale = _safe_int(
-                row.get("Open Sale")
-                or row.get("openSale")
-            )
-            inv_blocked = _safe_int(
-                row.get("Inventory Blocked")
-                or row.get("inventoryBlocked")
-            )
-            bad_inv = _safe_int(
-                row.get("Bad Inventory")
-                or row.get("badInventory")
-            )
-            putaway = _safe_int(
-                row.get("Putaway Pending")
-                or row.get("putawayPending")
-            )
-            open_purchase = _safe_int(
-                row.get("Open Purchase")
-                or row.get("openPurchase")
-            )
-            pending_assess = _safe_int(
-                row.get("Pending Inventory Assessment")
-                or row.get("pendingInventoryAssessment")
-            )
-            cost_price = _safe_float(
-                row.get("Cost Price")
-                or row.get("costPrice")
-            )
+        for item in unique_skus:
+            cat = item["cat"]
+            enabled = item["enabled"]
+            inv = item["inv"]
+            open_sale = item["open_sale"]
+            inv_blocked = item["inv_blocked"]
+            bad_inv = item["bad_inv"]
+            putaway = item["putaway"]
+            open_purchase = item["open_purchase"]
+            pending_assess = item["pending_assess"]
+            cost_price = item["cost_price"]
 
             if enabled:
                 active_count += 1

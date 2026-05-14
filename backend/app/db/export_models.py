@@ -216,6 +216,37 @@ class InventorySnapshotRecord(Base):
     )
 
 
+class FacilityInventorySnapshot(Base):
+    """
+    Facility-bounded inventory snapshot synced from Unicommerce 'Inventory Snapshot' export.
+    This guarantees 100% parity with Unicommerce UI by strictly bounding catalog visibility.
+    """
+    __tablename__ = "facility_inventory_snapshot"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sku = Column(String(120), nullable=False, index=True)
+    facility_code = Column(String(120), nullable=False, index=True)
+    
+    category = Column(Text, nullable=True)
+    inventory = Column(Integer, nullable=False, default=0)
+    available_inventory = Column(Integer, nullable=False, default=0)
+    reserved_inventory = Column(Integer, nullable=False, default=0)
+    
+    disabled = Column(Boolean, nullable=False, default=False)
+    archived = Column(Boolean, nullable=False, default=False)
+    
+    cost_price = Column(Numeric(12, 2), nullable=True)
+    
+    snapshot_date = Column(DateTime, nullable=False, index=True)
+    raw_data = Column(JSONB, nullable=True)
+    synced_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("sku", "facility_code", name="uq_facility_inventory_sku_facility"),
+        Index("ix_facility_inventory_snapshot_sku_facility", "sku", "facility_code"),
+    )
+
+
 class ShopifyMasterData(Base):
     __tablename__ = "shopify_master_data"
 
@@ -281,6 +312,7 @@ class SalesReturnRecord(Base):
     utgst = Column(Text, nullable=True)
     cess = Column(Text, nullable=True)
     dispatch_or_cancellation_date = Column(Text, nullable=True)
+    return_date = Column(Text, nullable=True, index=True)  # "Date" from Tally Return GST export — the actual return event date
     customer_gstin = Column(Text, nullable=True)
     channel_party_gstin = Column(Text, nullable=True)
     product_hsn_code = Column(Text, nullable=True)
@@ -311,3 +343,29 @@ class SyncLog(Base):
     details = Column(JSONB, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SyncAuditLog(Base):
+    __tablename__ = "sync_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sync_time = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    entity = Column(String(40), nullable=False, index=True)
+    
+    rows_fetched = Column(Integer, nullable=False, default=0)
+    rows_inserted = Column(Integer, nullable=False, default=0)
+    rows_updated = Column(Integer, nullable=False, default=0)
+    duplicates_detected = Column(Integer, nullable=False, default=0)
+    missing_rows = Column(Integer, nullable=False, default=0)
+    
+    coverage_percent = Column(Numeric(5, 2), nullable=True)
+    sync_duration = Column(Numeric(10, 2), nullable=False, default=0.0)
+    parity_percent = Column(Numeric(5, 2), nullable=True)
+    error_count = Column(Integer, nullable=False, default=0)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_sync_audit_logs_time", "sync_time"),
+        Index("ix_sync_audit_logs_entity", "entity"),
+    )

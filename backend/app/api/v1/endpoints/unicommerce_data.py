@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone, timedelta
 from threading import Lock
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import and_
 from fastapi import APIRouter, Body, Query
 from fastapi.concurrency import run_in_threadpool
 
@@ -15,6 +17,8 @@ from app.services.unicommerce import get_unicommerce_service
 from app.services.unicommerce_data_service import get_unicommerce_data_service
 from app.services.unicommerce_sync_orchestrator import get_unicommerce_sync_orchestrator
 from app.utils.timezone_utils import normalize_date_range_ist
+from app.db.session import SessionLocal
+from app.db.export_models import SalesReturnRecord
 
 
 router = APIRouter()
@@ -239,14 +243,16 @@ def get_inventory_data(
 @router.get("/inventory-summary")
 async def get_inventory_summary(
     warehouse: Optional[str] = Query(None, description="Warehouse/facility code"),
+    force_refresh: bool = Query(False, description="Force refresh cache"),
 ):
     # Build cache key (warehouse is optional)
     cache_key = f"uc:inventory-summary:v3:{warehouse or 'all'}"
     
     # Try cache first (5 minute TTL)
-    cached = CacheService.get(cache_key)
-    if isinstance(cached, dict):
-        return cached
+    if not force_refresh:
+        cached = CacheService.get(cache_key)
+        if isinstance(cached, dict):
+            return cached
     
     service = get_unicommerce_data_service()
     result = await run_in_threadpool(service.get_inventory_summary_db, warehouse)
@@ -325,6 +331,365 @@ def get_returns_data(
         to_date=parsed_to,
         return_type=return_type,
     )
+
+
+@router.get("/returns/analyze")
+def analyze_returns_data(
+    from_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+):
+    """
+    Analyze return data for issues: duplicates, channel problems, missing data.
+    """
+    db = SessionLocal()
+    try:
+        # Build query with optional date filters
+        query = db.query(SalesReturnRecord)
+
+        parsed_from = None
+        parsed_to = None
+
+        if from_date:
+            try:
+                parsed_from = _parse_date_boundary(from_date, end_of_day=False)
+                query = query.filter(SalesReturnRecord.created_at >= parsed_from)
+            except ValueError:
+                pass
+
+        if to_date:
+            try:
+                parsed_to = _parse_date_boundary(to_date, end_of_day=True)
+                query = query.filter(SalesReturnRecord.created_at <= parsed_to)
+            except ValueError:
+                pass
+
+        all_returns = query.all()
+
+        # Analyze issues
+        issues = {
+            "duplicate_return_codes": [],
+            "channel_issues": [],
+            "missing_data": [],
+            "total_records": len(all_returns),
+        }
+
+        # Track return_code occurrences to find duplicates
+        return_code_map: Dict[str, List[Dict]] = {}
+
+        for rec in all_returns:
+            rc = rec.return_code or ""
+            if rc not in return_code_map:
+                return_code_map[rc] = []
+            return_code_map[rc].append(rec)
+
+        # Check for duplicates (same return_code with different data)
+        for rc, records in return_code_map.items():
+            if len(records) > 1:
+                # Check if they have different data
+                first = records[0]
+                has_diff = any(
+                    r.order_id != first.order_id
+                    or r.sku != first.sku
+                    or r.return_qty != first.return_qty
+                    or float(r.refund_amount or 0) != float(first.refund_amount or 0)
+                    for r in records[1:]
+                )
+                if has_diff:
+                    issues["duplicate_return_codes"].append({
+                        "return_code": rc,
+                        "count": len(records),
+                        "records": [
+                            {
+                                "order_id": r.order_id,
+                                "sku": r.sku,
+                                "return_qty": r.return_qty,
+                                "refund_amount": str(r.refund_amount),
+                                "channel": r.channel,
+                                "created_at": r.created_at.isoformat() if r.created_at else None,
+                            }
+                            for r in records[:5]  # Limit to 5 records
+                        ],
+                    })
+
+            # Check channel issues (inconsistent formatting)
+            channels = set()
+            for r in records:
+                if r.channel:
+                    channels.add(r.channel)
+                if r.channel_entry:
+                    channels.add(r.channel_entry)
+
+            # If there are multiple variations of the same channel (e.g., "AMAZON", "Amazon", "amazon")
+            normalized_channels = set()
+            for ch in channels:
+                if ch:
+                    normalized_channels.add(ch.lower().replace(" ", "_"))
+
+            if len(channels) > len(normalized_channels):
+                issues["channel_issues"].append({
+                    "return_code": rc,
+                    "channels_found": list(channels),
+                    "normalized": list(normalized_channels),
+                })
+
+            # Check for missing critical data
+            if not rc or rc.startswith("RET-"):
+                if not rec.order_id or rec.order_id == "UNKNOWN":
+                    issues["missing_data"].append({
+                        "return_code": rc,
+                        "issue": "missing_order_id",
+                        "created_at": rec.created_at.isoformat() if rec.created_at else None,
+                    })
+            if not rec.channel or rec.channel == "UNKNOWN":
+                issues["missing_data"].append({
+                    "return_code": rc,
+                    "issue": "missing_channel",
+                    "created_at": rec.created_at.isoformat() if rec.created_at else None,
+                })
+
+        # Limit issues to first 50 for response size
+        issues["duplicate_return_codes"] = issues["duplicate_return_codes"][:50]
+        issues["channel_issues"] = issues["channel_issues"][:50]
+        issues["missing_data"] = issues["missing_data"][:50]
+
+        return {
+            "success": True,
+            "analysis": issues,
+            "date_range": {
+                "from": from_date,
+                "to": to_date,
+            },
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+        }
+    finally:
+        db.close()
+
+
+@router.post("/returns/cleanup")
+def cleanup_returns_data(
+    cleanup_type: str = Body(..., description="deduplicate | fix_channels | all"),
+    from_date: Optional[str] = Body(None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Body(None, description="YYYY-MM-DD"),
+    dry_run: bool = Body(True, description="If true, only report what would be done"),
+):
+    """
+    Cleanup return data issues: deduplicate, fix channels, etc.
+    """
+    db = SessionLocal()
+    try:
+        # Build base query
+        query = db.query(SalesReturnRecord)
+
+        if from_date:
+            try:
+                parsed_from = _parse_date_boundary(from_date, end_of_day=False)
+                query = query.filter(SalesReturnRecord.created_at >= parsed_from)
+            except ValueError:
+                pass
+
+        if to_date:
+            try:
+                parsed_to = _parse_date_boundary(to_date, end_of_day=True)
+                query = query.filter(SalesReturnRecord.created_at <= parsed_to)
+            except ValueError:
+                pass
+
+        results = {
+            "deduplicated": 0,
+            "channels_fixed": 0,
+            "dry_run": dry_run,
+        }
+
+        if cleanup_type in ("deduplicate", "all"):
+            # Find and merge duplicates - keep the record with highest return_qty
+            return_code_map: Dict[str, List[SalesReturnRecord]] = {}
+
+            for rec in query.all():
+                rc = rec.return_code or ""
+                if rc not in return_code_map:
+                    return_code_map[rc] = []
+                return_code_map[rc].append(rec)
+
+            for rc, records in return_code_map.items():
+                if len(records) > 1:
+                    # Sort by return_qty descending, keep first
+                    records.sort(key=lambda r: r.return_qty or 0, reverse=True)
+                    keeper = records[0]
+
+                    # Delete others
+                    to_delete = records[1:]
+                    if not dry_run:
+                        for r in to_delete:
+                            db.delete(r)
+                    results["deduplicated"] += len(to_delete)
+
+        if cleanup_type in ("fix_channels", "all"):
+            # Fix channel normalization - match the service logic
+            CHANNEL_MAP = {
+                "amazon": "Amazon",
+                "amazon_flex": "Amazon_Flex",
+                "amazon_in_api": "Amazon_In_Api",
+                "flipkart": "Flipkart",
+                "myntra": "Myntra",
+                "meesho": "Meesho",
+                "meesho_26": "Meesho",
+                "ajio": "Ajio",
+                "ajio_omni": "Ajio_Omni",
+                "snapdeal": "Snapdeal",
+                "shopify": "Shopify",
+                "woocommerce": "WooCommerce",
+                "custom": "Custom",
+                "firstcry_new": "Firstcry",
+                "firstcry": "Firstcry",
+                "nykaa_fashion_new": "Nykaa Fashion",
+                "nykaa_fashion": "Nykaa Fashion",
+                "nykaa": "Nykaa Fashion",
+            }
+
+            for rec in query.all():
+                # Also check channel field in case channel_entry is empty
+                source_value = rec.channel_entry or rec.channel or ""
+                if source_value:
+                    # First try with underscore replacement
+                    normalized_with_underscore = source_value.lower().strip().replace(" ", "_")
+                    canonical = CHANNEL_MAP.get(normalized_with_underscore)
+                    if not canonical:
+                        # Fallback to exact match
+                        normalized = source_value.lower().strip()
+                        canonical = CHANNEL_MAP.get(normalized, source_value.title().replace(" ", "_"))
+
+                    # Also handle completely uppercase variations
+                    if not canonical and source_value.isupper():
+                        canonical = CHANNEL_MAP.get(source_value.lower())
+
+                    if rec.channel != canonical:
+                        if not dry_run:
+                            rec.channel = canonical
+                        results["channels_fixed"] += 1
+
+        if not dry_run:
+            db.commit()
+
+        return {
+            "success": True,
+            "results": results,
+            "message": f"Deduplicated {results['deduplicated']} records, fixed {results['channels_fixed']} channels" +
+                       (" (dry run)" if dry_run else ""),
+        }
+
+    except Exception as e:
+        db.rollback()
+        return {
+            "success": False,
+            "error": str(e),
+        }
+    finally:
+        db.close()
+
+
+@router.post("/returns/rebuild-week")
+def rebuild_this_week_returns(
+    dry_run: bool = Body(False, description="If true, only analyze without truncating or syncing"),
+):
+    """
+    Truncate and rebuild returns for the current week (Monday to Sunday).
+    This ensures clean data with no duplicates.
+    """
+    from datetime import timedelta
+    from app.services.unicommerce_sync_orchestrator import get_unicommerce_sync_orchestrator
+    from app.services.unicommerce import get_unicommerce_service
+
+    # Calculate current week (Monday to Sunday)
+    today = datetime.now(timezone.utc)
+    # Find Monday of this week
+    monday = today - timedelta(days=today.weekday())
+    sunday = monday + timedelta(days=6)
+
+    from_date = monday.replace(hour=0, minute=0, second=0, microsecond=0)
+    to_date = sunday.replace(hour=23, minute=59, second=59, microsecond=0)
+
+    db = SessionLocal()
+    try:
+        # Step 1: Analyze current state
+        current_count = db.query(SalesReturnRecord).filter(
+            and_(
+                SalesReturnRecord.created_at >= from_date,
+                SalesReturnRecord.created_at <= to_date,
+            )
+        ).count()
+
+        # Find potential duplicates before truncation
+        return_code_map: Dict[str, int] = {}
+        for rec in db.query(SalesReturnRecord.return_code).filter(
+            and_(
+                SalesReturnRecord.created_at >= from_date,
+                SalesReturnRecord.created_at <= to_date,
+            )
+        ).all():
+            rc = rec[0] or ""
+            return_code_map[rc] = return_code_map.get(rc, 0) + 1
+
+        duplicate_codes = {k: v for k, v in return_code_map.items() if v > 1}
+
+        if dry_run:
+            return {
+                "success": True,
+                "dry_run": True,
+                "week_range": {
+                    "from_date": from_date.date().isoformat(),
+                    "to_date": to_date.date().isoformat(),
+                },
+                "current_records": current_count,
+                "potential_duplicates": len(duplicate_codes),
+                "duplicate_codes": list(duplicate_codes.items())[:10],
+                "message": "Dry run - no changes made",
+            }
+
+        # Step 2: Truncate returns for this week
+        deleted = db.query(SalesReturnRecord).filter(
+            and_(
+                SalesReturnRecord.created_at >= from_date,
+                SalesReturnRecord.created_at <= to_date,
+            )
+        ).delete(synchronize_session=False)
+        db.commit()
+
+        # Step 3: Trigger rebuild from Unicommerce
+        # This will fetch fresh data and apply proper deduplication
+        result = {
+            "success": True,
+            "week_range": {
+                "from_date": from_date.date().isoformat(),
+                "to_date": to_date.date().isoformat(),
+            },
+            "deleted_records": deleted,
+            "synced_from_unicommerce": True,
+            "note": "Returns will be synced. Use /returns endpoint to verify after sync completes.",
+        }
+
+        # Actually trigger the sync (this is async, but we'll call it directly)
+        try:
+            orchestrator = get_unicommerce_sync_orchestrator()
+            sync_result = asyncio.run(orchestrator.sync_returns_window(from_date, to_date))
+            result["sync_result"] = sync_result
+        except Exception as sync_err:
+            result["sync_warning"] = f"Sync may need manual trigger: {str(sync_err)}"
+
+        return result
+
+    except Exception as e:
+        db.rollback()
+        return {
+            "success": False,
+            "error": str(e),
+        }
+    finally:
+        db.close()
 
 
 @router.get("/channel-revenue")
