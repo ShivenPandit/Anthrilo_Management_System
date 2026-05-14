@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import logging
 import re
@@ -1187,6 +1187,8 @@ class UnicommerceDataService:
         from_date: datetime,
         to_date: datetime,
         return_type: str = "ALL",
+        from_date_filter: Optional[date] = None,
+        to_date_filter: Optional[date] = None,
     ) -> Dict[str, Any]:
         type_norm = self._safe_str(return_type or "ALL").upper()
         if type_norm not in {"RTO", "CIR", "ALL"}:
@@ -1194,55 +1196,51 @@ class UnicommerceDataService:
 
         db = self._get_db()
         try:
-            items: List[Dict[str, Any]] = []
+            # Use a dict to deduplicate by return_code:sku
+            items_map: Dict[str, Dict[str, Any]] = {}
             last_synced_at = None
-            raw_rows, completed_at = self._raw_return_rows_from_job(db, from_date, to_date)
-            if raw_rows:
-                last_synced_at = completed_at.isoformat() if completed_at else None
-                for raw in raw_rows:
-                    parsed_dt = self._parse_return_report_dt(
-                        self._pick(raw, "Return Date", "returnDate", "Dispatch Date/Cancellation Date", "Date")
-                    )
-                    if parsed_dt is None:
-                        continue
-                    if parsed_dt < from_date or parsed_dt > to_date:
-                        continue
-                    rtype = self._normalize_return_type(self._safe_str(self._pick(raw, "Return Type", "returnType")))
-                    if type_norm != "ALL" and rtype != type_norm:
-                        continue
-                    quantity = self._safe_int(self._pick(raw, "Qty", "QTY", "quantity"), default=1)
-                    if quantity <= 0:
-                        quantity = 1
-                    total_value = self._safe_float(self._pick(raw, "Total", "total", "Sales"), default=0.0)
-                    unit_price = round(total_value / quantity, 2) if quantity > 0 else 0.0
-                    items.append(
-                        {
-                            "saleOrderCode": self._safe_str(
-                                self._pick(raw, "Sale Order Number", "Sale Order Code", "saleOrderCode")
-                            ),
-                            "invoiceCode": self._safe_str(
-                                self._pick(raw, "RP Code", "rpcode", "returnCode", "Invoice number", "invoiceCode")
-                            ),
-                            "channel": self._safe_str(
-                                self._pick(raw, "Channel entry", "Channel Name", "channel") or "UNKNOWN"
-                            ),
-                            "returnType": rtype,
-                            "sku": self._safe_str(self._pick(raw, "Product SKU Code", "Product SKU", "sku")),
-                            "itemName": self._safe_str(self._pick(raw, "Product Name", "Item Name", "itemName")),
-                            "quantity": quantity,
-                            "unitPrice": unit_price,
-                            "refundAmount": round(total_value, 2),
-                            "returnDate": parsed_dt.isoformat(),
-                        }
-                    )
+            data_sources_used = []
 
-            from_day = from_date.date()
-            to_day = to_date.date()
+            # Use explicitly passed date range if available, otherwise fall back to from_date.date()
+            # This avoids timezone conversion issues where UTC date differs from IST date
+            from_day = from_date_filter if from_date_filter else from_date.date()
+            to_day = to_date_filter if to_date_filter else to_date.date()
+            # PRIMARY: use return_date (the "Date" column from Unicommerce's Tally Return GST export)
+            # This is the actual return event date — what Unicommerce uses for its own date filtering.
+            # FALLBACK: for records where return_date is NULL (pre-migration data), try dispatch_or_cancellation_date.
+            return_date_text = func.nullif(SalesReturnRecord.return_date, "")
             dispatch_date_text = func.nullif(SalesReturnRecord.dispatch_or_cancellation_date, "")
-            return_event_date = case(
+
+            # Parse return_date (can be DD-MM-YYYY or YYYY-MM-DD or with time)
+            parsed_return_date = case(
+                (
+                    return_date_text.op("~")(r"^\d{2}-\d{2}-\d{4}$"),
+                    func.to_date(return_date_text, "DD-MM-YYYY"),
+                ),
+                (
+                    return_date_text.op("~")(r"^\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2}$"),
+                    func.to_date(func.substring(return_date_text, 1, 10), "DD-MM-YYYY"),
+                ),
+                (
+                    return_date_text.op("~")(r"^\d{4}-\d{2}-\d{2}$"),
+                    func.to_date(return_date_text, "YYYY-MM-DD"),
+                ),
+                (
+                    return_date_text.op("~")(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$"),
+                    func.to_date(func.substring(return_date_text, 1, 10), "YYYY-MM-DD"),
+                ),
+                else_=None,
+            )
+
+            # Fallback parser for dispatch_or_cancellation_date
+            parsed_dispatch_date = case(
                 (
                     dispatch_date_text.op("~")(r"^\d{2}-\d{2}-\d{4}$"),
                     func.to_date(dispatch_date_text, "DD-MM-YYYY"),
+                ),
+                (
+                    dispatch_date_text.op("~")(r"^\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2}$"),
+                    func.to_date(func.substring(dispatch_date_text, 1, 10), "DD-MM-YYYY"),
                 ),
                 (
                     dispatch_date_text.op("~")(r"^\d{4}-\d{2}-\d{2}$"),
@@ -1254,10 +1252,17 @@ class UnicommerceDataService:
                 ),
                 else_=None,
             )
-            normalized_records = [] if items else (
+
+            # Use return_date if available, else fall back to dispatch_or_cancellation_date
+            return_event_date = func.coalesce(parsed_return_date, parsed_dispatch_date)
+
+            # Query by return event date
+            normalized_records = (
                 db.query(
                     SalesReturnRecord.order_id,
                     SalesReturnRecord.return_code,
+                    SalesReturnRecord.invoice_number,
+                    SalesReturnRecord.sales,
                     SalesReturnRecord.channel_entry,
                     SalesReturnRecord.channel,
                     SalesReturnRecord.return_type,
@@ -1266,6 +1271,7 @@ class UnicommerceDataService:
                     SalesReturnRecord.product_name,
                     SalesReturnRecord.return_qty,
                     SalesReturnRecord.refund_amount,
+                    SalesReturnRecord.return_date,
                     SalesReturnRecord.dispatch_or_cancellation_date,
                     SalesReturnRecord.created_at,
                     SalesReturnRecord.updated_at,
@@ -1280,13 +1286,16 @@ class UnicommerceDataService:
                 .all()
             )
 
+            if normalized_records:
+                data_sources_used.append("normalized_by_return_date")
+
             for record in normalized_records:
-                parsed_dt = self.uc_service._parse_datetime(record.dispatch_or_cancellation_date)
+                # Prefer return_date (the actual return event date) for display, fall back to dispatch date
+                date_for_display = record.return_date or record.dispatch_or_cancellation_date
+                parsed_dt = self.uc_service._parse_datetime(date_for_display)
                 parsed_dt = self._normalize_dt(parsed_dt)
-                if parsed_dt is None:
-                    continue
-                if parsed_dt < from_date or parsed_dt > to_date:
-                    continue
+                return_date_iso = parsed_dt.isoformat() if parsed_dt else ""
+
                 rtype = self._normalize_return_type(record.return_type or record.return_status)
                 if type_norm != "ALL" and rtype != type_norm:
                     continue
@@ -1294,91 +1303,55 @@ class UnicommerceDataService:
                 if quantity <= 0:
                     quantity = 1
                 refund_amount = float(record.refund_amount or 0.0)
+                sales_val_str = getattr(record, "sales", None)
+                sales_val = float(sales_val_str) if sales_val_str else None
                 unit_price = round(refund_amount / quantity, 2) if quantity > 0 else 0.0
-                
-                # Prioritize channel field (from sales export) > channel_entry (description) > UNKNOWN
+
                 channel_value = self._safe_str(record.channel) if record.channel else self._safe_str(record.channel_entry)
                 if not channel_value:
                     channel_value = "UNKNOWN"
-                
-                items.append(
-                    {
+
+                return_code = self._safe_str(record.return_code) or ""
+                sku = self._safe_str(record.sku) or ""
+                key = f"{return_code}:{sku}".upper()
+
+                # Merge: if key exists, sum quantities and amounts (handle duplicates)
+                if key in items_map:
+                    existing = items_map[key]
+                    existing["quantity"] = existing.get("quantity", 0) + quantity
+                    existing["refundAmount"] = round(existing.get("refundAmount", 0) + refund_amount, 2)
+                    if sales_val is not None:
+                        existing["salesValue"] = round(existing.get("salesValue", 0) + sales_val, 2)
+                    existing["unitPrice"] = round(existing["refundAmount"] / existing["quantity"], 2) if existing["quantity"] > 0 else 0
+                else:
+                    # Use clean invoice_number (without SKU suffix) as invoiceCode
+                    # so downstream grouping in get_return_report correctly merges multi-SKU returns
+                    clean_invoice = self._safe_str(record.invoice_number) or self._safe_str(record.return_code).split(":")[0]
+                    items_map[key] = {
                         "saleOrderCode": self._safe_str(record.order_id),
-                        "invoiceCode": self._safe_str(record.return_code),
+                        "invoiceCode": clean_invoice,
                         "channel": channel_value,
                         "returnType": rtype,
-                        "sku": self._safe_str(record.sku),
-                        "itemName": self._safe_str(record.product_name) or self._safe_str(record.sku),
+                        "sku": sku,
+                        "itemName": self._safe_str(record.product_name) or sku,
                         "quantity": quantity,
                         "unitPrice": unit_price,
                         "refundAmount": round(refund_amount, 2),
-                        "returnDate": parsed_dt.isoformat() if parsed_dt else "",
+                        "salesValue": round(sales_val, 2) if sales_val is not None else round(refund_amount, 2),
+                        "returnDate": return_date_iso,
+                        "data_source": "normalized",
                     }
-                )
 
-            data_source = "raw_export_rows" if items else "normalized_sales_returns"
+            # Convert map to list
+            items = list(items_map.values())
 
-            if not items:
-                raw_rows, completed_at = self._raw_return_rows_from_job(db, from_date, to_date)
-                last_synced_at = completed_at.isoformat() if completed_at else None
-                for raw in raw_rows:
-                    parsed_dt = self.uc_service._parse_datetime(
-                        self._pick(
-                            raw,
-                            "Return Date",
-                            "returnDate",
-                            "Dispatch Date/Cancellation Date",
-                            "Date",
-                            "Invoice Date",
-                            "invoiceDate",
-                            "Created",
-                            "created",
-                        )
-                    )
-                    parsed_dt = self._normalize_dt(parsed_dt)
-                    if parsed_dt is None:
-                        continue
-                    if parsed_dt < from_date or parsed_dt > to_date:
-                        continue
-
-                    rtype = self._normalize_return_type(
-                        self._safe_str(self._pick(raw, "Return Type", "returnType"))
-                    )
-                    if type_norm != "ALL" and rtype != type_norm:
-                        continue
-
-                    quantity = self._safe_int(self._pick(raw, "Qty", "QTY", "quantity"), default=1)
-                    if quantity <= 0:
-                        quantity = 1
-
-                    total_value = self._safe_float(self._pick(raw, "Total", "total", "Sales"), default=0.0)
-                    unit_price = round(total_value / quantity, 2) if quantity > 0 else 0.0
-
-                    items.append(
-                        {
-                            "saleOrderCode": self._safe_str(
-                                self._pick(raw, "Sale Order Number", "Sale Order Code", "saleOrderCode")
-                            ),
-                            "invoiceCode": self._safe_str(
-                                self._pick(raw, "Invoice number", "Invoice Code", "invoiceCode")
-                            ),
-                            "channel": self._safe_str(
-                                self._pick(raw, "Channel entry", "Channel Name", "channel") or "UNKNOWN"
-                            ),
-                            "returnType": rtype,
-                            "sku": self._safe_str(self._pick(raw, "Product SKU Code", "Product SKU", "sku")),
-                            "itemName": self._safe_str(
-                                self._pick(raw, "Product Name", "Item Name", "itemName")
-                            ),
-                            "quantity": quantity,
-                            "unitPrice": unit_price,
-                            "refundAmount": round(total_value, 2),
-                            "returnDate": parsed_dt.isoformat() if parsed_dt else "",
-                        }
-                    )
-
-                if raw_rows:
-                    data_source = "raw_export_rows_fallback"
+            # Determine data source for response
+            if "normalized_by_return_date" in data_sources_used or "normalized_by_created_at" in data_sources_used or "normalized_by_dispatch_date" in data_sources_used:
+                data_source = "db_normalized"
+            elif "raw_export_rows" in data_sources_used:
+                data_source = "raw_export_rows"
+            else:
+                data_source = "none"
 
             items.sort(
                 key=lambda x: (
@@ -1396,7 +1369,8 @@ class UnicommerceDataService:
             return {
                 "success": True,
                 "data_source": data_source,
-                "fallback_used": data_source == "raw_export_rows_fallback",
+                "data_sources_used": data_sources_used,
+                "fallback_used": data_source == "raw_export_rows",
                 "from_date": from_date.isoformat(),
                 "to_date": to_date.isoformat(),
                 "return_type": type_norm,
@@ -1875,6 +1849,8 @@ class UnicommerceDataService:
                 from_date=from_dt,
                 to_date=to_dt,
                 return_type=return_type,
+                from_date_filter=start_date,
+                to_date_filter=end_date,
             )
 
             if not returns_data.get("success"):
@@ -1902,7 +1878,8 @@ class UnicommerceDataService:
                 invoice_code = self._safe_str(item.get("invoiceCode"))
                 so_code = self._safe_str(item.get("saleOrderCode"))
                 sku = self._safe_str(item.get("sku"))
-                group_key = invoice_code or f"{so_code}:{sku}" or "UNKNOWN"
+                # Group by saleOrderCode to match Unicommerce return counts (which counts unique orders)
+                group_key = so_code or invoice_code or f"{so_code}:{sku}" or "UNKNOWN"
                 return_groups[group_key].append(item)
 
             self._emit_progress(progress_cb, 52, "Classifying RTO vs CIR and grouping by channel…")
@@ -1941,7 +1918,17 @@ class UnicommerceDataService:
                         qty = 1
 
                     unit_price = self._safe_float(item.get("unitPrice"), default=0.0)
-                    price = unit_price * qty
+                    refund_amt = self._safe_float(item.get("refundAmount"), default=0.0)
+                    sales_val = item.get("salesValue")
+
+                    # Use salesValue directly if available (matches Unicommerce "Sales" column used for Return Value)
+                    # Fallback to refundAmount or unitPrice * qty
+                    if sales_val is not None:
+                        price = self._safe_float(sales_val)
+                    elif refund_amt > 0:
+                        price = refund_amt
+                    else:
+                        price = unit_price * qty
 
                     total_items_count += qty
                     total_value += price
@@ -5748,98 +5735,62 @@ class UnicommerceDataService:
             inv_table = self._resolve_inventory_snapshot_table_name(db)
             inv_table = inv_table or "inventory_snapshots"
 
+            # Use inventory_snapshots as the absolute source of truth for the facility catalog.
+            # This perfectly matches the Unicommerce "Product Master Data" which bounds
+            # catalog visibility by facility association, preventing bloat from global item_master.
             summary_stmt = text(
                 f"""
-                WITH items AS (
-                    SELECT
+                WITH inv AS (
+                    SELECT 
                         sku,
-                        MAX(regexp_replace(COALESCE(category_name,''), '\\s+-\\s+.*$', '')) AS category_name
-                    FROM (
-                        SELECT
-                            trim(COALESCE(NULLIF(payload->>'SKU Code',''), NULLIF(payload->>'Product Code',''), NULLIF(payload->>'itemTypeSKU',''))) AS sku,
-                            COALESCE(NULLIF(payload->>'Category Name',''), NULLIF(payload->>'Category',''), NULLIF(payload->>'categoryName','')) AS category_name,
-                            lower(trim(COALESCE(NULLIF(payload->>'Enabled',''), NULLIF(payload->>'enabled','')))) AS enabled,
-                            upper(trim(COALESCE(NULLIF(payload->>'Sku Type',''), NULLIF(payload->>'SkuType','')))) AS sku_type,
-                            upper(trim(COALESCE(NULLIF(payload->>'Type',''), NULLIF(payload->>'type','')))) AS itype,
-                            COALESCE(NULLIF(payload->>'MRP',''), NULLIF(payload->>'mrp',''), NULLIF(payload->>'Base Price',''), NULLIF(payload->>'basePrice','')) AS mrp
-                        FROM export_rows
-                        WHERE export_job_id = :job_id
-                    ) t
-                    WHERE t.sku IS NOT NULL
-                      AND t.sku <> ''
-                      AND lower(t.sku) NOT IN ('zeroskuu','0','-')
-                      AND t.enabled IN ('true','1','yes','y')
-                      AND t.sku_type = 'GOODS'
-                      AND t.itype = 'SIMPLE'
-                      AND (t.mrp IS NOT NULL AND t.mrp <> '' AND (t.mrp)::numeric > 0)
-                    GROUP BY t.sku
-                ),
-                inv AS (
-                    SELECT sku, SUM(available_qty)::bigint AS inv_qty, SUM(reserved_qty)::bigint AS virt_qty
+                        lower(trim(COALESCE(enabled, ''))) AS enabled,
+                        MAX(regexp_replace(COALESCE(category_name,''), '\\s+-\\s+.*$', '')) AS category_name,
+                        SUM(available_qty)::bigint AS inv_qty,
+                        SUM(reserved_qty)::bigint AS virt_qty
                     FROM {inv_table}
                     WHERE warehouse = :warehouse
-                    GROUP BY sku
+                      AND sku IS NOT NULL
+                      AND sku <> ''
+                      AND lower(sku) NOT IN ('zeroskuu','0','-')
+                    GROUP BY sku, lower(trim(COALESCE(enabled, '')))
                 )
                 SELECT
                     COUNT(*)::bigint AS total_skus,
-                    COUNT(*)::bigint AS enabled_skus,
+                    SUM(CASE WHEN inv.enabled IN ('true','1','yes','y') THEN 1 ELSE 0 END)::bigint AS enabled_skus,
                     SUM(CASE WHEN COALESCE(inv.inv_qty,0) > 0 THEN 1 ELSE 0 END)::bigint AS in_stock_skus,
                     SUM(COALESCE(inv.inv_qty,0))::bigint AS total_inventory,
                     SUM(COALESCE(inv.virt_qty,0))::bigint AS total_virtual,
-                    COUNT(DISTINCT lower(COALESCE(category_name,'Uncategorized')))::bigint AS category_count
-                FROM items
-                LEFT JOIN inv ON inv.sku = items.sku
-                WHERE items.sku IS NOT NULL AND items.sku <> ''
+                    COUNT(DISTINCT lower(COALESCE(inv.category_name,'Uncategorized')))::bigint AS category_count
+                FROM inv
                 """
             )
             srow = db.execute(
                 summary_stmt,
                 {
-                    "job_id": int(item_master_job.id),
                     "warehouse": warehouse_norm,
                 },
             ).mappings().first() or {}
 
             cat_stmt = text(
                 f"""
-                WITH items AS (
-                    SELECT
+                WITH inv AS (
+                    SELECT 
                         sku,
-                        MAX(regexp_replace(COALESCE(category_name,''), '\\s+-\\s+.*$', '')) AS category_name
-                    FROM (
-                        SELECT
-                            trim(COALESCE(NULLIF(payload->>'SKU Code',''), NULLIF(payload->>'Product Code',''), NULLIF(payload->>'itemTypeSKU',''))) AS sku,
-                            COALESCE(NULLIF(payload->>'Category Name',''), NULLIF(payload->>'Category',''), NULLIF(payload->>'categoryName','')) AS category_name,
-                            lower(trim(COALESCE(NULLIF(payload->>'Enabled',''), NULLIF(payload->>'enabled','')))) AS enabled,
-                            upper(trim(COALESCE(NULLIF(payload->>'Sku Type',''), NULLIF(payload->>'SkuType','')))) AS sku_type,
-                            upper(trim(COALESCE(NULLIF(payload->>'Type',''), NULLIF(payload->>'type','')))) AS itype,
-                            COALESCE(NULLIF(payload->>'MRP',''), NULLIF(payload->>'mrp',''), NULLIF(payload->>'Base Price',''), NULLIF(payload->>'basePrice','')) AS mrp
-                        FROM export_rows
-                        WHERE export_job_id = :job_id
-                    ) t
-                    WHERE t.sku IS NOT NULL
-                      AND t.sku <> ''
-                      AND lower(t.sku) NOT IN ('zeroskuu','0','-')
-                      AND t.enabled IN ('true','1','yes','y')
-                      AND t.sku_type = 'GOODS'
-                      AND t.itype = 'SIMPLE'
-                      AND (t.mrp IS NOT NULL AND t.mrp <> '' AND (t.mrp)::numeric > 0)
-                    GROUP BY t.sku
-                ),
-                inv AS (
-                    SELECT sku, SUM(available_qty)::bigint AS inv_qty
+                        MAX(regexp_replace(COALESCE(category_name,''), '\\s+-\\s+.*$', '')) AS category_name,
+                        SUM(available_qty)::bigint AS inv_qty
                     FROM {inv_table}
                     WHERE warehouse = :warehouse
+                      AND sku IS NOT NULL
+                      AND sku <> ''
+                      AND lower(sku) NOT IN ('zeroskuu','0','-')
                     GROUP BY sku
                 )
                 SELECT
-                    COALESCE(NULLIF(items.category_name,''), 'Uncategorized') AS category,
+                    COALESCE(NULLIF(inv.category_name,''), 'Uncategorized') AS category,
                     COUNT(*)::bigint AS skus,
                     SUM(COALESCE(inv.inv_qty,0))::bigint AS inventory,
                     SUM(CASE WHEN COALESCE(inv.inv_qty,0) > 0 THEN 1 ELSE 0 END)::bigint AS in_stock
-                FROM items
-                LEFT JOIN inv ON inv.sku = items.sku
-                WHERE items.sku IS NOT NULL AND items.sku <> ''
+                FROM inv
                 GROUP BY 1
                 ORDER BY inventory DESC
                 """
@@ -5847,7 +5798,6 @@ class UnicommerceDataService:
             cat_rows = db.execute(
                 cat_stmt,
                 {
-                    "job_id": int(item_master_job.id),
                     "warehouse": warehouse_norm,
                 },
             ).mappings().all()

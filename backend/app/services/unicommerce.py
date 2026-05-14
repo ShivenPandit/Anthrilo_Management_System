@@ -15,6 +15,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any, Optional, Tuple, Set
+from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.services.order_date_validation import validate_order_date
@@ -30,6 +31,7 @@ from app.db.export_models import (
     InventorySnapshotRecord,
     SyncLog,
 )
+from app.services.schema_drift_checker import SchemaDriftChecker
 
 logger = logging.getLogger(__name__)
 
@@ -857,6 +859,10 @@ class UnicommerceService:
         skipped = 0
 
         for raw_row in rows:
+            errors = SchemaDriftChecker.validate_integrity("sales_order", raw_row)
+            if errors:
+                logger.warning(f"Integrity check failed for sales row {raw_row.get('Sale Order Code')}: {errors}")
+            
             row = self._normalize_csv_row(raw_row)
 
             order_id = (
@@ -1076,6 +1082,46 @@ class UnicommerceService:
         finally:
             db.close()
 
+    # Channel name standardization map
+    CHANNEL_NORMALIZATION_MAP = {
+        "amazon": "Amazon",
+        "flipkart": "Flipkart",
+        "myntra": "Myntra",
+        "meesho": "Meesho",
+        "meesho_26": "Meesho",
+        "ajio": "Ajio",
+        "snapdeal": "Snapdeal",
+        "shopify": "Shopify",
+        "woocommerce": "WooCommerce",
+        "custom": "Custom",
+        "amazon_in": "Amazon",
+        "fk": "Flipkart",
+        "mt": "Myntra",
+        "firstcry_new": "Firstcry",
+        "firstcry": "Firstcry",
+        "nykaa_fashion_new": "Nykaa Fashion",
+        "nykaa_fashion": "Nykaa Fashion",
+        "nykaa": "Nykaa Fashion",
+    }
+
+    def _normalize_channel(self, channel_raw: str) -> str:
+        """Normalize channel name to standard format."""
+        if not channel_raw:
+            return "UNKNOWN"
+
+        # First, normalize by replacing spaces with underscores, then try mapping
+        normalized_with_underscore = channel_raw.lower().strip().replace(" ", "_")
+        if normalized_with_underscore in self.CHANNEL_NORMALIZATION_MAP:
+            return self.CHANNEL_NORMALIZATION_MAP[normalized_with_underscore]
+
+        # Try exact mapping without underscore replacement
+        normalized_lower = channel_raw.lower().strip()
+        if normalized_lower in self.CHANNEL_NORMALIZATION_MAP:
+            return self.CHANNEL_NORMALIZATION_MAP[normalized_lower]
+
+        # Fallback: title case and replace spaces with underscores
+        return channel_raw.strip().title().replace(" ", "_")
+
     def _upsert_sales_return_rows(self, rows: List[Dict[str, Any]]) -> int:
         if not rows:
             return 0
@@ -1089,6 +1135,10 @@ class UnicommerceService:
         }
 
         for raw_row in rows:
+            errors = SchemaDriftChecker.validate_integrity("return_gst", raw_row)
+            if errors:
+                logger.warning(f"Integrity check failed for return row {raw_row.get('rpcode')}: {errors}")
+                
             row = self._normalize_csv_row(raw_row)
 
             order_id = (
@@ -1111,25 +1161,42 @@ class UnicommerceService:
             if not return_code:
                 return_code = f"RET-{row_hash[:24]}"
 
+            # Normalize return_code to uppercase for consistent deduplication
+            return_code = return_code.upper().strip() if return_code else return_code
+
+            # Also get invoice number for better deduplication
+            invoice_number = self._safe_str(row.get("Invoice number") or row.get("invoiceNumber"))
+
+            # Extract base return code (remove :SKU suffix if present)
+            base_return_code = return_code.split(":")[0] if return_code else ""
+
+            # Use invoice number as primary deduplication key if available, otherwise return code
+            dedup_key = invoice_number.upper().strip() if invoice_number else base_return_code
+
             # A single return code can contain multiple SKUs in one export,
             # so compose a deterministic per-line key for idempotent upserts.
-            return_key_parts = [return_code]
+            return_key_parts = [dedup_key]
             if sku:
-                return_key_parts.append(sku)
+                return_key_parts.append(sku.upper().strip())
             elif order_id:
-                return_key_parts.append(order_id)
+                return_key_parts.append(order_id.upper().strip())
             else:
                 return_key_parts.append(row_hash[:12])
 
             normalized_return_code = ":".join(return_key_parts)
             if len(normalized_return_code) > 120:
-                normalized_return_code = f"{return_code[:80]}:{row_hash[:32]}"
+                normalized_return_code = f"{dedup_key[:80]}:{row_hash[:32]}"
 
             qty = self._safe_int(row.get("Qty") or row.get("QTY") or row.get("quantity") or 1, default=1)
             if qty <= 0:
                 qty = 1
 
-            refund_amount = self._safe_float(row.get("Total") or row.get("total") or row.get("Sales") or 0)
+            # Use Refund Amount as primary source, fall back to Total/Sales only if not available
+            refund_amount = self._safe_float(
+                row.get("Refund Amount") or row.get("refundAmount") or
+                row.get("Total") or row.get("total") or
+                row.get("Sales") or 0
+            )
             return_status = self._safe_str(row.get("Return Type") or row.get("returnType"))
             return_type_upper = return_status.upper()
             if "COURIER" in return_type_upper or "RTO" in return_type_upper:
@@ -1151,12 +1218,13 @@ class UnicommerceService:
                     or row.get("channelName")
                     or "UNKNOWN"
                 )
-                channel_normalized = channel_raw.replace(" ", "_")
+                # Use improved channel normalization
+                channel_normalized = self._normalize_channel(channel_raw)
 
                 payload_map[normalized_return_code] = {
                     "return_code": normalized_return_code,
-                    "order_id": order_id or "UNKNOWN",
-                    "sku": sku,
+                    "order_id": order_id.upper().strip() if order_id else "UNKNOWN",
+                    "sku": sku.upper().strip() if sku else "",
                     "reason": self._safe_str(
                         row.get("Return Reason")
                         or row.get("returnReason")
@@ -1184,6 +1252,12 @@ class UnicommerceService:
                         or row.get("returnDate")
                         or row.get("Invoice Date")
                         or row.get("invoiceDate")
+                    ),
+                    "return_date": self._safe_str(
+                        row.get("Date")
+                        or row.get("date")
+                        or row.get("Return Date")
+                        or row.get("returnDate")
                     ),
                     "customer_gstin": self._safe_str(row.get("Customer GSTIN")),
                     "channel_party_gstin": self._safe_str(row.get("Channel_Party GSTIN")),
@@ -1228,6 +1302,7 @@ class UnicommerceService:
                         "utgst": stmt.excluded.utgst,
                         "cess": stmt.excluded.cess,
                         "dispatch_or_cancellation_date": stmt.excluded.dispatch_or_cancellation_date,
+                        "return_date": stmt.excluded.return_date,
                         "customer_gstin": stmt.excluded.customer_gstin,
                         "channel_party_gstin": stmt.excluded.channel_party_gstin,
                         "product_hsn_code": stmt.excluded.product_hsn_code,
