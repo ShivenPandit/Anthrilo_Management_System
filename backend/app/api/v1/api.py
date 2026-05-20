@@ -3,6 +3,7 @@ from app.api.v1.endpoints import auth, yarns, fabrics, processes, garments, inve
 from app.api.v1.endpoints import integrations
 from app.api.v1.endpoints import unicommerce_data
 from app.api.v1.endpoints import production_planning
+from app.api.v1.endpoints import system
 # Manufacturing Module
 from app.api.v1.endpoints import (
     suppliers, purchase_orders, gate_entry, mrns,
@@ -90,6 +91,10 @@ api_router.include_router(
 # External Integrations (Sales Dashboard)
 api_router.include_router(
     integrations.router, prefix="/integrations", tags=["External Integrations"])
+
+# System health & recovery
+api_router.include_router(
+    system.router, prefix="/system", tags=["System"])
 
 # DB-first Unicommerce analytics data
 api_router.include_router(

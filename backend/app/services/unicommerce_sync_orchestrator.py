@@ -26,6 +26,7 @@ from app.db.export_models import (
     SyncLog,
 )
 from app.services.cache_service import CacheService
+from app.services.sync_state_service import get_sync_state_service
 from app.services.websocket_manager import ws_manager
 from app.services.unicommerce_data_service import get_unicommerce_data_service
 from app.services.unicommerce import get_unicommerce_service
@@ -452,6 +453,9 @@ class UnicommerceSyncOrchestrator:
                 "message": "Inventory sync lock is already held",
             }
             
+        sync_state = get_sync_state_service()
+        sync_state.record_sync_start("inventory_snapshot", sync_mode="normal")
+        start_time = time.perf_counter()
         try:
             # Check retry safety limit
             retry_key = f"uc:sync:retries:inventory_snapshot:{facility}"
@@ -472,6 +476,16 @@ class UnicommerceSyncOrchestrator:
                     redis_client.incr(retry_key)
                     redis_client.expire(retry_key, 3600)  # 1 hour cooldown window
 
+            duration = time.perf_counter() - start_time
+            sync_state.record_sync_result(
+                "inventory_snapshot",
+                success=bool(res.get("success")),
+                completed_at=self._utcnow(),
+                duration_seconds=duration,
+                rows_synced=int(res.get("inserted", 0) or res.get("fetched", 0) or 0),
+                sync_mode="normal",
+                error_message=res.get("error"),
+            )
             return res
         finally:
             await self._release_lock(lock)
@@ -532,7 +546,13 @@ class UnicommerceSyncOrchestrator:
             "evaluated_at": now_utc.isoformat(),
         }
 
-    async def sync_orders_window(self, from_date: datetime, to_date: datetime) -> Dict[str, Any]:
+    async def sync_orders_window(
+        self,
+        from_date: datetime,
+        to_date: datetime,
+        *,
+        sync_mode: str = "normal",
+    ) -> Dict[str, Any]:
         lock = await self._acquire_lock("orders")
         if not lock:
             return {
@@ -542,25 +562,58 @@ class UnicommerceSyncOrchestrator:
                 "to_date": self._ensure_utc(to_date).isoformat(),
             }
 
+        sync_state = get_sync_state_service()
+        sync_state.record_sync_start("sale_orders", sync_mode=sync_mode)
+        start_time = time.perf_counter()
         try:
             result = await self.uc_service.fetch_orders_via_export(
                 self._ensure_utc(from_date),
                 self._ensure_utc(to_date),
             )
+            success = bool(result.get("successful"))
+            duration = time.perf_counter() - start_time
+            rows_synced = int(result.get("normalized_rows", 0) or 0)
+            sync_state.record_sync_result(
+                "sale_orders",
+                success=success,
+                completed_at=self._ensure_utc(to_date),
+                duration_seconds=duration,
+                rows_synced=rows_synced,
+                sync_mode=sync_mode,
+                error_message=result.get("error"),
+            )
             return {
-                "success": bool(result.get("successful")),
+                "success": success,
                 "from_date": self._ensure_utc(from_date).isoformat(),
                 "to_date": self._ensure_utc(to_date).isoformat(),
                 "total_records": int(result.get("totalRecords", 0) or 0),
                 "archived_rows": int(result.get("archived_rows", 0) or 0),
-                "normalized_rows": int(result.get("normalized_rows", 0) or 0),
+                "normalized_rows": rows_synced,
                 "total_time": float(result.get("total_time", 0) or 0),
                 "error": result.get("error"),
             }
+        except Exception as exc:
+            duration = time.perf_counter() - start_time
+            sync_state.record_sync_result(
+                "sale_orders",
+                success=False,
+                completed_at=self._ensure_utc(to_date),
+                duration_seconds=duration,
+                rows_synced=0,
+                sync_mode=sync_mode,
+                error_message=str(exc),
+            )
+            raise
         finally:
             await self._release_lock(lock)
 
-    async def sync_returns_window(self, from_date: datetime, to_date: datetime) -> Dict[str, Any]:
+    async def sync_returns_window(
+        self,
+        from_date: datetime,
+        to_date: datetime,
+        *,
+        sync_mode: str = "normal",
+    ) -> Dict[str, Any]:
         lock = await self._acquire_lock("returns")
         if not lock:
             return {
@@ -570,21 +623,48 @@ class UnicommerceSyncOrchestrator:
                 "to_date": self._ensure_utc(to_date).isoformat(),
             }
 
+        sync_state = get_sync_state_service()
+        sync_state.record_sync_start("sales_returns", sync_mode=sync_mode)
+        start_time = time.perf_counter()
         try:
             result = await self.uc_service.fetch_returns_via_export(
                 self._ensure_utc(from_date),
                 self._ensure_utc(to_date),
             )
+            success = bool(result.get("successful"))
+            duration = time.perf_counter() - start_time
+            rows_synced = int(result.get("normalized_rows", 0) or 0)
+            sync_state.record_sync_result(
+                "sales_returns",
+                success=success,
+                completed_at=self._ensure_utc(to_date),
+                duration_seconds=duration,
+                rows_synced=rows_synced,
+                sync_mode=sync_mode,
+                error_message=result.get("error"),
+            )
             return {
-                "success": bool(result.get("successful")),
+                "success": success,
                 "from_date": self._ensure_utc(from_date).isoformat(),
                 "to_date": self._ensure_utc(to_date).isoformat(),
                 "total_items": int(result.get("total_items", 0) or 0),
                 "archived_rows": int(result.get("archived_rows", 0) or 0),
-                "normalized_rows": int(result.get("normalized_rows", 0) or 0),
+                "normalized_rows": rows_synced,
                 "total_time": float(result.get("total_time", 0) or 0),
                 "error": result.get("error"),
             }
+        except Exception as exc:
+            duration = time.perf_counter() - start_time
+            sync_state.record_sync_result(
+                "sales_returns",
+                success=False,
+                completed_at=self._ensure_utc(to_date),
+                duration_seconds=duration,
+                rows_synced=0,
+                sync_mode=sync_mode,
+                error_message=str(exc),
+            )
+            raise
         finally:
             await self._release_lock(lock)
 
@@ -614,6 +694,8 @@ class UnicommerceSyncOrchestrator:
         facility_code: str = "anthrilo",
         full_discovery: bool = False,
         discovery_limit: Optional[int] = None,
+        *,
+        sync_mode: str = "normal",
     ) -> Dict[str, Any]:
         lock = await self._acquire_lock("inventory")
         if not lock:
@@ -622,6 +704,9 @@ class UnicommerceSyncOrchestrator:
                 "message": "Inventory sync lock is already held",
             }
 
+        sync_state = get_sync_state_service()
+        sync_state.record_sync_start("inventory_snapshot", sync_mode=sync_mode)
+        start_time = time.perf_counter()
         try:
             clean_skus = [str(sku).strip() for sku in (skus or []) if str(sku).strip()]
             if not clean_skus:
@@ -646,6 +731,15 @@ class UnicommerceSyncOrchestrator:
                         break
 
             if not clean_skus:
+                duration = time.perf_counter() - start_time
+                sync_state.record_sync_result(
+                    "inventory_snapshot",
+                    success=True,
+                    completed_at=self._utcnow(),
+                    duration_seconds=duration,
+                    rows_synced=0,
+                    sync_mode=sync_mode,
+                )
                 return {
                     "success": True,
                     "message": "No SKUs available for inventory sync",
@@ -654,13 +748,36 @@ class UnicommerceSyncOrchestrator:
                 }
 
             snapshots = await self.uc_service.get_inventory_snapshot(clean_skus, facility_code=facility_code)
+            success = True
+            duration = time.perf_counter() - start_time
+            rows_synced = len(snapshots or {})
+            sync_state.record_sync_result(
+                "inventory_snapshot",
+                success=success,
+                completed_at=self._utcnow(),
+                duration_seconds=duration,
+                rows_synced=rows_synced,
+                sync_mode=sync_mode,
+            )
             return {
                 "success": True,
                 "requested_skus": len(clean_skus),
-                "fetched_skus": len(snapshots or {}),
+                "fetched_skus": rows_synced,
                 "facility_code": facility_code,
                 "full_discovery": bool(full_discovery),
             }
+        except Exception as exc:
+            duration = time.perf_counter() - start_time
+            sync_state.record_sync_result(
+                "inventory_snapshot",
+                success=False,
+                completed_at=self._utcnow(),
+                duration_seconds=duration,
+                rows_synced=0,
+                sync_mode=sync_mode,
+                error_message=str(exc),
+            )
+            raise
         finally:
             await self._release_lock(lock)
 

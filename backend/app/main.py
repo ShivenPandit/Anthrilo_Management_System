@@ -5,6 +5,7 @@ from app.core.config import settings
 from app.api.v1.api import api_router
 from app.core.redis import redis_client
 from app.services.unicommerce_sync_orchestrator import get_unicommerce_sync_orchestrator
+from app.services.recovery_service import RecoveryService
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +39,11 @@ async def on_startup() -> None:
         started = orchestrator.start_scheduler()
         if started:
             logger.info("Unicommerce incremental sync scheduler enabled")
+
+    try:
+        RecoveryService().schedule_startup_recovery()
+    except Exception as exc:
+        logger.warning(f"Startup recovery scheduling failed: {exc}")
 
 
 @app.on_event("shutdown")

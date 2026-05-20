@@ -204,6 +204,11 @@ export const unicommerceApi = {
   getSyncStatus: () =>
     apiClient.get('/integrations/unicommerce/sync/status'),
 
+  // System recovery status
+  getSystemSyncStatus: () => apiClient.get('/system/sync-status'),
+  triggerRecoverySync: (payload?: { entities?: string[]; from_date?: string; to_date?: string; force?: boolean }) =>
+    apiClient.post('/system/recover-sync', payload || {}),
+
   // Legacy endpoints (kept for backward compat)
   searchOrders: (params: { from_date: string; to_date: string; display_start?: number; display_length?: number }) =>
     apiClient.get('/unicommerce-data/search-orders', { params }),
