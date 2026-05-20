@@ -67,3 +67,31 @@ class SyncStatus(Base):
     completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SyncState(Base):
+    """Persistent sync state for recovery and freshness monitoring."""
+
+    __tablename__ = "sync_state"
+
+    id = Column(Integer, primary_key=True, index=True)
+    entity = Column(String(50), unique=True, nullable=False, index=True)
+    last_successful_sync = Column(DateTime, nullable=True)
+    last_full_sync = Column(DateTime, nullable=True)
+    sync_status = Column(String(32), nullable=False, default="idle")
+    sync_duration_seconds = Column(Float, default=0.0)
+    rows_synced = Column(Integer, default=0)
+
+    # Recovery metadata
+    recovery_mode = Column(String(32), nullable=True)
+    recovery_total_chunks = Column(Integer, default=0)
+    recovery_completed_chunks = Column(Integer, default=0)
+    recovery_current_chunk = Column(String(120), nullable=True)
+    recovery_started_at = Column(DateTime, nullable=True)
+    recovery_last_chunk_at = Column(DateTime, nullable=True)
+    recovery_retry_count = Column(Integer, default=0)
+    recovery_next_retry_at = Column(DateTime, nullable=True)
+    last_error = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -63,6 +63,28 @@ services:
     networks:
       - anthrilo_net
 
+  recovery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: anthrilo_recovery_worker
+    env_file:
+      - ./backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - DEBUG=${DEBUG:-False}
+      - UNICOMMERCE_RECOVERY_ENABLE=true
+    command: celery -A app.workers.celery_app:celery_app worker -l INFO -Q recovery --concurrency=1
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - anthrilo_net
+
   frontend:
     build:
       context: ./frontend

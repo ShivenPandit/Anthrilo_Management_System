@@ -142,6 +142,15 @@ export default function DashboardPage() {
     refetchOnWindowFocus: true,
   });
 
+  const { data: systemSyncStatus } = useQuery({
+    queryKey: ['system-sync-status'],
+    queryFn: async () => (await unicommerceApi.getSystemSyncStatus()).data,
+    refetchInterval: 60 * 1000,
+    staleTime: 0,
+    gcTime: 5 * 60 * 1000,
+    refetchOnWindowFocus: true,
+  });
+
   const { mutateAsync: syncNow, isPending: syncingNow } = useMutation({
     mutationFn: async () => (await unicommerceApi.runIncrementalSyncNow()).data,
     onSuccess: () => {
@@ -168,6 +177,9 @@ export default function DashboardPage() {
   const isLoading = loadingKpi || loadingTrend || loadingYesterdayCompare || loadingDayBeforeCompare;
 
   const dataHealthBadge = useMemo(() => {
+    if (systemSyncStatus?.mode === 'recovery') {
+      return { label: 'Recovery in progress', dotClass: 'bg-amber-500 animate-pulse' };
+    }
     if (!kpiData) {
       return { label: 'Healthy', dotClass: 'bg-emerald-500' };
     }
@@ -188,7 +200,31 @@ export default function DashboardPage() {
     }
 
     return { label: 'Healthy', dotClass: 'bg-emerald-500' };
-  }, [kpiData]);
+  }, [kpiData, systemSyncStatus]);
+
+  const recoveryHint = useMemo(() => {
+    if (!systemSyncStatus) return null;
+
+    if (systemSyncStatus.mode === 'recovery') {
+      const gapDays = systemSyncStatus.sync_gap_days;
+      const progress = systemSyncStatus.recovery_progress ?? 0;
+      const chunk = systemSyncStatus.current_chunk;
+      const gapLabel = typeof gapDays === 'number' ? `${gapDays.toFixed(1)} days` : 'missing days';
+      return `Data recovering: syncing ${gapLabel} (${progress}%)${chunk ? ` · ${chunk}` : ''}`;
+    }
+
+    const lastUpdated = systemSyncStatus.last_successful_sync;
+    if (lastUpdated) {
+      const parsed = parseBackendUtcTimestamp(lastUpdated);
+      if (parsed) {
+        const minutes = Math.max(0, Math.round((Date.now() - parsed.getTime()) / 60000));
+        const hours = Math.floor(minutes / 60);
+        const label = hours > 0 ? `${hours}h ${minutes % 60}m ago` : `${minutes}m ago`;
+        return `Last updated ${label}`;
+      }
+    }
+    return null;
+  }, [systemSyncStatus]);
 
   // Growth calculations
   const orderGrowth = yesterdayOrders > 0 ? ((todayOrders - yesterdayOrders) / yesterdayOrders) * 100 : 0;
@@ -367,6 +403,11 @@ export default function DashboardPage() {
                 {dataHealthBadge.label}
               </span>
             </div>
+            {recoveryHint ? (
+              <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                {recoveryHint}
+              </div>
+            ) : null}
 
           </div>
           <button
