@@ -246,11 +246,56 @@ class SyncService:
         """
         db = self._get_db()
         try:
+            # We need to filter by the BUSINESS order timestamp (when customer placed order).
+            # `SyncedOrder` stores `created_at_uc` (Unicommerce created timestamp) but not
+            # a dedicated `order_date`. To avoid cross-window drift we fetch a narrow
+            # window by `created_at_uc` and then derive the business timestamp from
+            # `raw_order_data` where possible, falling back to `created_at_uc`.
+            # This prevents using ingestion timestamps for period bucketing.
+            delta_expand_seconds = 24 * 60 * 60  # expand by 1 day to capture edge cases
+            start_filter = (from_date).astimezone().replace(tzinfo=None)
+            end_filter = (to_date).astimezone().replace(tzinfo=None)
+
+            # narrow DB fetch by created_at_uc +/- 1 day to limit rows
             query = db.query(SyncedOrder).filter(
-                SyncedOrder.created_at_uc >= from_date,
-                SyncedOrder.created_at_uc <= to_date,
+                SyncedOrder.created_at_uc >= (start_filter - __import__('datetime').timedelta(seconds=delta_expand_seconds)),
+                SyncedOrder.created_at_uc <= (end_filter + __import__('datetime').timedelta(seconds=delta_expand_seconds)),
             )
-            orders = query.all()
+            candidate_orders = query.all()
+
+            # Now filter candidates by derived business order date
+            orders = []
+            from_ts = from_date
+            to_ts = to_date
+            for o in candidate_orders:
+                derived = None
+                try:
+                    ro = o.raw_order_data or {}
+                    # Prefer explicit `created`/`displayOrderDateTime` in the raw payload
+                    created_raw = ro.get('created') if isinstance(ro, dict) else None
+                    if not created_raw:
+                        created_raw = ro.get('displayOrderDateTime') if isinstance(ro, dict) else None
+                    if created_raw:
+                        try:
+                            derived = datetime.fromisoformat(str(created_raw).replace('Z', '+00:00'))
+                        except Exception:
+                            pass
+                except Exception:
+                    derived = None
+
+                # Fallback to the stored UC created timestamp
+                if derived is None:
+                    derived = o.created_at_uc
+
+                # Normalize to timezone-aware UTC for comparison
+                if derived is not None and derived.tzinfo is None:
+                    derived = derived.replace(tzinfo=__import__('datetime').timezone.utc)
+
+                if derived is None:
+                    continue
+
+                if from_ts <= derived <= to_ts:
+                    orders.append(o)
 
             total_orders = len(orders)
             valid_orders = 0

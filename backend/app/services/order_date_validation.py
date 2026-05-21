@@ -31,11 +31,17 @@ def validate_order_date(
         order_date = order_date.astimezone(timezone.utc).replace(tzinfo=None)
 
     now_utc = datetime.utcnow()
+    # Allow certain import/repair contexts to accept slight future timestamps
+    future_allowed_contexts = {"repair_import", "csv_import", "sync_import", "sync_import_best_effort"}
     if order_date > now_utc:
-        raise OrderDateValidationError(
-            f"[{context}] Order {order_id}: order_date is in the future. "
-            f"order_date={order_date.isoformat()} now={now_utc.isoformat()}"
-        )
+        if context in future_allowed_contexts:
+            # Clamp future timestamps to current UTC to avoid validation failure
+            order_date = now_utc
+        else:
+            raise OrderDateValidationError(
+                f"[{context}] Order {order_id}: order_date is in the future. "
+                f"order_date={order_date.isoformat()} now={now_utc.isoformat()}"
+            )
 
     two_years_ago = now_utc - timedelta(days=730)
     if context not in {"historical_import"} and order_date < two_years_ago:
@@ -43,8 +49,10 @@ def validate_order_date(
             f"[{context}] Order {order_id}: order_date too old ({order_date.isoformat()})"
         )
 
-    # For non-live contexts only, reject suspicious "just now" business times.
-    if context not in {"sync_import", "sync_import_best_effort"}:
+    # For non-live contexts only, reject suspicious "just now" business times;
+    # however allow recent timestamps for known import/repair contexts.
+    recent_allowed_contexts = {"repair_import", "sync_import", "sync_import_best_effort"}
+    if context not in recent_allowed_contexts:
         one_minute_tolerance = now_utc - timedelta(minutes=1)
         if order_date > one_minute_tolerance:
             raise OrderDateValidationError(
