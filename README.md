@@ -210,3 +210,38 @@ npm test
 ## License
 
 Proprietary - Anthrilo Management System
+
+
+"""
+cd backend 
+CREATE VENV
+ py -3.12 -m venv .venv
+
+Activate:
+
+.\.venv\Scripts\activate
+
+
+pip install -r requirements.txt
+
+RUN BACKEND
+python -m uvicorn app.main:app --reload
+
+
+
+
+FRONTEND
+
+New terminal:
+
+cd frontend
+
+Install:
+
+npm install
+
+Run:
+
+npm run dev
+
+"""
