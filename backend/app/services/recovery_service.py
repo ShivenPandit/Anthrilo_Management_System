@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, date
@@ -376,20 +377,166 @@ class RecoveryService:
                 total_chunks=int(total or 0),
             )
 
-    def _enqueue_steps(self, plan: Dict[str, Any]) -> None:
-        from app.workers.recovery_tasks import recovery_step_task
+    @staticmethod
+    def _is_celery_available() -> bool:
+        """Check if the Celery broker (Redis) is reachable for task dispatch."""
+        if redis_client is None:
+            return False
+        try:
+            redis_client.ping()
+            return True
+        except Exception:
+            return False
 
+    def _enqueue_steps(self, plan: Dict[str, Any]) -> None:
+        """Dispatch recovery steps via Celery when available, else asyncio tasks."""
         delay_seconds = max(0, int(getattr(settings, "UNICOMMERCE_RECOVERY_CHUNK_DELAY_SECONDS", 5)))
-        for idx, step in enumerate(plan["steps"], start=1):
-            payload = dict(step)
-            payload["recovery_id"] = plan["recovery_id"]
-            payload["step_index"] = idx
-            payload["step_total"] = len(plan["steps"])
-            recovery_step_task.apply_async(
-                kwargs={"step": payload},
-                countdown=delay_seconds * (idx - 1),
-                queue="recovery",
+        steps = plan["steps"]
+        recovery_id = plan["recovery_id"]
+
+        if self._is_celery_available():
+            try:
+                from app.workers.recovery_tasks import recovery_step_task
+                for idx, step in enumerate(steps, start=1):
+                    payload = dict(step)
+                    payload["recovery_id"] = recovery_id
+                    payload["step_index"] = idx
+                    payload["step_total"] = len(steps)
+                    recovery_step_task.apply_async(
+                        kwargs={"step": payload},
+                        countdown=delay_seconds * (idx - 1),
+                        queue="recovery",
+                    )
+                logger.info(
+                    f"Recovery {recovery_id}: {len(steps)} step(s) enqueued to Celery"
+                )
+                return
+            except Exception as exc:
+                logger.warning(
+                    f"Celery dispatch failed ({exc}), falling back to in-process asyncio recovery"
+                )
+
+        # Celery unavailable — run steps in-process via asyncio
+        self._enqueue_steps_inprocess(steps, recovery_id, delay_seconds)
+
+    def _enqueue_steps_inprocess(self, steps: List[Dict], recovery_id: str, delay_seconds: int) -> None:
+        """Schedule recovery steps as asyncio tasks (no Celery dependency)."""
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            logger.error("No asyncio event loop available for in-process recovery — skipping")
+            return
+
+        async def _run_all_steps() -> None:
+            for idx, step in enumerate(steps, start=1):
+                payload = dict(step)
+                payload["recovery_id"] = recovery_id
+                payload["step_index"] = idx
+                payload["step_total"] = len(steps)
+                if idx > 1 and delay_seconds > 0:
+                    await asyncio.sleep(delay_seconds)
+                try:
+                    await self._execute_recovery_step_async(payload)
+                except Exception as exc:
+                    logger.error(
+                        f"Recovery {recovery_id} step {idx}/{len(steps)} failed: {exc}",
+                        exc_info=True,
+                    )
+
+        loop.create_task(_run_all_steps())
+        logger.info(
+            f"Recovery {recovery_id}: {len(steps)} step(s) scheduled as asyncio tasks"
+        )
+
+    async def _execute_recovery_step_async(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a single recovery step in-process (mirrors recovery_step_task logic)."""
+        from app.services.unicommerce_sync_orchestrator import get_unicommerce_sync_orchestrator
+
+        orchestrator = get_unicommerce_sync_orchestrator()
+        sync_state = self.sync_state
+
+        from_dt = datetime.fromisoformat(step["from_date"])
+        to_dt = datetime.fromisoformat(step["to_date"])
+        entities: List[str] = step.get("entities", [])
+        chunk_label: str = step.get("label", "unknown")
+        recovery_id: str = step.get("recovery_id", "")
+        step_index: int = step.get("step_index", 0)
+        step_total: int = step.get("step_total", 0)
+
+        for entity in entities:
+            sync_state.record_sync_start(entity, sync_mode="recovery", current_chunk=chunk_label)
+
+        results: Dict[str, Any] = {}
+        errors: Dict[str, str] = {}
+
+        logger.info(
+            f"Recovery {recovery_id} step {step_index}/{step_total}: "
+            f"{chunk_label} entities={entities}"
+        )
+
+        try:
+            if "sale_orders" in entities:
+                results["sale_orders"] = await orchestrator.sync_orders_window(
+                    from_dt, to_dt, sync_mode="recovery"
+                )
+            if "sales_returns" in entities:
+                results["sales_returns"] = await orchestrator.sync_returns_window(
+                    from_dt, to_dt, sync_mode="recovery"
+                )
+            if "inventory_snapshot" in entities:
+                results["inventory_snapshot"] = await orchestrator.sync_inventory(
+                    sync_mode="recovery"
+                )
+
+            for entity in entities:
+                entity_result = results.get(entity, {})
+                if not bool(entity_result.get("success", False)):
+                    errors[entity] = str(
+                        entity_result.get("error")
+                        or entity_result.get("message")
+                        or "failed"
+                    )
+
+            for entity in entities:
+                success = entity not in errors
+                sync_state.advance_recovery_progress(
+                    entity,
+                    chunk_label=chunk_label,
+                    success=success,
+                    increment_completed=not bool(errors),
+                    completed_at=to_dt if success else None,
+                    error_message=errors.get(entity),
+                )
+
+            if errors:
+                logger.warning(
+                    f"Recovery {recovery_id} step {step_index}: partial failure — {errors}"
+                )
+            else:
+                logger.info(
+                    f"Recovery {recovery_id} step {step_index}/{step_total} completed: {chunk_label}"
+                )
+
+            return {
+                "success": not bool(errors),
+                "label": chunk_label,
+                "entities": entities,
+                "results": results,
+                "errors": errors,
+            }
+        except Exception as exc:
+            logger.error(
+                f"Recovery {recovery_id} step {step_index} raised exception: {exc}",
+                exc_info=True,
             )
+            for entity in entities:
+                sync_state.advance_recovery_progress(
+                    entity,
+                    chunk_label=chunk_label,
+                    success=False,
+                    error_message=str(exc),
+                )
+            raise
 
     def _acquire_schedule_lock(self) -> Optional[str]:
         lock_key = "uc:recovery:schedule"

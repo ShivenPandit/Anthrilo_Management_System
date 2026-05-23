@@ -89,7 +89,7 @@ export default function GarmentMasterPage() {
   const totalPages = Math.ceil(totalRecords / PAGE_SIZE);
   const currentPage = page + 1;
 
-  /* accurate stats from inventory summary API */
+  /* accurate stats from inventory summary API (DB snapshot exactly matches UC export rows) */
   const accurateStats = useMemo(() => {
     if (!summaryData?.successful) return null;
     return {

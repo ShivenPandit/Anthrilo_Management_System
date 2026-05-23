@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     UNICOMMERCE_RECOVERY_MAX_RETRIES: int = 3
     UNICOMMERCE_RECOVERY_RETRY_COOLDOWN_MINUTES: int = 5
     UNICOMMERCE_RECOVERY_CHUNK_DELAY_SECONDS: int = 5
+    UNICOMMERCE_RECOVERY_STARTUP_DELAY_SECONDS: int = 10
 
     # Unicommerce export polling/download resilience
     UNICOMMERCE_EXPORT_MAX_NO_FILEPATH_RETRIES: int = 12
@@ -83,6 +84,10 @@ class Settings(BaseSettings):
     UNICOMMERCE_EXPORT_MAX_CONSECUTIVE_POLL_ERRORS: int = 12
     UNICOMMERCE_EXPORT_DOWNLOAD_MAX_RETRIES: int = 4
     UNICOMMERCE_EXPORT_DOWNLOAD_BACKOFF_SECONDS: int = 3
+
+    # Inventory summary cache — seconds before a background refresh is triggered
+    # Default 3600 = 1 hour. Stats and catalog table both read from the same DB snapshot.
+    UNICOMMERCE_INVENTORY_SUMMARY_CACHE_TTL_SECONDS: int = 3600
 
     class Config:
         env_file = ".env"
