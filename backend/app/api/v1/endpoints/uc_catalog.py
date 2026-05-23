@@ -507,135 +507,51 @@ async def _download_parse_inventory_csv(download_url: str) -> List[Dict[str, Any
         return []
 
 
-@router.get("/inventory/summary")
-async def get_inventory_summary(force_refresh: bool = False):
-    """
-    Aggregated inventory summary across ALL SKUs using the
-    Unicommerce **Export Job API** (Inventory Snapshot export).
+# ── DB-first inventory summary ────────────────────────────────────────────────
 
-    Flow:
-      1. Create export job   1 API call
-      2. Poll until COMPLETE  ~3-8 polls
-      3. Download CSV         1 HTTP GET
-      4. Parse & aggregate in-memory
+def _build_summary_from_db() -> dict:
+    """Compute inventory summary from facility_inventory_snapshot (no API call)."""
+    from app.db.session import SessionLocal
+    from app.db.export_models import FacilityInventorySnapshot
+    from sqlalchemy import func
 
-    ~3 API calls total regardless of catalog size. ~10-30s.
-    Redis-cached for 4 hours.
-    """
-    from app.services.cache_service import CacheService
-
-    cache_key = "uc:inventory:summary:v3"
-
-    # Clean up old cache keys
-    CacheService.delete("uc:inventory:summary:all")
-    CacheService.delete("uc:inventory:summary:v2")
-
-    if not force_refresh:
-        cached = CacheService.get(cache_key)
-        if cached:
-            logger.info("Returning cached inventory summary (v3-export)")
-            return cached
-
+    db = SessionLocal()
     try:
-        # ── Step 1: Create export job ──
-        job_code = await _create_inventory_export_job()
-        if not job_code:
-            return {"successful": False, "error": "Failed to create inventory export job"}
-
-        # ── Step 2: Poll until complete ──
-        download_url = await _poll_inventory_export(job_code)
-        if not download_url:
-            return {"successful": False, "error": "Inventory export job failed or timed out"}
-
-        # ── Step 3: Download & parse CSV ──
-        rows = await _download_parse_inventory_csv(download_url)
+        rows = db.query(FacilityInventorySnapshot).all()
         if not rows:
-            return {"successful": False, "error": "Inventory export CSV was empty"}
-
-        # ── Step 4: Aggregate ──
-        # The CSV may contain multiple rows per SKU (e.g., if present in multiple facilities)
-        # We must deduplicate by 'itemTypeName' (SKU code) and sum their inventory
-        aggregated_rows = {}
-        for row in rows:
-            sku = (row.get("Item Type Name") or row.get("itemTypeName") or "").strip()
-            if not sku:
-                continue
-                
-            if sku not in aggregated_rows:
-                aggregated_rows[sku] = {
-                    "cat": (row.get("Category Name") or row.get("categoryName") or row.get("Category") or "Uncategorized").strip() or "Uncategorized",
-                    "enabled": False,
-                    "cost_price": _safe_float(row.get("Cost Price") or row.get("costPrice")),
-                    "inv": 0,
-                    "open_sale": 0,
-                    "inv_blocked": 0,
-                    "bad_inv": 0,
-                    "putaway": 0,
-                    "open_purchase": 0,
-                    "pending_assess": 0,
-                }
-                
-            # If any row says it's enabled, we consider it enabled globally
-            enabled_raw = (row.get("Enabled") or row.get("enabled") or "").strip().lower()
-            if enabled_raw in ("true", "1", "yes", "y"):
-                aggregated_rows[sku]["enabled"] = True
-                
-            # Accumulate
-            aggregated_rows[sku]["inv"] += _safe_int(row.get("Inventory") or row.get("inventory"))
-            aggregated_rows[sku]["open_sale"] += _safe_int(row.get("Open Sale") or row.get("openSale"))
-            aggregated_rows[sku]["inv_blocked"] += _safe_int(row.get("Inventory Blocked") or row.get("inventoryBlocked"))
-            aggregated_rows[sku]["bad_inv"] += _safe_int(row.get("Bad Inventory") or row.get("badInventory"))
-            aggregated_rows[sku]["putaway"] += _safe_int(row.get("Putaway Pending") or row.get("putawayPending"))
-            aggregated_rows[sku]["open_purchase"] += _safe_int(row.get("Open Purchase") or row.get("openPurchase"))
-            aggregated_rows[sku]["pending_assess"] += _safe_int(row.get("Pending Inventory Assessment") or row.get("pendingInventoryAssessment"))
-
-        unique_skus = list(aggregated_rows.values())
-        total_skus = len(unique_skus)
-        
+            return {}
+        last_sync = db.query(func.max(FacilityInventorySnapshot.synced_at)).scalar()
+        total_skus = len(rows)
         active_count = 0
         facility_skus = 0
         skus_with_stock = 0
         skus_out_of_stock = 0
         total_real_inventory = 0
-        total_virtual_inventory = 0  # not in this export; will stay 0
         total_stock_value = 0.0
+        category_totals: Dict[str, Dict] = {}
 
-        category_totals: Dict[str, Dict[str, int]] = {}
-
-        for item in unique_skus:
-            cat = item["cat"]
-            enabled = item["enabled"]
-            inv = item["inv"]
-            open_sale = item["open_sale"]
-            inv_blocked = item["inv_blocked"]
-            bad_inv = item["bad_inv"]
-            putaway = item["putaway"]
-            open_purchase = item["open_purchase"]
-            pending_assess = item["pending_assess"]
-            cost_price = item["cost_price"]
-
-            if enabled:
+        for row in rows:
+            if not row.disabled:
                 active_count += 1
-
-            # A SKU is "at facility" if any inventory-related field is non-zero
-            has_activity = any(x != 0 for x in [
-                inv, open_sale, inv_blocked, bad_inv,
-                putaway, open_purchase, pending_assess,
-            ])
-            if has_activity:
+            inv = row.inventory or 0
+            inv_blocked = row.reserved_inventory or 0
+            raw = row.raw_data or {}
+            open_sale = _safe_int(raw.get("Open Sale") or raw.get("openSale"))
+            bad_inv = _safe_int(raw.get("Bad Inventory") or raw.get("badInventory"))
+            putaway = _safe_int(raw.get("Putaway Pending") or raw.get("putawayPending"))
+            open_purchase = _safe_int(raw.get("Open Purchase") or raw.get("openPurchase"))
+            pending_assess = _safe_int(
+                raw.get("Pending Inventory Assessment") or raw.get("pendingInventoryAssessment")
+            )
+            if any(x != 0 for x in [inv, open_sale, inv_blocked, bad_inv, putaway, open_purchase, pending_assess]):
                 facility_skus += 1
-
             total_real_inventory += inv
-            total_stock_value += inv * cost_price
-
-            # Category breakdown
+            total_stock_value += inv * float(row.cost_price or 0.0)
+            cat = row.category or "Uncategorized"
             if cat not in category_totals:
-                category_totals[cat] = {
-                    "skus": 0, "inventory": 0, "inStock": 0, "outOfStock": 0,
-                }
+                category_totals[cat] = {"skus": 0, "inventory": 0, "inStock": 0, "outOfStock": 0}
             category_totals[cat]["skus"] += 1
             category_totals[cat]["inventory"] += inv
-
             if inv > 0:
                 skus_with_stock += 1
                 category_totals[cat]["inStock"] += 1
@@ -644,15 +560,14 @@ async def get_inventory_summary(force_refresh: bool = False):
                 category_totals[cat]["outOfStock"] += 1
 
         oos_pct = round((skus_out_of_stock / total_skus) * 100) if total_skus > 0 else 0
-
         categories_list = sorted(
             [{"name": n, **d} for n, d in category_totals.items()],
-            key=lambda c: c["inventory"],
-            reverse=True,
+            key=lambda c: c["inventory"], reverse=True,
         )
-
-        result = {
+        return {
             "successful": True,
+            "source": "db_snapshot",
+            "last_synced_at": last_sync.isoformat() if last_sync else None,
             "totalProducts": total_skus,
             "totalSKUs": total_skus,
             "activeSKUs": active_count,
@@ -661,19 +576,137 @@ async def get_inventory_summary(force_refresh: bool = False):
             "skusOutOfStock": skus_out_of_stock,
             "outOfStockPercent": oos_pct,
             "totalRealInventory": total_real_inventory,
-            "totalVirtualInventory": total_virtual_inventory,
+            "totalVirtualInventory": 0,
             "totalStockValue": round(total_stock_value, 2),
             "categories": categories_list,
         }
+    finally:
+        db.close()
 
-        logger.info(
-            f"INV_EXPORT: Summary done — {total_skus} SKUs, "
-            f"{skus_with_stock} in-stock, {len(categories_list)} categories"
-        )
 
-        CacheService.set(cache_key, result, 14400)  # 4h TTL
-        return result
+def _db_snapshot_age_seconds() -> float:
+    """Seconds since last inventory snapshot sync. Returns inf if never synced."""
+    from app.db.session import SessionLocal
+    from app.db.export_models import FacilityInventorySnapshot
+    from sqlalchemy import func
+    from datetime import datetime
 
-    except Exception as e:
-        logger.error(f"Error computing inventory summary: {e}", exc_info=True)
-        return {"successful": False, "error": str(e)}
+    db = SessionLocal()
+    try:
+        last_sync = db.query(func.max(FacilityInventorySnapshot.synced_at)).scalar()
+        if last_sync is None:
+            return float("inf")
+        return (datetime.utcnow() - last_sync).total_seconds()
+    finally:
+        db.close()
+
+
+_INVENTORY_REFRESH_RUNNING = False
+
+
+async def _background_refresh_inventory():
+    """Fire-and-forget: sync inventory from Unicommerce export, then rebuild cache."""
+    global _INVENTORY_REFRESH_RUNNING
+    if _INVENTORY_REFRESH_RUNNING:
+        return
+    _INVENTORY_REFRESH_RUNNING = True
+    try:
+        from app.services.sync_inventory_snapshot import fetch_and_sync_inventory
+        from app.services.cache_service import CacheService
+        logger.info("INV_SUMMARY: background refresh starting")
+        result = await fetch_and_sync_inventory(facility_code="anthrilo")
+        if result.get("success"):
+            logger.info(f"INV_SUMMARY: refresh done — {result.get('inserted', 0)} SKUs upserted")
+            fresh = _build_summary_from_db()
+            if fresh:
+                CacheService.set("uc:inventory:summary:v3", fresh, 3600)
+        else:
+            logger.warning(f"INV_SUMMARY: refresh failed: {result.get('error')}")
+    except Exception as exc:
+        logger.error(f"INV_SUMMARY: background refresh error: {exc}", exc_info=True)
+    finally:
+        _INVENTORY_REFRESH_RUNNING = False
+
+
+@router.get("/inventory/summary")
+async def get_inventory_summary(force_refresh: bool = False):
+    """Inventory summary — DB-first with background refresh when stale.
+
+    Normal path (< 5 ms):
+      1. Check in-process/Redis cache.
+      2. Read ``facility_inventory_snapshot`` DB table directly.
+      3. If snapshot > 1 h old, fire a background Unicommerce export so the
+         *next* request gets fresh data — current caller is not blocked.
+
+    ``?force_refresh=true`` (blocking, ~15-30 s):
+      Runs a full Unicommerce export job NOW, upserts DB, rebuilds cache.
+
+    Stats cards and the catalog table now read from the SAME DB snapshot,
+    eliminating the live-vs-stale count discrepancy.
+    """
+    from app.services.cache_service import CacheService
+    from app.services.sync_inventory_snapshot import fetch_and_sync_inventory
+    from app.core.config import settings
+    import asyncio
+
+    stale_threshold = settings.UNICOMMERCE_INVENTORY_SUMMARY_CACHE_TTL_SECONDS
+    cache_key = "uc:inventory:summary:v3"
+
+    # Purge legacy cache keys (idempotent)
+    for old_key in ("uc:inventory:summary:all", "uc:inventory:summary:v2"):
+        CacheService.delete(old_key)
+
+    # ── Force-refresh: blocking live export ─────────────────────────────────
+    if force_refresh:
+        logger.info("INV_SUMMARY: force_refresh=true — running blocking live export")
+        try:
+            await fetch_and_sync_inventory(facility_code="anthrilo")
+        except Exception as exc:
+            logger.error(f"INV_SUMMARY: force refresh error: {exc}", exc_info=True)
+        summary = _build_summary_from_db()
+        if summary:
+            CacheService.set(cache_key, summary, stale_threshold)
+            return summary
+        return {"successful": False, "error": "Force refresh completed but DB read failed"}
+
+    # ── In-process / Redis cache (fastest path) ──────────────────────────────
+    cached = CacheService.get(cache_key)
+    if cached:
+        return cached
+
+    # ── DB-first (< 5 ms) ────────────────────────────────────────────────────
+    age = _db_snapshot_age_seconds()
+    db_summary = _build_summary_from_db()
+
+    if db_summary:
+        db_summary["stale"] = age > stale_threshold
+        db_summary["snapshot_age_minutes"] = round(age / 60, 1)
+        # Cache for shorter of stale_threshold or 15 min (avoids serving stale data forever)
+        CacheService.set(cache_key, db_summary, min(stale_threshold, 900))
+
+        if age > stale_threshold:
+            logger.info(
+                f"INV_SUMMARY: snapshot is {age / 3600:.1f}h old — "
+                "triggering non-blocking background refresh"
+            )
+            asyncio.create_task(_background_refresh_inventory())
+
+        return db_summary
+
+    # ── Cold start: DB empty — run synchronous export once ───────────────────
+    logger.warning("INV_SUMMARY: facility_inventory_snapshot is empty — cold-start export")
+    try:
+        sync_result = await fetch_and_sync_inventory(facility_code="anthrilo")
+        if not sync_result.get("success"):
+            return {"successful": False, "error": "Initial inventory export failed", "totalSKUs": 0}
+    except Exception as exc:
+        logger.error(f"INV_SUMMARY: cold-start export error: {exc}", exc_info=True)
+        return {"successful": False, "error": str(exc), "totalSKUs": 0}
+
+    summary = _build_summary_from_db()
+    if summary:
+        CacheService.set(cache_key, summary, stale_threshold)
+        return summary
+
+    return {"successful": False, "error": "Summary build failed after export", "totalSKUs": 0}
+

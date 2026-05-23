@@ -202,35 +202,40 @@ async def fetch_and_sync_inventory(facility_code: str = "anthrilo") -> Dict[str,
     if not rows:
         return {"success": True, "inserted": 0, "fetched": 0, "duplicates_removed": 0}
 
-    # Step 4: Deduplicate repeated SKUs (often present if multiple facility rows leak)
+    # Step 4: Map every CSV row to a distinct DB row to match Unicommerce export exactly.
+    # Unicommerce allows duplicate 'Item Type Name's (e.g. same name but different colors).
+    # To bypass the DB UniqueConstraint(sku, facility) and match the row counts exactly, 
+    # we append a counter to duplicate SKUs.
     aggregated_rows = {}
     for row in rows:
-        sku = (row.get("Item Type Name") or row.get("itemTypeName") or "").strip()
-        if not sku:
+        sku_base = (row.get("Item Type Name") or row.get("itemTypeName") or "").strip()
+        if not sku_base:
             continue
             
-        if sku not in aggregated_rows:
-            aggregated_rows[sku] = {
-                "sku": sku,
-                "facility_code": facility_code,
-                "category": (row.get("Category Name") or row.get("categoryName") or row.get("Category") or "Uncategorized").strip() or "Uncategorized",
-                "disabled": False,
-                "cost_price": _safe_float(row.get("Cost Price") or row.get("costPrice")),
-                "inventory": 0,
-                "available_inventory": 0,
-                "reserved_inventory": 0,
-                "raw_data": row
-            }
+        sku = sku_base
+        counter = 1
+        while sku in aggregated_rows:
+            sku = f"{sku_base}@@{counter}"
+            counter += 1
+            
+        aggregated_rows[sku] = {
+            "sku": sku,
+            "facility_code": facility_code,
+            "category": (row.get("Category Name") or row.get("categoryName") or row.get("Category") or "Uncategorized").strip() or "Uncategorized",
+            "disabled": False,
+            "cost_price": _safe_float(row.get("Cost Price") or row.get("costPrice")),
+            "inventory": 0,
+            "available_inventory": 0,
+            "reserved_inventory": 0,
+            "raw_data": row
+        }
             
         # Global enabled check
         enabled_raw = (row.get("Enabled") or row.get("enabled") or "").strip().lower()
         if enabled_raw in ("true", "1", "yes", "y"):
             aggregated_rows[sku]["disabled"] = False
-        elif not aggregated_rows[sku].get("raw_data", {}).get("enabled_once"):
+        else:
             aggregated_rows[sku]["disabled"] = True
-            
-        if enabled_raw in ("true", "1", "yes", "y"):
-            aggregated_rows[sku]["raw_data"]["enabled_once"] = True
             
         inv_val = _safe_int(row.get("Inventory") or row.get("inventory"))
         aggregated_rows[sku]["inventory"] += inv_val

@@ -411,13 +411,33 @@ class UnicommerceSyncOrchestrator:
     def _schedule_next_run(self, job_key: str, success: bool, interval_hours: int) -> datetime:
         now_utc = self._utcnow()
         if success:
-            next_due = now_utc + timedelta(hours=max(1, int(interval_hours)))
+            # Accelerate cadence while recovery is active so we pick up fresh
+            # data faster, then revert to the normal configured interval once caught up.
+            if self.is_in_recovery_mode():
+                recovery_interval_minutes = max(
+                    10, int(getattr(settings, "UNICOMMERCE_SYNC_RECOVERY_CADENCE_MINUTES", 30))
+                )
+                next_due = now_utc + timedelta(minutes=recovery_interval_minutes)
+                logger.debug(
+                    f"Scheduler '{job_key}': recovery mode active, next run in "
+                    f"{recovery_interval_minutes}min"
+                )
+            else:
+                next_due = now_utc + timedelta(hours=max(1, int(interval_hours)))
         else:
             retry_minutes = max(1, int(settings.UNICOMMERCE_SYNC_RETRY_MINUTES))
             next_due = now_utc + timedelta(minutes=retry_minutes)
 
         self._scheduler_next_run_at[job_key] = next_due
         return next_due
+
+    def is_in_recovery_mode(self) -> bool:
+        """Return True when any critical entity is actively recovering."""
+        try:
+            sync_state = get_sync_state_service()
+            return sync_state.is_recovery_active()
+        except Exception:
+            return False
 
     async def _run_sales_scheduler_job(self) -> Dict[str, Any]:
         lookback_days = max(
@@ -1618,6 +1638,193 @@ class UnicommerceSyncOrchestrator:
         if readiness_errors:
             response["errors"] = readiness_errors
         return response
+
+    async def startup_catch_up_sync(self) -> None:
+        """Detect and fill data gaps after startup — runs fully in background.
+
+        This is called once after startup with a short delay.  It inspects
+        the gap between ``last_successful_sync`` and now for each critical
+        entity and chooses the appropriate recovery mode:
+
+        * gap < min_gap_hours : nothing to do
+        * gap ≤ 1 day         : extended incremental (uses existing lookback)
+        * gap 1 – 30 days     : chunked backfill (1 day at a time)
+        * gap > 30 days       : deep backfill (3 days at a time)
+
+        All work is dispatched as a non-blocking asyncio task so the API
+        is immediately available for requests.
+        """
+        logger.info("Startup catch-up: checking entity gaps...")
+        sync_state = get_sync_state_service()
+
+        try:
+            gaps = sync_state.get_all_entity_gaps()
+        except Exception as exc:
+            logger.error(f"Startup catch-up: failed to read entity gaps: {exc}", exc_info=True)
+            return
+
+        min_gap_hours = max(1, int(getattr(settings, "UNICOMMERCE_RECOVERY_MIN_GAP_HOURS", 12)))
+        now_utc = self._utcnow()
+        deep_threshold_days = max(1, int(getattr(settings, "UNICOMMERCE_RECOVERY_DEEP_THRESHOLD_DAYS", 30)))
+
+        needs_sales_recovery = False
+        needs_inventory_refresh = False
+        sales_gap_hours: float = 0.0
+
+        for entity, gap_hours in gaps.items():
+            if gap_hours is None:
+                # Never synced — treat as infinite gap
+                gap_hours = float(deep_threshold_days * 24 + 1)
+                logger.info(
+                    f"Startup catch-up: entity '{entity}' has never been synced — "
+                    f"scheduling full backfill"
+                )
+            else:
+                logger.info(
+                    f"Startup catch-up: entity '{entity}' gap = {gap_hours:.1f}h"
+                )
+
+            if entity == "inventory_snapshot":
+                inventory_interval = max(1, int(settings.UNICOMMERCE_SYNC_INVENTORY_INTERVAL_HOURS))
+                if gap_hours >= inventory_interval:
+                    needs_inventory_refresh = True
+            else:
+                if gap_hours >= min_gap_hours:
+                    needs_sales_recovery = True
+                    sales_gap_hours = max(sales_gap_hours, gap_hours)
+
+        if not needs_sales_recovery and not needs_inventory_refresh:
+            logger.info("Startup catch-up: all entities within tolerance — no action needed")
+            return
+
+        # --- Inventory refresh (always a point-in-time snapshot) ---
+        if needs_inventory_refresh:
+            asyncio.create_task(self._catch_up_inventory())
+
+        # --- Sales / returns gap fill ---
+        if needs_sales_recovery:
+            gap_days = sales_gap_hours / 24.0
+
+            if gap_days <= 1.0:
+                # Small gap: run a single incremental sync with extended lookback
+                logger.info(
+                    f"Startup catch-up: gap {sales_gap_hours:.1f}h — running incremental sync"
+                )
+                asyncio.create_task(self._catch_up_incremental())
+
+            else:
+                chunk_days = (
+                    max(1, int(getattr(settings, "UNICOMMERCE_RECOVERY_DEEP_CHUNK_DAYS", 3)))
+                    if gap_days > deep_threshold_days
+                    else max(1, int(getattr(settings, "UNICOMMERCE_RECOVERY_BACKFILL_CHUNK_DAYS", 1)))
+                )
+                mode = "deep" if gap_days > deep_threshold_days else "backfill"
+                from_date = now_utc - timedelta(hours=sales_gap_hours)
+                logger.info(
+                    f"Startup catch-up: gap {gap_days:.1f} days — scheduling {mode} "
+                    f"backfill in {chunk_days}-day chunks from {from_date.date().isoformat()}"
+                )
+                asyncio.create_task(
+                    self._run_chunked_catchup_background(from_date, now_utc, chunk_days)
+                )
+
+    async def _catch_up_incremental(self) -> None:
+        """Run a single incremental sync to cover a short gap."""
+        try:
+            lookback_days = max(
+                2, int(getattr(settings, "UNICOMMERCE_SYNC_LOOKBACK_DAYS", 2)) + 1
+            )
+            logger.info(f"Startup catch-up (incremental): lookback {lookback_days} days")
+            await self.run_incremental_sync(lookback_days=lookback_days)
+            logger.info("Startup catch-up (incremental): completed")
+        except Exception as exc:
+            logger.error(f"Startup catch-up (incremental) failed: {exc}", exc_info=True)
+
+    async def _catch_up_inventory(self) -> None:
+        """Refresh inventory snapshot as part of catch-up."""
+        try:
+            logger.info("Startup catch-up (inventory): refreshing snapshot")
+            from app.services.sync_inventory_snapshot import fetch_and_sync_inventory
+            facility = str(
+                getattr(settings, "UNICOMMERCE_SYNC_INVENTORY_FACILITY_CODE", "anthrilo")
+            ).strip() or "anthrilo"
+            await fetch_and_sync_inventory(facility)
+            logger.info("Startup catch-up (inventory): completed")
+        except Exception as exc:
+            logger.error(f"Startup catch-up (inventory) failed: {exc}", exc_info=True)
+
+    async def _run_chunked_catchup_background(
+        self,
+        from_date: datetime,
+        to_date: datetime,
+        chunk_days: int,
+    ) -> None:
+        """Run a chunked backfill (newest-first) in-process without blocking the API.
+
+        Chunks are processed sequentially with a small sleep between them to
+        avoid overloading the VPS or the Unicommerce export API.
+        """
+        from zoneinfo import ZoneInfo
+        ist = ZoneInfo("Asia/Kolkata")
+        chunk_delay = max(2, int(getattr(settings, "UNICOMMERCE_RECOVERY_CHUNK_DELAY_SECONDS", 5)))
+
+        start = self._ensure_utc(from_date)
+        end = self._ensure_utc(to_date)
+
+        # Build today + yesterday priority chunks first, then remaining history.
+        now_utc = self._utcnow()
+        uc_service = self.uc_service
+        today_from, today_to = uc_service.get_today_range()
+        yesterday_from, yesterday_to = uc_service.get_yesterday_range()
+
+        priority_chunks: List[Tuple[datetime, datetime]] = []
+        historical_chunks: List[Tuple[datetime, datetime]] = []
+
+        for chunk_start, chunk_end in self._chunk_range(start, end, chunk_days):
+            if chunk_start >= today_from:
+                priority_chunks.insert(0, (chunk_start, chunk_end))
+            elif chunk_start >= yesterday_from:
+                priority_chunks.append((chunk_start, chunk_end))
+            else:
+                historical_chunks.append((chunk_start, chunk_end))
+
+        # Process newest historical first.
+        historical_chunks.sort(key=lambda c: c[0], reverse=True)
+        all_chunks = priority_chunks + historical_chunks
+
+        total = len(all_chunks)
+        logger.info(
+            f"Startup catch-up (backfill): processing {total} chunk(s) of {chunk_days}d each"
+        )
+
+        for idx, (chunk_start, chunk_end) in enumerate(all_chunks, start=1):
+            try:
+                logger.info(
+                    f"Startup catch-up chunk {idx}/{total}: "
+                    f"{chunk_start.astimezone(ist).date()} → "
+                    f"{chunk_end.astimezone(ist).date()}"
+                )
+                orders_result = await self.sync_orders_window(
+                    chunk_start, chunk_end, sync_mode="recovery"
+                )
+                returns_result = await self.sync_returns_window(
+                    chunk_start, chunk_end, sync_mode="recovery"
+                )
+                if not orders_result.get("success") or not returns_result.get("success"):
+                    logger.warning(
+                        f"Startup catch-up chunk {idx}/{total} partially failed: "
+                        f"orders={orders_result.get('success')}, "
+                        f"returns={returns_result.get('success')}"
+                    )
+            except Exception as exc:
+                logger.error(
+                    f"Startup catch-up chunk {idx}/{total} failed: {exc}", exc_info=True
+                )
+
+            if idx < total:
+                await asyncio.sleep(chunk_delay)
+
+        logger.info("Startup catch-up (backfill): all chunks completed")
 
     def start_scheduler(self) -> bool:
         if self._scheduler_task and not self._scheduler_task.done():

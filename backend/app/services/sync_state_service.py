@@ -221,6 +221,40 @@ class SyncStateService:
         finally:
             db.close()
 
+    def get_all_entity_gaps(self) -> Dict[str, Optional[float]]:
+        """Return gap_hours since last_successful_sync for each critical entity.
+
+        Returns None for an entity that has never successfully synced.
+        Bootstraps from sync_logs on first access so the value is always
+        populated even before the first explicit sync_state write.
+        """
+        db = self._get_db()
+        try:
+            now_utc = datetime.now(timezone.utc)
+            gaps: Dict[str, Optional[float]] = {}
+            for entity in CRITICAL_ENTITIES:
+                state = self._ensure_state(db, entity)
+                self._bootstrap_from_sync_logs(db, state)
+                if state.last_successful_sync is None:
+                    gaps[entity] = None
+                else:
+                    last_sync = _aware_utc(state.last_successful_sync)
+                    gaps[entity] = (now_utc - last_sync).total_seconds() / 3600.0
+            return gaps
+        finally:
+            db.close()
+
+    def mark_recovery_complete(self, entity: str) -> None:
+        """Mark a recovery as fully complete for an entity — transitions to idle."""
+        db = self._get_db()
+        try:
+            state = self._ensure_state(db, entity)
+            state.sync_status = "idle"
+            state.recovery_current_chunk = None
+            db.commit()
+        finally:
+            db.close()
+
     def is_recovery_active(self, entities: Optional[Iterable[str]] = None) -> bool:
         db = self._get_db()
         try:
