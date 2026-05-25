@@ -175,8 +175,14 @@ export default function DashboardPage() {
   const dayBeforeRevenue = dayBeforeCompareData?.summary?.total_revenue || 0;
   const dayBeforeItems = dayBeforeCompareData?.summary?.total_items || 0;
   const isLoading = loadingKpi || loadingTrend || loadingYesterdayCompare || loadingDayBeforeCompare;
+  const recoveryProgress = systemSyncStatus?.recovery_progress ?? 0;
+  const recoveryChunk = systemSyncStatus?.current_chunk;
+  const recoveryComplete = systemSyncStatus?.mode === 'recovery' && recoveryProgress >= 100 && !recoveryChunk;
 
   const dataHealthBadge = useMemo(() => {
+    if (recoveryComplete) {
+      return { label: 'Recovery complete', dotClass: 'bg-emerald-500' };
+    }
     if (systemSyncStatus?.mode === 'recovery') {
       return { label: 'Recovery in progress', dotClass: 'bg-amber-500 animate-pulse' };
     }
@@ -200,16 +206,19 @@ export default function DashboardPage() {
     }
 
     return { label: 'Healthy', dotClass: 'bg-emerald-500' };
-  }, [kpiData, systemSyncStatus]);
+  }, [kpiData, systemSyncStatus, recoveryComplete]);
 
   const recoveryHint = useMemo(() => {
     if (!systemSyncStatus) return null;
 
     if (systemSyncStatus.mode === 'recovery') {
       const gapDays = systemSyncStatus.sync_gap_days;
-      const progress = systemSyncStatus.recovery_progress ?? 0;
-      const chunk = systemSyncStatus.current_chunk;
+      const progress = recoveryProgress;
+      const chunk = recoveryChunk;
       const gapLabel = typeof gapDays === 'number' ? `${gapDays.toFixed(1)} days` : 'missing days';
+      if (recoveryComplete) {
+        return `Recovery complete: synced ${gapLabel} (${progress}%)`;
+      }
       return `Data recovering: syncing ${gapLabel} (${progress}%)${chunk ? ` · ${chunk}` : ''}`;
     }
 
@@ -224,7 +233,7 @@ export default function DashboardPage() {
       }
     }
     return null;
-  }, [systemSyncStatus]);
+  }, [systemSyncStatus, recoveryComplete, recoveryProgress, recoveryChunk]);
 
   // Growth calculations
   const orderGrowth = yesterdayOrders > 0 ? ((todayOrders - yesterdayOrders) / yesterdayOrders) * 100 : 0;

@@ -1,7 +1,7 @@
 """Add sync_state table for recovery tracking.
 
 Revision ID: 028_add_sync_state
-Revises: 4ee7c3339ab0
+Revises: 028_facility_inventory
 Create Date: 2026-05-20
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 revision = "028_add_sync_state"
-down_revision = "4ee7c3339ab0"
+down_revision = "028_facility_inventory"
 branch_labels = None
 depends_on = None
 
