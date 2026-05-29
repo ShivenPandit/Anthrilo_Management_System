@@ -4,12 +4,12 @@ from datetime import date, datetime, timedelta
 from typing import Optional, Dict, Any, List
 from collections import defaultdict
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_, or_
+from sqlalchemy import func, and_, or_, case
 from app.db.models import (
     Fabric, Yarn, Garment, Inventory, Sale,
     ProductionPlan, ProductionActivity, Panel, ProductionPlanningReport
 )
-from app.db.export_models import InventorySnapshotRecord, SalesOrderRecord, ShopifyMasterData
+from app.db.export_models import InventorySnapshotRecord, SalesOrderRecord, ShopifyMasterData, SalesReturnRecord
 
 
 EXCLUDED_ORDER_STATUSES = {
@@ -332,6 +332,11 @@ class ReportsService:
             ShopifyMasterData.variant_sku.asc(),
         )
 
+        # Include only SIMPLE SKUs; skip BUNDLE or other values.
+        masters_query = masters_query.filter(
+            func.upper(func.coalesce(ShopifyMasterData.simple_bundle, "")) == "SIMPLE"
+        )
+
         # Apply type filter if provided (comma-separated list of types)
         if type_filter:
             type_list = [t.strip() for t in type_filter.split(",") if t.strip()]
@@ -362,6 +367,10 @@ class ReportsService:
                         SalesOrderRecord.status.is_(None),
                         SalesOrderRecord.status.notin_(EXCLUDED_ORDER_STATUSES),
                     ),
+                    or_(
+                        SalesOrderRecord.sale_order_item_status.is_(None),
+                        func.upper(SalesOrderRecord.sale_order_item_status).notin_(EXCLUDED_ORDER_STATUSES),
+                    ),
                     SalesOrderRecord.order_date >= start_dt,
                     SalesOrderRecord.order_date < end_dt,
                     SalesOrderRecord.sku.in_(unique_sku_values),
@@ -377,6 +386,71 @@ class ReportsService:
                 for row in sales_rows
                 if row.sku
             }
+
+        # Returns/cancellations: subtract return qty by SKU in the same date window
+        returns_map: Dict[str, int] = {}
+        return_date_text = func.nullif(SalesReturnRecord.return_date, "")
+        dispatch_date_text = func.nullif(SalesReturnRecord.dispatch_or_cancellation_date, "")
+        parsed_return_date = case(
+            (
+                return_date_text.op("~")(r"^\d{2}-\d{2}-\d{4}$"),
+                func.to_date(return_date_text, "DD-MM-YYYY"),
+            ),
+            (
+                return_date_text.op("~")(r"^\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2}$"),
+                func.to_date(func.substring(return_date_text, 1, 10), "DD-MM-YYYY"),
+            ),
+            (
+                return_date_text.op("~")(r"^\d{4}-\d{2}-\d{2}$"),
+                func.to_date(return_date_text, "YYYY-MM-DD"),
+            ),
+            (
+                return_date_text.op("~")(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$"),
+                func.to_date(func.substring(return_date_text, 1, 10), "YYYY-MM-DD"),
+            ),
+            else_=None,
+        )
+        parsed_dispatch_date = case(
+            (
+                dispatch_date_text.op("~")(r"^\d{2}-\d{2}-\d{4}$"),
+                func.to_date(dispatch_date_text, "DD-MM-YYYY"),
+            ),
+            (
+                dispatch_date_text.op("~")(r"^\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2}$"),
+                func.to_date(func.substring(dispatch_date_text, 1, 10), "DD-MM-YYYY"),
+            ),
+            (
+                dispatch_date_text.op("~")(r"^\d{4}-\d{2}-\d{2}$"),
+                func.to_date(dispatch_date_text, "YYYY-MM-DD"),
+            ),
+            (
+                dispatch_date_text.op("~")(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$"),
+                func.to_date(func.substring(dispatch_date_text, 1, 10), "YYYY-MM-DD"),
+            ),
+            else_=None,
+        )
+        return_event_date = func.coalesce(parsed_return_date, parsed_dispatch_date)
+
+        returns_rows = (
+            self.db.query(
+                SalesReturnRecord.sku.label("sku"),
+                func.coalesce(func.sum(SalesReturnRecord.return_qty), 0).label("return_qty"),
+            )
+            .filter(
+                SalesReturnRecord.sku.isnot(None),
+                SalesReturnRecord.sku != "",
+                return_event_date.isnot(None),
+                return_event_date >= start_date,
+                return_event_date <= end_date,
+            )
+            .group_by(SalesReturnRecord.sku)
+            .all()
+        )
+        returns_map = {
+            (row.sku or "").strip().upper(): int(row.return_qty or 0)
+            for row in returns_rows
+            if row.sku
+        }
 
         inventory_rows = (
             self.db.query(
@@ -405,7 +479,11 @@ class ReportsService:
 
             sku_key = sku.upper()
             sales_row = sales_map.get(sku_key, {})
-            net_sales = int(sales_row.get("net_sales") or 0)
+            gross_sales = int(sales_row.get("net_sales") or 0)
+            return_qty = int(returns_map.get(sku_key, 0) or 0)
+            net_sales = gross_sales - return_qty
+            if net_sales < 0:
+                net_sales = 0
             good_inventory = int(inventory_map.get(sku_key, 0) or 0)
 
             season_value = (master.season or "").strip().upper()
