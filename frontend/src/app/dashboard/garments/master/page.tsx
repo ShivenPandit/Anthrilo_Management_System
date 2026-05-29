@@ -314,7 +314,7 @@ export default function GarmentMasterPage() {
             <table className="min-w-full">
               <thead>
                 <tr className="bg-slate-50/70 dark:bg-slate-800/40">
-                  {[...(needsInventory ? ['Stock'] : []), 'SKU Code', 'Product Name', 'Category', 'Color', 'Size', 'Brand', 'HSN', 'MRP', 'Weight', 'Status'].map((h) => (
+                  {[...(needsInventory ? ['Stock'] : []), 'SKU Code', 'Product Name', 'Category', 'Color', 'Size', 'Brand', 'IN Stock', 'MRP', 'Weight', 'Status'].map((h) => (
                     <th key={h} className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">
                       {h}
                     </th>
@@ -375,9 +375,13 @@ export default function GarmentMasterPage() {
                     </td>
                     {/* Brand */}
                     <td className="px-4 py-3 text-xs font-medium text-slate-700 dark:text-slate-300">{item.brand}</td>
-                    {/* HSN */}
+                    {/* IN Stock */}
                     <td className="px-4 py-3">
-                      <span className="font-mono text-[11px] text-slate-400 dark:text-slate-500">{item.hsnCode}</span>
+                      <span className={`text-sm font-bold tabular-nums ${item.inventory > 0
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : 'text-rose-600 dark:text-rose-400'}`}>
+                          {fmt(item.inventory)}
+                      </span>
                     </td>
                     {/* MRP */}
                     <td className="px-4 py-3">

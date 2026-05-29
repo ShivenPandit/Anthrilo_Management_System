@@ -1353,23 +1353,28 @@ class UnicommerceService:
                         or 0,
                         default=0,
                     ),
-                    "facility": self._safe_str(snap.get("Facility") or facility_code),
-                    "item_type_name": self._safe_str(snap.get("Item Type Name")),
-                    "ean": self._safe_str(snap.get("EAN")),
-                    "upc": self._safe_str(snap.get("UPC")),
-                    "isbn": self._safe_str(snap.get("ISBN")),
-                    "color": self._safe_str(snap.get("Color")),
-                    "size": self._safe_str(snap.get("Size")),
-                    "brand": self._safe_str(snap.get("Brand")),
-                    "category_name": self._safe_str(snap.get("Category Name")),
-                    "open_sale": self._safe_str(snap.get("Open Sale")),
-                    "bad_inventory": self._safe_str(snap.get("Bad Inventory")),
-                    "putaway_pending": self._safe_str(snap.get("Putaway Pending")),
-                    "pending_inventory_assessment": self._safe_str(snap.get("Pending Inventory Assessment")),
-                    "open_purchase": self._safe_str(snap.get("Open Purchase")),
-                    "enabled": self._safe_str(snap.get("Enabled")),
-                    "source_updated_at": self._safe_str(snap.get("Updated")),
-                    "cost_price_csv": self._safe_str(snap.get("Cost Price")),
+                    "facility": self._safe_str(snap.get("Facility") or snap.get("facility") or facility_code),
+                    "color": self._safe_str(snap.get("Color") or snap.get("color")),
+                    "size": self._safe_str(snap.get("Size") or snap.get("size")),
+                    "brand": self._safe_str(snap.get("Brand") or snap.get("brand")),
+                    "category": self._safe_str(
+                        snap.get("Category Name")
+                        or snap.get("categoryName")
+                        or snap.get("Category")
+                    ),
+                    "mrp": self._safe_float(
+                        snap.get("MRP")
+                        or snap.get("mrp")
+                        or snap.get("maxRetailPrice")
+                        or 0.0,
+                        default=0.0,
+                    ),
+                    "cost_price": self._safe_float(
+                        snap.get("Cost Price")
+                        or snap.get("costPrice")
+                        or 0.0,
+                        default=0.0,
+                    ),
                     "updated_at": datetime.utcnow(),
                 }
             )
@@ -1386,23 +1391,13 @@ class UnicommerceService:
                     "available_qty": stmt.excluded.available_qty,
                     "reserved_qty": stmt.excluded.reserved_qty,
                     "blocked_qty": stmt.excluded.blocked_qty,
-                    "facility": stmt.excluded.facility,
-                    "item_type_name": stmt.excluded.item_type_name,
-                    "ean": stmt.excluded.ean,
-                    "upc": stmt.excluded.upc,
-                    "isbn": stmt.excluded.isbn,
-                    "color": stmt.excluded.color,
-                    "size": stmt.excluded.size,
-                    "brand": stmt.excluded.brand,
-                    "category_name": stmt.excluded.category_name,
-                    "open_sale": stmt.excluded.open_sale,
-                    "bad_inventory": stmt.excluded.bad_inventory,
-                    "putaway_pending": stmt.excluded.putaway_pending,
-                    "pending_inventory_assessment": stmt.excluded.pending_inventory_assessment,
-                    "open_purchase": stmt.excluded.open_purchase,
-                    "enabled": stmt.excluded.enabled,
-                    "source_updated_at": stmt.excluded.source_updated_at,
-                    "cost_price_csv": stmt.excluded.cost_price_csv,
+                    "facility": func.coalesce(stmt.excluded.facility, InventorySnapshotRecord.facility),
+                    "color": func.coalesce(stmt.excluded.color, InventorySnapshotRecord.color),
+                    "size": func.coalesce(stmt.excluded.size, InventorySnapshotRecord.size),
+                    "brand": func.coalesce(stmt.excluded.brand, InventorySnapshotRecord.brand),
+                    "category": func.coalesce(stmt.excluded.category, InventorySnapshotRecord.category),
+                    "mrp": func.coalesce(stmt.excluded.mrp, InventorySnapshotRecord.mrp),
+                    "cost_price": func.coalesce(stmt.excluded.cost_price, InventorySnapshotRecord.cost_price),
                     "updated_at": datetime.utcnow(),
                 },
             )

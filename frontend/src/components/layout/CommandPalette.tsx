@@ -196,15 +196,6 @@ const BASE_SEARCH_ITEMS: SearchItem[] = [
     keywords: ['garment', 'catalogue', 'master', 'product'],
   },
   {
-    id: 'garment-inventory',
-    title: 'Garment Inventory',
-    description: 'Current stock levels',
-    href: '/dashboard/garments/inventory',
-    icon: Boxes,
-    category: 'Garments',
-    keywords: ['inventory', 'stock', 'garment'],
-  },
-  {
     id: 'production-orders',
     title: 'Production Orders',
     description: 'Active & planned production orders',

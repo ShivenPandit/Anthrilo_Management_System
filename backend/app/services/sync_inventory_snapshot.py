@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import text
 
 from app.core.token_manager import get_token_manager
 from app.db.export_models import FacilityInventorySnapshot
@@ -169,7 +170,29 @@ async def _download_parse_inventory_csv(download_url: str) -> List[Dict[str, Any
 
         reader = csv.DictReader(io.StringIO(csv_text))
         rows: List[Dict[str, Any]] = []
+        # Fetch name-to-sku mapping from latest item_master export to resolve missing SKUs in Inventory Snapshot CSV
+        name_to_sku_map = {}
+        try:
+            with SessionLocal() as db:
+                res = db.execute(text("""
+                    SELECT er.payload->>'Name', er.payload->>'Product Code'
+                    FROM export_rows er
+                    JOIN export_jobs ej ON er.export_job_id = ej.id
+                    WHERE ej.export_type = 'item_master' AND ej.status = 'completed'
+                    ORDER BY ej.id DESC
+                """))
+                for r_name, r_sku in res:
+                    if r_name and r_sku:
+                        name_to_sku_map[r_name.strip().lower()] = r_sku.strip()
+            logger.info(f"Loaded {len(name_to_sku_map)} name-to-sku mappings from item_master")
+        except Exception as e:
+            logger.error(f"Failed to load name-to-sku map: {e}")
+
         for row in reader:
+            item_name = (row.get("Item Type Name") or row.get("itemTypeName") or "").strip().lower()
+            mapped_sku = name_to_sku_map.get(item_name)
+            if mapped_sku:
+                row["Item Type SKU"] = mapped_sku
             rows.append(row)
 
         logger.info(f"Inventory export: Parsed {len(rows)} inventory rows from CSV")
@@ -208,39 +231,36 @@ async def fetch_and_sync_inventory(facility_code: str = "anthrilo") -> Dict[str,
     # we append a counter to duplicate SKUs.
     aggregated_rows = {}
     for row in rows:
-        sku_base = (row.get("Item Type Name") or row.get("itemTypeName") or "").strip()
+        sku_base = (row.get("Item Type SKU") or row.get("itemTypeSKU") or "").strip()
         if not sku_base:
             continue
             
         sku = sku_base
-        counter = 1
-        while sku in aggregated_rows:
-            sku = f"{sku_base}@@{counter}"
-            counter += 1
+        if sku not in aggregated_rows:
+            aggregated_rows[sku] = {
+                "sku": sku,
+                "facility_code": facility_code,
+                "category": (row.get("Category Name") or row.get("categoryName") or row.get("Category") or "Uncategorized").strip() or "Uncategorized",
+                "disabled": False,
+                "cost_price": _safe_float(row.get("Cost Price") or row.get("costPrice")),
+                "inventory": 0,
+                "available_inventory": 0,
+                "reserved_inventory": 0,
+                "raw_data": row
+            }
             
-        aggregated_rows[sku] = {
-            "sku": sku,
-            "facility_code": facility_code,
-            "category": (row.get("Category Name") or row.get("categoryName") or row.get("Category") or "Uncategorized").strip() or "Uncategorized",
-            "disabled": False,
-            "cost_price": _safe_float(row.get("Cost Price") or row.get("costPrice")),
-            "inventory": 0,
-            "available_inventory": 0,
-            "reserved_inventory": 0,
-            "raw_data": row
-        }
-            
-        # Global enabled check
+        # Global enabled check (if any of the duplicates is enabled, keep it enabled)
         enabled_raw = (row.get("Enabled") or row.get("enabled") or "").strip().lower()
         if enabled_raw in ("true", "1", "yes", "y"):
             aggregated_rows[sku]["disabled"] = False
-        else:
+        elif sku not in aggregated_rows or aggregated_rows[sku]["disabled"]:
+            # Only set to disabled if it's currently disabled or newly created
             aggregated_rows[sku]["disabled"] = True
             
         inv_val = _safe_int(row.get("Inventory") or row.get("inventory"))
         aggregated_rows[sku]["inventory"] += inv_val
         aggregated_rows[sku]["available_inventory"] += inv_val  # Usually 1:1 in this export
-        aggregated_rows[sku]["reserved_inventory"] += _safe_int(row.get("Inventory Blocked") or row.get("inventoryBlocked"))
+        aggregated_rows[sku]["reserved_inventory"] += _safe_int(row.get("Open Sale") or row.get("openSale") or row.get("Inventory Blocked") or row.get("inventoryBlocked"))
 
     unique_skus = list(aggregated_rows.values())
     
