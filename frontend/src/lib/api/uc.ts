@@ -92,16 +92,18 @@ export const ucCatalog = {
 // Inventory (used by the stock-analysis page)
 export const ucInventory = {
     getSummary: () =>
-        apiClient.get('/uc/catalog/inventory/summary').then((res) => {
+        apiClient.get('/unicommerce-data/inventory-summary').then((res) => {
             const d = res.data || {};
             return {
                 data: {
                     successful: d.successful,
                     summary: {
                         total_skus: d.totalSKUs ?? d.totalProducts ?? 0,
-                        total_inventory: d.totalRealInventory ?? 0,
-                        out_of_stock_skus: d.skusOutOfStock ?? 0,
-                        total_blocked: d.totalVirtualInventory ?? 0,
+                        in_stock: d.skusWithStock ?? d.inStock ?? d.in_stock ?? 0,
+                        out_of_stock: d.skusOutOfStock ?? d.outOfStock ?? d.out_of_stock ?? 0,
+                        total_inventory: d.totalRealInventory ?? d.total_inventory ?? 0,
+                        total_virtual: d.totalVirtualInventory ?? d.total_virtual ?? 0,
+                        categories: d.categories ?? [],
                     },
                 },
             };
@@ -133,8 +135,12 @@ export const ucInventory = {
                     color: el.color || '',
                     size: el.size || '',
                     brand: el.brand || '',
-                    costPrice: el.costPrice || el.price || 0,
+                    costPrice: el.costPrice || el.price || el.mrp || 0,
+                    price: el.price ?? el.mrp ?? el.maxRetailPrice ?? el.costPrice ?? 0,
+                    mrp: el.mrp ?? el.price ?? el.maxRetailPrice ?? 0,
                     inventory: snap.inventory ?? 0,
+                    availableInventory: snap.availableInventory ?? snap.inventory ?? 0,
+                    virtualInventory: snap.virtualInventory ?? snap.openSale ?? 0,
                     openSale: snap.openSale ?? 0,
                     badInventory: snap.badInventory ?? 0,
                     putawayPending: snap.putawayPending ?? 0,
@@ -181,8 +187,12 @@ export const ucInventory = {
                     color: el.color || '',
                     size: el.size || '',
                     brand: el.brand || '',
-                    costPrice: el.costPrice || el.price || 0,
+                    costPrice: el.costPrice || el.price || el.mrp || 0,
+                    price: el.price ?? el.mrp ?? el.maxRetailPrice ?? el.costPrice ?? 0,
+                    mrp: el.mrp ?? el.price ?? el.maxRetailPrice ?? 0,
                     inventory: snap.inventory ?? 0,
+                    availableInventory: snap.availableInventory ?? snap.inventory ?? 0,
+                    virtualInventory: snap.virtualInventory ?? snap.openSale ?? 0,
                     openSale: snap.openSale ?? 0,
                     badInventory: snap.badInventory ?? 0,
                     putawayPending: snap.putawayPending ?? 0,

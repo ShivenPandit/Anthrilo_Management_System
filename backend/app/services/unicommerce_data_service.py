@@ -141,14 +141,15 @@ class UnicommerceDataService:
 
     @staticmethod
     def _resolve_inventory_snapshot_table_name(db: Session) -> Optional[str]:
-        """Resolve the inventory snapshot source table, preferring the required singular name."""
+        """Resolve the inventory snapshot source table."""
         try:
-            if db.execute(text("SELECT to_regclass('public.inventory_snapshot')")).scalar():
-                return "inventory_snapshot"
+            if db.execute(text("SELECT to_regclass('public.facility_inventory_snapshot')")).scalar():
+                return "facility_inventory_snapshot"
             if db.execute(text("SELECT to_regclass('public.inventory_snapshots')")).scalar():
                 return "inventory_snapshots"
         except Exception:
             return None
+        return None
         return None
 
     def _fetch_inventory_snapshot_map_by_sku(self, skus: List[str]) -> Dict[str, Dict[str, int]]:
@@ -165,12 +166,14 @@ class UnicommerceDataService:
 
             # Required source query shape:
             # SELECT sku, available_qty, reserved_qty FROM inventory_snapshot;
+            inv_col = "inventory" if table_name == "facility_inventory_snapshot" else "available_qty"
+            virt_inv_col = "reserved_inventory" if table_name == "facility_inventory_snapshot" else "reserved_qty"
             stmt = text(
                 f"""
                 SELECT
                     sku,
-                    available_qty,
-                    reserved_qty
+                    {inv_col} AS available_qty,
+                    {virt_inv_col} AS reserved_qty
                 FROM {table_name}
                 WHERE sku IN :skus
                 """
@@ -5043,12 +5046,21 @@ class UnicommerceDataService:
             snapshot_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
             for payload_wrap in row_payloads:
                 payload = dict(payload_wrap[0] or {})
-                sku = self._safe_str(self._pick(payload, "itemTypeSKU", "sku"))
+                sku = self._safe_str(
+                    self._pick(
+                        payload,
+                        "itemSkuCode",
+                        "Item SkuCode",
+                        "Item SKU Code",
+                        "itemTypeSKU",
+                        "sku",
+                    )
+                )
                 if not sku:
                     continue
 
                 row_warehouse = self._safe_str(
-                    self._pick(payload, "facilityCode", "warehouse")
+                    self._pick(payload, "facilityCode", "warehouse", "Facility", "facility")
                 ) or warehouse_norm or "anthrilo"
 
                 if warehouse_norm and row_warehouse != warehouse_norm:
@@ -5060,12 +5072,21 @@ class UnicommerceDataService:
                 snapshot_map[key] = {
                     "sku": sku,
                     "warehouse": row_warehouse,
-                    "available_qty": self._safe_int(self._pick(payload, "inventory", "available_qty")),
+                    "available_qty": self._safe_int(
+                        self._pick(payload, "inventory", "Inventory", "available_qty")
+                    ),
                     "reserved_qty": self._safe_int(
-                        self._pick(payload, "openSale", "virtualInventory", "reserved_qty")
+                        self._pick(payload, "openSale", "Open Sale", "virtualInventory", "reserved_qty")
                     ),
                     "blocked_qty": self._safe_int(
-                        self._pick(payload, "inventoryBlocked", "blocked_qty", "badInventory")
+                        self._pick(
+                            payload,
+                            "inventoryBlocked",
+                            "Inventory Blocked",
+                            "blocked_qty",
+                            "badInventory",
+                            "Bad Inventory",
+                        )
                     ),
                     "updated_at": inventory_job.completed_at.isoformat() if inventory_job.completed_at else None,
                 }
@@ -5309,7 +5330,7 @@ class UnicommerceDataService:
         blocked = int(record.blocked_qty or 0)
 
         category_name = self._safe_str(
-            self._safe_str(record.category_name)
+            self._safe_str(record.category)
             or self._pick(raw, "categoryName", "Category Name", "category")
             or item_master_meta.get("categoryName")
             or product_master_meta.get("categoryName")
@@ -5317,22 +5338,22 @@ class UnicommerceDataService:
         ) or "Uncategorized"
 
         item_name = self._safe_str(
-            self._safe_str(record.item_type_name)
-            or self._pick(raw, "itemTypeName", "itemName", "name")
+            self._pick(raw, "itemTypeName", "itemName", "name")
             or item_master_meta.get("name")
             or product_master_meta.get("name")
             or sales_order_meta.get("name")
         ) or self._safe_str(record.sku)
 
         price = self._safe_float(
-            self._safe_str(record.cost_price_csv)
+            record.mrp
             or self._pick(raw, "price", "mrp", "MRP", "costPrice", "Cost Price")
             or item_master_meta.get("price"),
             default=0.0,
         )
 
         cost_price = self._safe_float(
-            self._pick(raw, "costPrice", "Cost Price", "price", "mrp", "MRP")
+            record.cost_price
+            or self._pick(raw, "costPrice", "Cost Price", "price", "mrp", "MRP")
             or item_master_meta.get("costPrice"),
             default=0.0,
         )
@@ -5385,7 +5406,7 @@ class UnicommerceDataService:
                 else item_master_meta.get("enabled"),
                 default=True,
             ),
-            "ean": self._safe_str(record.ean) or self._safe_str(self._pick(raw, "ean", "EAN") or item_master_meta.get("ean")) or "-",
+            "ean": self._safe_str(self._pick(raw, "ean", "EAN") or item_master_meta.get("ean")) or "-",
             "scanIdentifier": self._safe_str(
                 self._pick(raw, "scanIdentifier", "UPC", "ISBN")
                 or item_master_meta.get("scanIdentifier")
@@ -5452,7 +5473,7 @@ class UnicommerceDataService:
             base_where = """
                 er.export_job_id = :job_id
                 AND (:keyword = '' OR (
-                    COALESCE(NULLIF(er.payload->>'SKU Code',''), NULLIF(er.payload->>'Product Code',''), NULLIF(er.payload->>'itemTypeSKU','')) ILIKE :like
+                    LEFT(TRIM(COALESCE(NULLIF(er.payload->>'SKU Code',''), NULLIF(er.payload->>'skuCode',''), NULLIF(er.payload->>'Item SkuCode',''), NULLIF(er.payload->>'itemSkuCode',''), NULLIF(er.payload->>'Product Code',''), NULLIF(er.payload->>'productCode',''), NULLIF(er.payload->>'Item Type SKU',''), NULLIF(er.payload->>'itemTypeSKU',''), NULLIF(er.payload->>'Item SKU',''), NULLIF(er.payload->>'itemSKU',''), NULLIF(er.payload->>'Item Type Name',''), NULLIF(er.payload->>'itemTypeName',''), NULLIF(er.payload->>'Name',''), NULLIF(er.payload->>'name',''), NULLIF(er.payload->>'Item Name',''), NULLIF(er.payload->>'itemName',''))), 120) ILIKE :like
                     OR COALESCE(NULLIF(er.payload->>'Name',''), NULLIF(er.payload->>'Item Name',''), NULLIF(er.payload->>'itemName','')) ILIKE :like
                     OR COALESCE(NULLIF(er.payload->>'Category Name',''), NULLIF(er.payload->>'Category',''), NULLIF(er.payload->>'categoryName','')) ILIKE :like
                     OR COALESCE(NULLIF(er.payload->>'Brand',''), NULLIF(er.payload->>'brand','')) ILIKE :like
@@ -5463,13 +5484,17 @@ class UnicommerceDataService:
             stock_join = ""
             stock_where = ""
             if stock_filter_norm in {"in_stock", "out_of_stock"}:
+                inv_col = "inventory" if inv_table == "facility_inventory_snapshot" else "available_qty"
+                virt_col = "0" if inv_table == "facility_inventory_snapshot" else "reserved_qty"
+                warehouse_col = "facility_code" if inv_table == "facility_inventory_snapshot" else "warehouse_code"
+
                 stock_join = f"""
                     LEFT JOIN (
-                        SELECT sku, SUM(available_qty)::bigint AS inv
+                        SELECT sku, SUM({inv_col})::bigint AS inv, SUM({virt_col})::bigint AS virt_inv
                         FROM {inv_table}
-                        WHERE warehouse = :warehouse
+                        WHERE {warehouse_col} = :warehouse
                         GROUP BY sku
-                    ) inv ON inv.sku = COALESCE(NULLIF(er.payload->>'SKU Code',''), NULLIF(er.payload->>'Product Code',''), NULLIF(er.payload->>'itemTypeSKU',''))
+                    ) inv ON inv.sku = items.sku
                 """
                 if stock_filter_norm == "in_stock":
                     stock_where = " AND COALESCE(inv.inv, 0) > 0 "
@@ -5494,7 +5519,7 @@ class UnicommerceDataService:
                         MAX(enabled) AS enabled
                     FROM (
                         SELECT
-                            COALESCE(NULLIF(er.payload->>'SKU Code',''), NULLIF(er.payload->>'Product Code',''), NULLIF(er.payload->>'itemTypeSKU','')) AS sku,
+                            LEFT(TRIM(COALESCE(NULLIF(er.payload->>'SKU Code',''), NULLIF(er.payload->>'skuCode',''), NULLIF(er.payload->>'Item SkuCode',''), NULLIF(er.payload->>'itemSkuCode',''), NULLIF(er.payload->>'Product Code',''), NULLIF(er.payload->>'productCode',''), NULLIF(er.payload->>'Item Type SKU',''), NULLIF(er.payload->>'itemTypeSKU',''), NULLIF(er.payload->>'Item SKU',''), NULLIF(er.payload->>'itemSKU',''), NULLIF(er.payload->>'Item Type Name',''), NULLIF(er.payload->>'itemTypeName',''), NULLIF(er.payload->>'Name',''), NULLIF(er.payload->>'name',''), NULLIF(er.payload->>'Item Name',''), NULLIF(er.payload->>'itemName',''))), 120) AS sku,
                             COALESCE(NULLIF(er.payload->>'Name',''), NULLIF(er.payload->>'Item Name',''), NULLIF(er.payload->>'itemName','')) AS name,
                             COALESCE(NULLIF(er.payload->>'Description',''), NULLIF(er.payload->>'description','')) AS description,
                             COALESCE(NULLIF(er.payload->>'Category Name',''), NULLIF(er.payload->>'Category',''), NULLIF(er.payload->>'categoryName','')) AS category_name,
@@ -5513,7 +5538,6 @@ class UnicommerceDataService:
                     ) t
                     WHERE t.sku IS NOT NULL
                       AND t.sku <> ''
-                      AND lower(trim(t.sku)) NOT IN ('zeroskuu','0','-')
                       AND t.enabled IN ('true','1','yes','y')
                       AND t.sku_type = 'GOODS'
                       AND t.itype = 'SIMPLE'
@@ -5565,7 +5589,7 @@ class UnicommerceDataService:
                         MAX(enabled) AS enabled
                     FROM (
                         SELECT
-                            COALESCE(NULLIF(er.payload->>'SKU Code',''), NULLIF(er.payload->>'Product Code',''), NULLIF(er.payload->>'itemTypeSKU','')) AS sku,
+                            LEFT(TRIM(COALESCE(NULLIF(er.payload->>'SKU Code',''), NULLIF(er.payload->>'skuCode',''), NULLIF(er.payload->>'Item SkuCode',''), NULLIF(er.payload->>'itemSkuCode',''), NULLIF(er.payload->>'Product Code',''), NULLIF(er.payload->>'productCode',''), NULLIF(er.payload->>'Item Type SKU',''), NULLIF(er.payload->>'itemTypeSKU',''), NULLIF(er.payload->>'Item SKU',''), NULLIF(er.payload->>'itemSKU',''), NULLIF(er.payload->>'Item Type Name',''), NULLIF(er.payload->>'itemTypeName',''), NULLIF(er.payload->>'Name',''), NULLIF(er.payload->>'name',''), NULLIF(er.payload->>'Item Name',''), NULLIF(er.payload->>'itemName',''))), 120) AS sku,
                             COALESCE(NULLIF(er.payload->>'Name',''), NULLIF(er.payload->>'Item Name',''), NULLIF(er.payload->>'itemName','')) AS name,
                             COALESCE(NULLIF(er.payload->>'Description',''), NULLIF(er.payload->>'description','')) AS description,
                             COALESCE(NULLIF(er.payload->>'Category Name',''), NULLIF(er.payload->>'Category',''), NULLIF(er.payload->>'categoryName','')) AS category_name,
@@ -5584,7 +5608,6 @@ class UnicommerceDataService:
                     ) t
                     WHERE t.sku IS NOT NULL
                       AND t.sku <> ''
-                      AND lower(trim(t.sku)) NOT IN ('zeroskuu','0','-')
                       AND t.enabled IN ('true','1','yes','y')
                       AND t.sku_type = 'GOODS'
                       AND t.itype = 'SIMPLE'
@@ -5738,29 +5761,32 @@ class UnicommerceDataService:
             # Use inventory_snapshots as the absolute source of truth for the facility catalog.
             # This perfectly matches the Unicommerce "Product Master Data" which bounds
             # catalog visibility by facility association, preventing bloat from global item_master.
+            
+            inv_col = "inventory" if inv_table == "facility_inventory_snapshot" else "available_qty"
+            virt_inv_col = "reserved_inventory" if inv_table == "facility_inventory_snapshot" else "reserved_qty"
+            warehouse_col = "facility_code" if inv_table == "facility_inventory_snapshot" else "warehouse"
+
             summary_stmt = text(
                 f"""
                 WITH inv AS (
                     SELECT 
                         sku,
-                        lower(trim(COALESCE(enabled, ''))) AS enabled,
-                        MAX(regexp_replace(COALESCE(category_name,''), '\\s+-\\s+.*$', '')) AS category_name,
-                        SUM(available_qty)::bigint AS inv_qty,
-                        SUM(reserved_qty)::bigint AS virt_qty
+                        MAX(regexp_replace(COALESCE(category,''), '\s+-\s+.*$', '')) AS category,
+                        SUM({inv_col})::bigint AS inv, 
+                        SUM({virt_inv_col})::bigint AS virt_qty
                     FROM {inv_table}
-                    WHERE warehouse = :warehouse
+                    WHERE {warehouse_col} = :warehouse
                       AND sku IS NOT NULL
                       AND sku <> ''
-                      AND lower(sku) NOT IN ('zeroskuu','0','-')
-                    GROUP BY sku, lower(trim(COALESCE(enabled, '')))
+                    GROUP BY sku
                 )
                 SELECT
                     COUNT(*)::bigint AS total_skus,
-                    SUM(CASE WHEN inv.enabled IN ('true','1','yes','y') THEN 1 ELSE 0 END)::bigint AS enabled_skus,
-                    SUM(CASE WHEN COALESCE(inv.inv_qty,0) > 0 THEN 1 ELSE 0 END)::bigint AS in_stock_skus,
-                    SUM(COALESCE(inv.inv_qty,0))::bigint AS total_inventory,
+                    COUNT(*)::bigint AS enabled_skus,
+                    SUM(CASE WHEN COALESCE(inv.inv,0) > 0 THEN 1 ELSE 0 END)::bigint AS in_stock_skus,
+                    SUM(COALESCE(inv.inv,0))::bigint AS total_inventory,
                     SUM(COALESCE(inv.virt_qty,0))::bigint AS total_virtual,
-                    COUNT(DISTINCT lower(COALESCE(inv.category_name,'Uncategorized')))::bigint AS category_count
+                    COUNT(DISTINCT lower(COALESCE(inv.category,'Uncategorized')))::bigint AS category_count
                 FROM inv
                 """
             )
@@ -5776,20 +5802,19 @@ class UnicommerceDataService:
                 WITH inv AS (
                     SELECT 
                         sku,
-                        MAX(regexp_replace(COALESCE(category_name,''), '\\s+-\\s+.*$', '')) AS category_name,
-                        SUM(available_qty)::bigint AS inv_qty
+                        MAX(regexp_replace(COALESCE(category,''), '\s+-\s+.*$', '')) AS category,
+                        SUM({inv_col})::bigint AS inv, SUM({virt_inv_col})::bigint AS virt_inv_qty
                     FROM {inv_table}
-                    WHERE warehouse = :warehouse
+                    WHERE {warehouse_col} = :warehouse
                       AND sku IS NOT NULL
                       AND sku <> ''
-                      AND lower(sku) NOT IN ('zeroskuu','0','-')
                     GROUP BY sku
                 )
                 SELECT
-                    COALESCE(NULLIF(inv.category_name,''), 'Uncategorized') AS category,
+                    COALESCE(NULLIF(inv.category,''), 'Uncategorized') AS category,
                     COUNT(*)::bigint AS skus,
-                    SUM(COALESCE(inv.inv_qty,0))::bigint AS inventory,
-                    SUM(CASE WHEN COALESCE(inv.inv_qty,0) > 0 THEN 1 ELSE 0 END)::bigint AS in_stock
+                    SUM(COALESCE(inv.inv,0))::bigint AS inventory,
+                    SUM(CASE WHEN COALESCE(inv.inv,0) > 0 THEN 1 ELSE 0 END)::bigint AS in_stock
                 FROM inv
                 GROUP BY 1
                 ORDER BY inventory DESC

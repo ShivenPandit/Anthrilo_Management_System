@@ -337,7 +337,6 @@ export default function DashboardPage() {
     { title: 'Planning Report', desc: 'Garment production planning', href: '/dashboard/garments/planning-report', icon: FileText, color: 'from-orange-500 to-amber-500' },
     { title: 'Production Planning Raw Data', desc: 'Stitching, cutting and finishing tracker', href: '/dashboard/garments/production-planning-report', icon: Factory, color: 'from-sky-500 to-cyan-500' },
     { title: 'Production Planning & Status Report', desc: 'Date-wise status and balance report', href: '/dashboard/garments/production-planning-status-report', icon: FileText, color: 'from-indigo-500 to-sky-500' },
-    { title: 'Inventory', desc: 'Stock levels by SKU', href: '/dashboard/garments/inventory', icon: Boxes, color: 'from-emerald-500 to-teal-500' },
     { title: 'Sales', desc: 'Transactions & returns', href: '/dashboard/sales/transactions', icon: Receipt, color: 'from-amber-500 to-orange-500' },
     { title: 'Reports', desc: 'Insights & analytics', href: '/dashboard/reports/reports-index', icon: BarChart3, color: 'from-violet-500 to-purple-500' },
     { title: 'Best SKUs', desc: 'Top performing products', href: '/dashboard/garments/best-skus', icon: Zap, color: 'from-rose-500 to-pink-500' },

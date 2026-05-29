@@ -63,13 +63,6 @@ export default function GarmentsPage() {
       color: 'from-indigo-500 to-blue-500',
     },
     {
-      title: 'Inventory',
-      description: 'Track finished goods inventory',
-      icon: '📦',
-      href: '/dashboard/garments/inventory',
-      color: 'from-emerald-500 to-teal-500',
-    },
-    {
       title: 'Orders',
       description: 'Real-time orders from Anthrilo',
       icon: '🛒',
