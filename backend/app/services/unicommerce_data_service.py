@@ -17,12 +17,11 @@ from app.db.session import SessionLocal
 from app.db.export_models import (
     ExportJob,
     ExportRow,
-    InventorySnapshotRecord,
     ShopifyMasterData,
     SalesOrderRecord,
     SalesReturnRecord,
 )
-from app.db.models import ProductMaster
+from app.db.models import 
 from app.services.cache_service import CacheService
 from app.services.unicommerce import get_unicommerce_service
 from app.utils.timezone_utils import IST, normalize_date_range_ist
@@ -3756,28 +3755,81 @@ class UnicommerceDataService:
                 "skus": [],
             }
 
-    async def get_bundle_skus(self, force_refresh: bool = False) -> Dict[str, Any]:
+    async def get_bundle_skus(
+        self,
+        force_refresh: bool = False,
+        page: int = 0,
+        limit: int = 20,
+        search: Optional[str] = None,
+        category: Optional[str] = None,
+        enabled_only: bool = False
+    ) -> Dict[str, Any]:
         """Get bundle SKU catalogue with cache compatibility."""
         try:
             cache_key = "uc:bundle_skus:all"
+            cached = None
 
             if not force_refresh:
                 cached = CacheService.get(cache_key)
-                if cached:
-                    logger.info("BUNDLE SKUs: Redis cache hit")
-                    cached["_cached"] = True
-                    return cached
             else:
                 CacheService.delete(cache_key)
 
-            result = self._build_bundle_catalog_from_db()
-            if result.get("success"):
-                CacheService.set(cache_key, result, 14400)
-                logger.info(
-                    "BUNDLE SKUs: Cached (%s bundles)",
-                    (result.get("summary") or {}).get("total_bundles", 0),
-                )
-            return result
+            if cached:
+                logger.info("BUNDLE SKUs: Redis cache hit")
+                result = cached
+            else:
+                result = self._build_bundle_catalog_from_db()
+                if result.get("success"):
+                    CacheService.set(cache_key, result, 14400)
+                    logger.info(
+                        "BUNDLE SKUs: Cached (%s bundles)",
+                        (result.get("summary") or {}).get("total_bundles", 0),
+                    )
+
+            if not result.get("success"):
+                return result
+
+            # Paginate and filter
+            all_bundles = result.get("bundles", [])
+            filtered = []
+            
+            search_lower = search.lower() if search else None
+
+            for b in all_bundles:
+                if enabled_only and not b.get("enabled"):
+                    continue
+                if category and category != "all" and b.get("category") != category:
+                    continue
+                if search_lower:
+                    b_str = (
+                        str(b.get("skuCode", "")) + " " +
+                        str(b.get("itemName", "")) + " " +
+                        str(b.get("category", "")) + " " +
+                        str(b.get("brand", "")) + " " +
+                        " ".join([str(c.get("sku", "")) for c in b.get("components", [])])
+                    ).lower()
+                    if search_lower not in b_str:
+                        continue
+                filtered.append(b)
+
+            total_records = len(filtered)
+            start_idx = page * limit
+            paginated = filtered[start_idx : start_idx + limit]
+
+            return {
+                "success": True,
+                "summary": result.get("summary", {}),
+                "data_source": result.get("data_source"),
+                "fallback_used": result.get("fallback_used"),
+                "last_synced_at": result.get("last_synced_at"),
+                "total_records": total_records,
+                "total_pages": (total_records + limit - 1) // limit if limit > 0 else 0,
+                "page": page,
+                "limit": limit,
+                "bundles": paginated,
+                "_cached": bool(cached)
+            }
+
         except Exception as exc:
             logger.error(f"Error in get_bundle_skus: {exc}", exc_info=True)
             return {
@@ -4966,15 +5018,15 @@ class UnicommerceDataService:
     ) -> Dict[str, Any]:
         db = self._get_db()
         try:
-            query = db.query(InventorySnapshotRecord)
+            query = db.query()
 
             warehouse_norm = self._safe_str(warehouse)
             if warehouse_norm:
-                query = query.filter(InventorySnapshotRecord.warehouse == warehouse_norm)
+                query = query.filter(.warehouse == warehouse_norm)
 
             clean_skus = [self._safe_str(sku) for sku in (skus or []) if self._safe_str(sku)]
             if clean_skus:
-                query = query.filter(InventorySnapshotRecord.sku.in_(clean_skus))
+                query = query.filter(.sku.in_(clean_skus))
 
             records = query.all()
             if records:
@@ -5245,13 +5297,13 @@ class UnicommerceDataService:
         try:
             rows = (
                 db.query(
-                    ProductMaster.sku,
-                    ProductMaster.name,
-                    ProductMaster.size,
-                    ProductMaster.type,
-                    ProductMaster.net_weight,
+                    .sku,
+                    .name,
+                    .size,
+                    .type,
+                    .net_weight,
                 )
-                .filter(ProductMaster.sku.in_(clean_skus))
+                .filter(.sku.in_(clean_skus))
                 .all()
             )
         except Exception as exc:
@@ -5319,7 +5371,7 @@ class UnicommerceDataService:
 
     def _inventory_record_to_catalog_element(
         self,
-        record: InventorySnapshotRecord,
+        record: ,
         item_master_meta: Optional[Dict[str, Any]] = None,
         product_master_meta: Optional[Dict[str, Any]] = None,
         sales_order_meta: Optional[Dict[str, Any]] = None,

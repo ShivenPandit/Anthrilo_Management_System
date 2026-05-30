@@ -177,7 +177,7 @@ export const unicommerceApi = {
     apiClient.get('/unicommerce-data/fabric-sales', { params }),
 
   // Bundle SKU catalog
-  getBundleSkus: (params?: { force_refresh?: boolean }) =>
+  getBundleSkus: (params?: { force_refresh?: boolean, page?: number, limit?: number, search?: string, category?: string, enabled_only?: boolean }) =>
     apiClient.get('/unicommerce-data/bundle-skus', { params }),
 
   // Bundle sales analysis
