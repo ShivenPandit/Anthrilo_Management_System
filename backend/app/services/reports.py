@@ -9,7 +9,12 @@ from app.db.models import (
     Fabric, Yarn, Garment, Inventory, Sale,
     ProductionPlan, ProductionActivity, Panel, ProductionPlanningReport
 )
-from app.db.export_models import SalesOrderRecord, ShopifyMasterData, SalesReturnRecord
+from app.db.export_models import (
+    FacilityInventorySnapshot,
+    SalesOrderRecord,
+    ShopifyMasterData,
+    SalesReturnRecord,
+)
 
 
 EXCLUDED_ORDER_STATUSES = {
@@ -468,15 +473,15 @@ class ReportsService:
 
         inventory_rows = (
             self.db.query(
-                InventorySnapshotRecord.sku.label("sku"),
-                func.coalesce(func.sum(InventorySnapshotRecord.available_qty), 0).label(
+                FacilityInventorySnapshot.sku.label("sku"),
+                func.coalesce(func.sum(FacilityInventorySnapshot.available_inventory), 0).label(
                     "good_inventory"),
             )
             .filter(
-                InventorySnapshotRecord.sku.isnot(None),
-                InventorySnapshotRecord.sku != "",
+                FacilityInventorySnapshot.sku.isnot(None),
+                FacilityInventorySnapshot.sku != "",
             )
-            .group_by(InventorySnapshotRecord.sku)
+            .group_by(FacilityInventorySnapshot.sku)
             .all()
         )
         inventory_map: Dict[str, int] = {
@@ -758,15 +763,15 @@ class ReportsService:
 
         scanning_rows = (
             self.db.query(
-                InventorySnapshotRecord.sku.label("sku"),
-                func.coalesce(func.sum(InventorySnapshotRecord.available_qty), 0).label(
+                FacilityInventorySnapshot.sku.label("sku"),
+                func.coalesce(func.sum(FacilityInventorySnapshot.available_inventory), 0).label(
                     "scanning"),
             )
             .filter(
-                InventorySnapshotRecord.sku.isnot(None),
-                InventorySnapshotRecord.sku != "",
+                FacilityInventorySnapshot.sku.isnot(None),
+                FacilityInventorySnapshot.sku != "",
             )
-            .group_by(InventorySnapshotRecord.sku)
+            .group_by(FacilityInventorySnapshot.sku)
             .all()
         )
         scanning_map: Dict[str, int] = {
