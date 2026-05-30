@@ -932,9 +932,21 @@ def get_sales_by_sku(
 @router.get("/bundle-skus")
 async def get_bundle_skus(
     force_refresh: bool = Query(False, description="Bypass cache and re-fetch"),
+    page: int = Query(0, description="Page number"),
+    limit: int = Query(20, description="Items per page"),
+    search: Optional[str] = Query(None, description="Search term"),
+    category: Optional[str] = Query(None, description="Category filter"),
+    enabled_only: bool = Query(False, description="Only show active bundles"),
 ):
     service = get_unicommerce_data_service()
-    return await service.get_bundle_skus(force_refresh=force_refresh)
+    return await service.get_bundle_skus(
+        force_refresh=force_refresh,
+        page=page,
+        limit=limit,
+        search=search,
+        category=category,
+        enabled_only=enabled_only
+    )
 
 
 @router.get("/bundle-sales-analysis")
