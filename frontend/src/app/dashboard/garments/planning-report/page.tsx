@@ -19,6 +19,7 @@ interface PlanningReportItem {
     sku: string;
     name: string;
     type: string;
+    lifecycle?: string | null;
     size: string;
     /** Sum of sales_orders.qty for order_date in the selected range (same rules as backend). */
     net_sale_qty: number;
@@ -464,6 +465,7 @@ export default function GarmentPlanningReportPage() {
                                             'SKU',
                                             'NAME',
                                             'TYPE',
+                                            'LIFECYCLE',
                                             'Size',
                                             'Net sale (qty)',
                                             'good inventory',
@@ -497,6 +499,7 @@ export default function GarmentPlanningReportPage() {
                                             <td className="px-4 py-3 whitespace-nowrap font-mono text-xs">{item.sku}</td>
                                             <td className="px-4 py-3 min-w-[280px]">{item.name || '-'}</td>
                                             <td className="px-4 py-3 whitespace-nowrap">{item.type || '-'}</td>
+                                            <td className="px-4 py-3 whitespace-nowrap">{item.lifecycle || '-'}</td>
                                             <td className="px-4 py-3 whitespace-nowrap">{item.size || '-'}</td>
                                             <td className="px-4 py-3 text-right whitespace-nowrap">
                                                 {formatNumber(item.net_sale_qty)}
@@ -542,7 +545,7 @@ export default function GarmentPlanningReportPage() {
                                     ))}
                                     {!items.length && (
                                         <tr>
-                                            <td colSpan={17} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
+                                            <td colSpan={18} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
                                                 No planning rows on this page for the selected filters.
                                             </td>
                                         </tr>
