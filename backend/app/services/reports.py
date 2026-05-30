@@ -9,7 +9,7 @@ from app.db.models import (
     Fabric, Yarn, Garment, Inventory, Sale,
     ProductionPlan, ProductionActivity, Panel, ProductionPlanningReport
 )
-from app.db.export_models import InventorySnapshotRecord, SalesOrderRecord, ShopifyMasterData, SalesReturnRecord, FacilityInventorySnapshot
+from app.db.export_models import InventorySnapshotRecord, SalesOrderRecord, ShopifyMasterData, SalesReturnRecord
 
 
 EXCLUDED_ORDER_STATUSES = {
@@ -47,7 +47,6 @@ class ReportsService:
 
     def __init__(self, db: Session):
         self.db = db
-
 
     def raw_materials_stock_analysis(self, category: Optional[str] = None) -> list:
         """Combined raw materials stock analysis for yarn + fabric"""
@@ -134,7 +133,6 @@ class ReportsService:
             })
 
         return result
-
 
     def fabric_stock_sheet_total(self) -> Dict[str, Any]:
         """Generate total fabric stock sheet across all types"""
@@ -308,7 +306,6 @@ class ReportsService:
             "detailed_costs": cost_data
         }
 
-
     def _collect_garment_planning_rows(
         self,
         start_date: date,
@@ -323,7 +320,8 @@ class ReportsService:
 
         season_filter = (season or "both").strip().lower()
         start_dt = datetime.combine(start_date, datetime.min.time())
-        end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+        end_dt = datetime.combine(
+            end_date + timedelta(days=1), datetime.min.time())
         days_count = max((end_date - start_date).days + 1, 1)
 
         # Query ALL SKUs from master data WITHOUT filtering by season or bundle type
@@ -334,14 +332,17 @@ class ReportsService:
 
         # Include only SIMPLE SKUs; skip BUNDLE or other values.
         masters_query = masters_query.filter(
-            func.upper(func.coalesce(ShopifyMasterData.simple_bundle, "")) == "SIMPLE"
+            func.upper(func.coalesce(
+                ShopifyMasterData.simple_bundle, "")) == "SIMPLE"
         )
 
         # Apply type filter if provided (comma-separated list of types)
         if type_filter:
-            type_list = [t.strip() for t in type_filter.split(",") if t.strip()]
+            type_list = [t.strip()
+                         for t in type_filter.split(",") if t.strip()]
             if type_list:
-                masters_query = masters_query.filter(ShopifyMasterData.type.in_(type_list))
+                masters_query = masters_query.filter(
+                    ShopifyMasterData.type.in_(type_list))
 
         masters = masters_query.all()
 
@@ -365,11 +366,13 @@ class ReportsService:
                     SalesOrderRecord.sku != "",
                     or_(
                         SalesOrderRecord.status.is_(None),
-                        SalesOrderRecord.status.notin_(EXCLUDED_ORDER_STATUSES),
+                        SalesOrderRecord.status.notin_(
+                            EXCLUDED_ORDER_STATUSES),
                     ),
                     or_(
                         SalesOrderRecord.sale_order_item_status.is_(None),
-                        func.upper(SalesOrderRecord.sale_order_item_status).notin_(EXCLUDED_ORDER_STATUSES),
+                        func.upper(SalesOrderRecord.sale_order_item_status).notin_(
+                            EXCLUDED_ORDER_STATUSES),
                     ),
                     SalesOrderRecord.order_date >= start_dt,
                     SalesOrderRecord.order_date < end_dt,
@@ -387,24 +390,93 @@ class ReportsService:
                 if row.sku
             }
 
-        # NOTE: Returns are NOT subtracted separately here because the
-        # sales_orders query above already excludes RETURNED / CANCELLED items
-        # via EXCLUDED_ORDER_STATUSES.  Previously, returns from the
-        # sales_returns table were also subtracted, which caused
-        # double-counting and under-reported Net Sale values.
+        # Returns/cancellations: subtract return qty by SKU in the same date window
+        returns_map: Dict[str, int] = {}
+        return_date_text = func.nullif(SalesReturnRecord.return_date, "")
+        dispatch_date_text = func.nullif(
+            SalesReturnRecord.dispatch_or_cancellation_date, "")
+        parsed_return_date = case(
+            (
+                return_date_text.op("~")(r"^\d{2}-\d{2}-\d{4}$"),
+                func.to_date(return_date_text, "DD-MM-YYYY"),
+            ),
+            (
+                return_date_text.op("~")(
+                    r"^\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2}$"),
+                func.to_date(func.substring(
+                    return_date_text, 1, 10), "DD-MM-YYYY"),
+            ),
+            (
+                return_date_text.op("~")(r"^\d{4}-\d{2}-\d{2}$"),
+                func.to_date(return_date_text, "YYYY-MM-DD"),
+            ),
+            (
+                return_date_text.op("~")(
+                    r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$"),
+                func.to_date(func.substring(
+                    return_date_text, 1, 10), "YYYY-MM-DD"),
+            ),
+            else_=None,
+        )
+        parsed_dispatch_date = case(
+            (
+                dispatch_date_text.op("~")(r"^\d{2}-\d{2}-\d{4}$"),
+                func.to_date(dispatch_date_text, "DD-MM-YYYY"),
+            ),
+            (
+                dispatch_date_text.op("~")(
+                    r"^\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2}$"),
+                func.to_date(func.substring(
+                    dispatch_date_text, 1, 10), "DD-MM-YYYY"),
+            ),
+            (
+                dispatch_date_text.op("~")(r"^\d{4}-\d{2}-\d{2}$"),
+                func.to_date(dispatch_date_text, "YYYY-MM-DD"),
+            ),
+            (
+                dispatch_date_text.op("~")(
+                    r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$"),
+                func.to_date(func.substring(
+                    dispatch_date_text, 1, 10), "YYYY-MM-DD"),
+            ),
+            else_=None,
+        )
+        return_event_date = func.coalesce(
+            parsed_return_date, parsed_dispatch_date)
 
-        # Good Inventory: use facility_inventory_snapshot (Unicommerce sync
-        # target) instead of the legacy inventory_snapshots table.
-        inventory_rows = (
+        returns_rows = (
             self.db.query(
-                FacilityInventorySnapshot.sku.label("sku"),
-                func.coalesce(func.sum(FacilityInventorySnapshot.inventory), 0).label("good_inventory"),
+                SalesReturnRecord.sku.label("sku"),
+                func.coalesce(func.sum(SalesReturnRecord.return_qty), 0).label(
+                    "return_qty"),
             )
             .filter(
-                FacilityInventorySnapshot.sku.isnot(None),
-                FacilityInventorySnapshot.sku != "",
+                SalesReturnRecord.sku.isnot(None),
+                SalesReturnRecord.sku != "",
+                return_event_date.isnot(None),
+                return_event_date >= start_date,
+                return_event_date <= end_date,
             )
-            .group_by(FacilityInventorySnapshot.sku)
+            .group_by(SalesReturnRecord.sku)
+            .all()
+        )
+        returns_map = {
+            (row.sku or "").strip().upper(): int(row.return_qty or 0)
+            for row in returns_rows
+            if row.sku
+        }
+
+        inventory_rows = (
+            self.db.query(
+                InventorySnapshotRecord.sku.label("sku"),
+                func.coalesce(func.sum(InventorySnapshotRecord.available_qty), 0).label(
+                    "good_inventory"),
+            )
+            .filter(
+                InventorySnapshotRecord.sku.isnot(None),
+                InventorySnapshotRecord.sku != "",
+            )
+            .group_by(InventorySnapshotRecord.sku)
             .all()
         )
         inventory_map: Dict[str, int] = {
@@ -422,19 +494,25 @@ class ReportsService:
 
             sku_key = sku.upper()
             sales_row = sales_map.get(sku_key, {})
-            net_sales = int(sales_row.get("net_sales") or 0)
+            gross_sales = int(sales_row.get("net_sales") or 0)
+            return_qty = int(returns_map.get(sku_key, 0) or 0)
+            net_sales = gross_sales - return_qty
+            if net_sales < 0:
+                net_sales = 0
             good_inventory = int(inventory_map.get(sku_key, 0) or 0)
 
             season_value = (master.season or "").strip().upper()
             season_factor = 1.2 if "WINTER" in season_value else 1.0
             style_factor = _safe_float(master.garment_2, default=1.0)
             lead_time = _safe_int(master.amazon_asin, default=0)
-            buffer_days = _safe_int(master.buffer or master.production_time, default=0)
+            buffer_days = _safe_int(
+                master.buffer or master.production_time, default=0)
             average_daily_sales = net_sales / days_count if days_count else 0.0
             adjusted_ads = average_daily_sales * season_factor * style_factor
             required_qty = adjusted_ads * (lead_time + buffer_days)
             plan_qty = required_qty - good_inventory
-            percent_available = (good_inventory / required_qty) * 100 if required_qty > 0 else 0.0
+            percent_available = (good_inventory / required_qty) * \
+                100 if required_qty > 0 else 0.0
             if percent_available < 33:
                 status = "RED"
             elif percent_available <= 66:
@@ -482,7 +560,8 @@ class ReportsService:
             start_date, end_date = end_date, start_date
 
         season_filter = (season or "both").strip().lower()
-        all_items = self._collect_garment_planning_rows(start_date, end_date, season, type_filter=type_filter)
+        all_items = self._collect_garment_planning_rows(
+            start_date, end_date, season, type_filter=type_filter)
 
         status_breakdown = {"RED": 0, "YELLOW": 0, "GREEN": 0}
         total_net_sale_qty = 0
@@ -500,10 +579,11 @@ class ReportsService:
         total_skus = len(all_items)
         safe_page_size = max(1, min(int(page_size), 500))
         safe_page = max(1, int(page))
-        total_pages = max(1, (total_skus + safe_page_size - 1) // safe_page_size) if total_skus else 1
+        total_pages = max(1, (total_skus + safe_page_size - 1) //
+                          safe_page_size) if total_skus else 1
         safe_page = min(safe_page, total_pages)
         start_idx = (safe_page - 1) * safe_page_size
-        page_items = all_items[start_idx : start_idx + safe_page_size]
+        page_items = all_items[start_idx: start_idx + safe_page_size]
 
         return {
             "report_type": "Garment Planning Report",
@@ -539,7 +619,8 @@ class ReportsService:
         season: str = "both",
         type_filter: Optional[str] = None,
     ) -> bytes:
-        rows = self._collect_garment_planning_rows(start_date, end_date, season, type_filter=type_filter)
+        rows = self._collect_garment_planning_rows(
+            start_date, end_date, season, type_filter=type_filter)
         headers = [
             "style_code",
             "sku",
@@ -627,10 +708,11 @@ class ReportsService:
         total_skus = len(items)
         safe_page_size = max(1, min(int(page_size), 500))
         safe_page = max(1, int(page))
-        total_pages = max(1, (total_skus + safe_page_size - 1) // safe_page_size) if total_skus else 1
+        total_pages = max(1, (total_skus + safe_page_size - 1) //
+                          safe_page_size) if total_skus else 1
         safe_page = min(safe_page, total_pages)
         start_idx = (safe_page - 1) * safe_page_size
-        page_items = items[start_idx : start_idx + safe_page_size]
+        page_items = items[start_idx: start_idx + safe_page_size]
 
         return {
             "report_type": "Fabric Planning Report",
@@ -666,7 +748,8 @@ class ReportsService:
             start_date, end_date = end_date, start_date
 
         # Required quantity source: garment planning report logic for same date window.
-        garment_rows = self._collect_garment_planning_rows(start_date, end_date, season="both", type_filter=type_filter)
+        garment_rows = self._collect_garment_planning_rows(
+            start_date, end_date, season="both", type_filter=type_filter)
         required_qty_map: Dict[str, float] = {
             str(row.get("sku") or "").strip().upper(): float(row.get("required_qty") or 0.0)
             for row in garment_rows
@@ -675,14 +758,15 @@ class ReportsService:
 
         scanning_rows = (
             self.db.query(
-                FacilityInventorySnapshot.sku.label("sku"),
-                func.coalesce(func.sum(FacilityInventorySnapshot.inventory), 0).label("scanning"),
+                InventorySnapshotRecord.sku.label("sku"),
+                func.coalesce(func.sum(InventorySnapshotRecord.available_qty), 0).label(
+                    "scanning"),
             )
             .filter(
-                FacilityInventorySnapshot.sku.isnot(None),
-                FacilityInventorySnapshot.sku != "",
+                InventorySnapshotRecord.sku.isnot(None),
+                InventorySnapshotRecord.sku != "",
             )
-            .group_by(FacilityInventorySnapshot.sku)
+            .group_by(InventorySnapshotRecord.sku)
             .all()
         )
         scanning_map: Dict[str, int] = {
@@ -692,7 +776,8 @@ class ReportsService:
         }
 
         start_dt = datetime.combine(start_date, datetime.min.time())
-        end_dt = datetime.combine(end_date + timedelta(days=1), datetime.min.time())
+        end_dt = datetime.combine(
+            end_date + timedelta(days=1), datetime.min.time())
 
         planning_rows = (
             self.db.query(ProductionPlanningReport)
@@ -719,7 +804,8 @@ class ReportsService:
             cutting = int(row.cutting or 0)
             stitching = int(row.stitching or 0)
             finishing = int(row.finishing or 0)
-            balance = required_qty - cutting_plan - cutting - stitching - finishing - scanning
+            balance = required_qty - cutting_plan - \
+                cutting - stitching - finishing - scanning
 
             total_required_qty += required_qty
             total_balance += balance
@@ -763,7 +849,8 @@ class ReportsService:
         end_date: date,
         type_filter: Optional[str] = None,
     ) -> bytes:
-        payload = self.production_planning_status_report(start_date=start_date, end_date=end_date, type_filter=type_filter)
+        payload = self.production_planning_status_report(
+            start_date=start_date, end_date=end_date, type_filter=type_filter)
         rows = payload.get("items") or []
 
         headers = [
@@ -805,7 +892,6 @@ class ReportsService:
             )
 
         return buf.getvalue().encode("utf-8-sig")
-
 
     def daily_sales_report(self, report_date: date) -> Dict[str, Any]:
         """Generate daily sales report for a specific date"""
@@ -1016,7 +1102,6 @@ class ReportsService:
             "inactive_panels": inactive_panels
         }
 
-
     def slow_moving_inventory_report(self, days_period: int = 90) -> Dict[str, Any]:
         """Identify slow-moving inventory based on sales velocity"""
         from datetime import timedelta
@@ -1127,7 +1212,6 @@ class ReportsService:
             "items_needing_reorder": sum(1 for item in fast_movers if item["needs_reorder"]),
             "fast_moving_items": fast_movers
         }
-
 
     def production_plan_report(
         self,
@@ -1249,7 +1333,6 @@ class ReportsService:
             "variance_details": variance_data
         }
 
-
     def bundle_sku_sales_report(
         self,
         start_date: Optional[date] = None,
@@ -1334,7 +1417,6 @@ class ReportsService:
             },
             "bundles": bundles_list
         }
-
 
     def discount_report_general(
         self,
