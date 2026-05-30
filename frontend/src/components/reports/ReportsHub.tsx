@@ -223,26 +223,6 @@ const REPORTS: ReportDef[] = [
 
   // Inventory
   {
-
-    id: 'yarn-forecasting',
-    title: 'Yarn Forecasting',
-    description: 'AI demand forecasting for yarn',
-    href: '/dashboard/reports/raw-materials/yarn-forecasting',
-    icon: Zap,
-    category: 'Inventory',
-    frequency: 'AI Forecast',
-    badge: 'AI',
-  },
-  {
-    id: 'fabric-reports',
-    title: 'Fabric Stock',
-    description: 'Stock by type, period & cost',
-    href: '/dashboard/reports/fabric',
-    icon: FileText,
-    category: 'Inventory',
-    frequency: 'Daily',
-  },
-  {
     id: 'inventory-analysis',
     title: 'Inventory Health',
     description: 'Slow & fast moving turnover rates',

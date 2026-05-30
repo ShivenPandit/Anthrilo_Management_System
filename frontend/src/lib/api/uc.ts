@@ -65,11 +65,13 @@ export const ucCatalog = {
         getInventorySnapshot?: boolean;
         getAggregates?: boolean;
         keyword?: string;
+        stockFilter?: 'all' | 'in_stock' | 'out_of_stock';
     }) => {
         // Build the Unicommerce search payload
         const payload: any = {
             getInventorySnapshot: params.getInventorySnapshot ?? false,
             getAggregates: params.getAggregates ?? false,
+            stockFilter: params.stockFilter || 'all',
             searchOptions: {
                 displayStart: params.displayStart,
                 displayLength: params.displayLength,

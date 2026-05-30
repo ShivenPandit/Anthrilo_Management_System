@@ -48,9 +48,10 @@ export default function GarmentMasterPage() {
     queryFn: async () => {
       const response = await ucCatalog.searchItems({
         displayStart: page * PAGE_SIZE,
-        displayLength: needsInventory ? PAGE_SIZE * 4 : PAGE_SIZE,
+        displayLength: PAGE_SIZE,
         getInventorySnapshot: needsInventory,
         keyword: (debouncedSearch || selectedCategory) || undefined,
+        stockFilter: stockFilter,
       });
       return response.data;
     },
@@ -60,7 +61,7 @@ export default function GarmentMasterPage() {
 
   /* derived data */
   const items = useMemo(() => {
-    const mapped = (data?.elements || []).map((item: any) => {
+    return (data?.elements || []).map((item: any) => {
       const snap = item.inventorySnapshots?.[0];
       return {
         skuCode: item.skuCode || '-',
@@ -79,11 +80,7 @@ export default function GarmentMasterPage() {
         inventory: snap?.inventory ?? snap?.goodInventory ?? 0,
       };
     });
-    // Apply stock filter client-side
-    if (stockFilter === 'in_stock') return mapped.filter((i: any) => i.inventory > 0).slice(0, PAGE_SIZE);
-    if (stockFilter === 'out_of_stock') return mapped.filter((i: any) => i.inventory <= 0).slice(0, PAGE_SIZE);
-    return mapped;
-  }, [data, stockFilter]);
+  }, [data]);
 
   const totalRecords = data?.totalRecords || 0;
   const totalPages = Math.ceil(totalRecords / PAGE_SIZE);
