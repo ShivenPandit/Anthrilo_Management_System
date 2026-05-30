@@ -7,8 +7,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import httpx
+from sqlalchemy import func, text
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy import text
 
 from app.core.token_manager import get_token_manager
 from app.db.export_models import FacilityInventorySnapshot
@@ -23,7 +23,7 @@ INVENTORY_EXPORT_COLUMNS = [
     "color", "size", "brand", "categoryName",
     "openSale", "inventory", "inventoryBlocked", "badInventory",
     "putawayPending", "pendingInventoryAssessment", "openPurchase",
-    "enabled", "updated", "costPrice", "maxRetailPrice",
+    "enabled", "updated", "costPrice", "MRP",
 ]
 
 EXPORT_MAX_POLL_SECONDS = 300
@@ -203,42 +203,31 @@ async def _download_parse_inventory_csv(download_url: str) -> List[Dict[str, Any
         return []
 
 
-async def fetch_and_sync_inventory(facility_code: str = "anthrilo") -> Dict[str, Any]:
-    """
-    Fetch exact Inventory Snapshot from Unicommerce, deduplicate SKUs,
-    and upsert them into the facility_inventory_snapshot PostgreSQL table.
-    """
-    start_time = time_module.time()
-    
-    # Step 1: Trigger Unicommerce Export
-    job_code = await _create_inventory_export_job(facility_code)
-    if not job_code:
-        return {"success": False, "error": "Failed to create export job"}
+def _aggregate_inventory_rows(rows: List[Dict[str, Any]], facility_code: str) -> Dict[str, Any]:
+    aggregated_rows: Dict[str, Dict[str, Any]] = {}
+    missing_sku_rows = 0
+    duplicate_rows = 0
 
-    # Step 2: Poll
-    download_url = await _poll_inventory_export(job_code, facility_code)
-    if not download_url:
-        return {"success": False, "error": "Poll failed or timed out"}
-
-    # Step 3: Download & Parse
-    rows = await _download_parse_inventory_csv(download_url)
-    if not rows:
-        return {"success": True, "inserted": 0, "fetched": 0, "duplicates_removed": 0}
-
-    # Step 4: Map every CSV row to a distinct DB row to match Unicommerce export exactly.
-    # Unicommerce allows duplicate 'Item Type Name's (e.g. same name but different colors).
-    # To bypass the DB UniqueConstraint(sku, facility) and match the row counts exactly, 
-    # we append a counter to duplicate SKUs.
-    aggregated_rows = {}
     for row in rows:
-        sku_base = (row.get("Item Type SKU") or row.get("itemTypeSKU") or "").strip()
+        sku_base = (
+            row.get("Item SkuCode")
+            or row.get("Item Type SKU")
+            or row.get("itemTypeSKU")
+            or row.get("SKU Code")
+            or row.get("skuCode")
+            or ""
+        ).strip()
         if not sku_base:
+            missing_sku_rows += 1
             continue
-            
-        sku = sku_base
-        if sku not in aggregated_rows:
-            aggregated_rows[sku] = {
-                "sku": sku,
+
+        if sku_base in aggregated_rows:
+            duplicate_rows += 1
+
+        aggregated_rows.setdefault(
+            sku_base,
+            {
+                "sku": sku_base,
                 "facility_code": facility_code,
                 "category": (row.get("Category Name") or row.get("categoryName") or row.get("Category") or "Uncategorized").strip() or "Uncategorized",
                 "color": (row.get("Color") or row.get("color") or "").strip() or None,
@@ -246,35 +235,128 @@ async def fetch_and_sync_inventory(facility_code: str = "anthrilo") -> Dict[str,
                 "brand": (row.get("Brand") or row.get("brand") or "").strip() or None,
                 "disabled": False,
                 "cost_price": _safe_float(row.get("Cost Price") or row.get("costPrice")),
-                "mrp": _safe_float(row.get("Max Retail Price") or row.get("maxRetailPrice") or row.get("mrp")),
+                "mrp": _safe_float(row.get("MRP") or row.get("Max Retail Price") or row.get("maxRetailPrice") or row.get("mrp")),
                 "inventory": 0,
                 "available_inventory": 0,
                 "reserved_inventory": 0,
-                "raw_data": row
-            }
-            
-        # Global enabled check (if any of the duplicates is enabled, keep it enabled)
+                "raw_data": row,
+            },
+        )
+
         enabled_raw = (row.get("Enabled") or row.get("enabled") or "").strip().lower()
         if enabled_raw in ("true", "1", "yes", "y"):
-            aggregated_rows[sku]["disabled"] = False
-        elif sku not in aggregated_rows or aggregated_rows[sku]["disabled"]:
-            # Only set to disabled if it's currently disabled or newly created
-            aggregated_rows[sku]["disabled"] = True
-            
-        inv_val = _safe_int(row.get("Inventory") or row.get("inventory"))
-        aggregated_rows[sku]["inventory"] += inv_val
-        aggregated_rows[sku]["available_inventory"] += inv_val  # Usually 1:1 in this export
-        aggregated_rows[sku]["reserved_inventory"] += _safe_int(row.get("Open Sale") or row.get("openSale") or row.get("Inventory Blocked") or row.get("inventoryBlocked"))
+            aggregated_rows[sku_base]["disabled"] = False
+        elif aggregated_rows[sku_base]["disabled"]:
+            aggregated_rows[sku_base]["disabled"] = True
 
-    unique_skus = list(aggregated_rows.values())
-    
-    # Step 5: Upsert into PostgreSQL
+        inv_val = _safe_int(row.get("Inventory") or row.get("inventory"))
+        aggregated_rows[sku_base]["inventory"] += inv_val
+        aggregated_rows[sku_base]["available_inventory"] += inv_val
+        aggregated_rows[sku_base]["reserved_inventory"] += _safe_int(
+            row.get("Open Sale") or row.get("openSale") or row.get("Inventory Blocked") or row.get("inventoryBlocked")
+        )
+
+    unique_rows = list(aggregated_rows.values())
+    return {
+        "rows": unique_rows,
+        "fetched_rows": len(rows),
+        "unique_rows": len(unique_rows),
+        "duplicate_rows": duplicate_rows,
+        "missing_sku_rows": missing_sku_rows,
+        "total_real_inventory": int(sum(item["inventory"] for item in unique_rows)),
+        "total_virtual_inventory": int(sum(item["reserved_inventory"] for item in unique_rows)),
+    }
+
+
+async def fetch_inventory_export_preview(facility_code: str = "anthrilo") -> Dict[str, Any]:
+    """Fetch and aggregate an inventory export without writing to the database."""
+    start_time = time_module.time()
+
+    job_code = await _create_inventory_export_job(facility_code)
+    if not job_code:
+        return {"success": False, "error": "Failed to create export job"}
+
+    download_url = await _poll_inventory_export(job_code, facility_code)
+    if not download_url:
+        return {"success": False, "error": "Poll failed or timed out"}
+
+    rows = await _download_parse_inventory_csv(download_url)
+    aggregated = _aggregate_inventory_rows(rows, facility_code) if rows else {
+        "rows": [],
+        "fetched_rows": 0,
+        "unique_rows": 0,
+        "duplicate_rows": 0,
+        "missing_sku_rows": 0,
+        "total_real_inventory": 0,
+        "total_virtual_inventory": 0,
+    }
+    duration = time_module.time() - start_time
+
+    return {
+        "success": True,
+        "job_code": job_code,
+        "download_url": download_url,
+        "rows_fetched": int(aggregated["fetched_rows"]),
+        "unique_rows": int(aggregated["unique_rows"]),
+        "duplicate_rows": int(aggregated["duplicate_rows"]),
+        "missing_sku_rows": int(aggregated["missing_sku_rows"]),
+        "total_real_inventory": int(aggregated["total_real_inventory"]),
+        "total_virtual_inventory": int(aggregated["total_virtual_inventory"]),
+        "rows": aggregated["rows"],
+        "duration": duration,
+    }
+
+
+async def fetch_and_sync_inventory(facility_code: str = "anthrilo") -> Dict[str, Any]:
+    """
+    Fetch exact Inventory Snapshot from Unicommerce, deduplicate SKUs,
+    and upsert them into the facility_inventory_snapshot PostgreSQL table.
+    """
+    start_time = time_module.time()
+    preview = await fetch_inventory_export_preview(facility_code)
+    if not preview.get("success"):
+        failure_duration = float(preview.get("duration") or (time_module.time() - start_time))
+        db = SessionLocal()
+        try:
+            ParityValidator.record_sync_audit(
+                db=db,
+                entity="inventory_snapshot",
+                rows_fetched=0,
+                rows_inserted=0,
+                duration=failure_duration,
+                rows_updated=0,
+                duplicates_detected=0,
+                missing_rows=0,
+                error_count=1,
+            )
+        except Exception:
+            logger.warning("Failed to record inventory export failure audit", exc_info=True)
+        finally:
+            db.close()
+        return {"success": False, "error": preview.get("error", "Failed to fetch inventory export")}
+
+    unique_skus = list(preview.get("rows") or [])
+
     db = SessionLocal()
     inserted_count = 0
+    updated_count = 0
     now = datetime.utcnow()
     
     try:
         if unique_skus:
+            sku_values = [str(item.get("sku") or "").strip() for item in unique_skus if str(item.get("sku") or "").strip()]
+            existing_count = 0
+            if sku_values:
+                existing_count = (
+                    db.query(func.count(FacilityInventorySnapshot.id))
+                    .filter(
+                        FacilityInventorySnapshot.facility_code == facility_code,
+                        FacilityInventorySnapshot.sku.in_(sku_values),
+                    )
+                    .scalar()
+                    or 0
+                )
+
             insert_stmt = insert(FacilityInventorySnapshot).values([
                 {
                     "sku": item["sku"],
@@ -320,28 +402,54 @@ async def fetch_and_sync_inventory(facility_code: str = "anthrilo") -> Dict[str,
             
             db.execute(upsert_stmt)
             db.commit()
-            inserted_count = len(unique_skus)
+            updated_count = int(existing_count)
+            inserted_count = max(0, len(unique_skus) - updated_count)
 
         # Audit
-        duration = time_module.time() - start_time
+        duration = float(preview.get("duration") or (time_module.time() - start_time))
         ParityValidator.record_sync_audit(
             db=db,
             entity="inventory_snapshot",
-            rows_fetched=len(rows),
+            rows_fetched=int(preview.get("rows_fetched", 0) or 0),
             rows_inserted=inserted_count,
+            rows_updated=updated_count,
+            duplicates_detected=int(preview.get("duplicate_rows", 0) or 0),
+            missing_rows=int(preview.get("missing_sku_rows", 0) or 0),
             duration=duration
         )
 
         return {
             "success": True,
-            "fetched": len(rows),
+            "fetched": int(preview.get("rows_fetched", 0) or 0),
             "inserted": inserted_count,
-            "duplicates_removed": len(rows) - inserted_count,
-            "duration": duration
+            "updated": updated_count,
+            "duplicates_removed": int(preview.get("duplicate_rows", 0) or 0),
+            "missing_rows": int(preview.get("missing_sku_rows", 0) or 0),
+            "duration": duration,
         }
     except Exception as e:
         db.rollback()
+        duration = float(time_module.time() - start_time)
+        try:
+            ParityValidator.record_sync_audit(
+                db=db,
+                entity="inventory_snapshot",
+                rows_fetched=int(preview.get("rows_fetched", 0) if isinstance(preview, dict) else 0),
+                rows_inserted=0,
+                rows_updated=0,
+                duplicates_detected=int(preview.get("duplicate_rows", 0) if isinstance(preview, dict) else 0),
+                missing_rows=int(preview.get("missing_sku_rows", 0) if isinstance(preview, dict) else 0),
+                duration=duration,
+                error_count=1,
+            )
+        except Exception:
+            logger.warning("Failed to record inventory sync failure audit", exc_info=True)
         logger.error(f"Failed to upsert inventory snapshot: {e}")
-        return {"success": False, "error": str(e)}
+        return {
+            "success": False,
+            "error": str(e),
+            "duration": duration,
+            "fetched": int(preview.get("rows_fetched", 0) if isinstance(preview, dict) else 0),
+        }
     finally:
         db.close()

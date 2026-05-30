@@ -362,6 +362,10 @@ class UnicommerceSyncOrchestrator:
                 "sync_entity": "inventory_snapshot",
                 "interval_hours": max(1, int(settings.UNICOMMERCE_SYNC_INVENTORY_INTERVAL_HOURS)),
             },
+            "inventory_parity": {
+                "sync_entity": "inventory_snapshot_parity",
+                "interval_hours": max(1, int(getattr(settings, "UNICOMMERCE_PARITY_VALIDATION_INTERVAL_HOURS", 24))),
+            },
         }
 
     def _get_last_completed_sync_time(self, entity: str) -> Optional[datetime]:
@@ -513,6 +517,9 @@ class UnicommerceSyncOrchestrator:
         finally:
             await self._release_lock(lock)
 
+    async def _run_inventory_parity_scheduler_job(self) -> Dict[str, Any]:
+        return await self.run_inventory_parity_check()
+
     async def run_due_scheduler_jobs(self) -> Dict[str, Any]:
         self._bootstrap_scheduler_state()
 
@@ -538,6 +545,8 @@ class UnicommerceSyncOrchestrator:
                     result = await self._run_sales_scheduler_job()
                 elif job_key == "returns":
                     result = await self._run_returns_scheduler_job()
+                elif job_key == "inventory_parity":
+                    result = await self._run_inventory_parity_scheduler_job()
                 else:
                     result = await self._run_inventory_scheduler_job()
             except Exception as exc:
@@ -803,6 +812,30 @@ class UnicommerceSyncOrchestrator:
             raise
         finally:
             await self._release_lock(lock)
+
+    async def run_inventory_parity_check(self) -> Dict[str, Any]:
+        """Compare the DB inventory snapshot against a fresh live export and cache the result."""
+        facility = str(settings.UNICOMMERCE_SYNC_INVENTORY_FACILITY_CODE or "anthrilo").strip() or "anthrilo"
+        try:
+            parity_results = await ParityValidator.validate_inventory_parity(facility)
+            CacheService.set("system:parity_health", parity_results, ttl=86400)
+            return {
+                "success": bool(parity_results.get("healthy", False)),
+                "entity": "inventory_snapshot",
+                "facility_code": facility,
+                **parity_results,
+            }
+        except Exception as exc:
+            logger.error(f"Inventory parity validation failed: {exc}", exc_info=True)
+            failure = {
+                "success": False,
+                "entity": "inventory_snapshot",
+                "facility_code": facility,
+                "healthy": False,
+                "error": str(exc),
+            }
+            CacheService.set("system:parity_health", failure, ttl=3600)
+            return failure
 
     async def run_incremental_sync(self, lookback_days: Optional[int] = None) -> Dict[str, Any]:
         days = int(lookback_days or settings.UNICOMMERCE_SYNC_LOOKBACK_DAYS)
@@ -1752,6 +1785,7 @@ class UnicommerceSyncOrchestrator:
                 getattr(settings, "UNICOMMERCE_SYNC_INVENTORY_FACILITY_CODE", "anthrilo")
             ).strip() or "anthrilo"
             await fetch_and_sync_inventory(facility)
+            await self.run_inventory_parity_check()
             logger.info("Startup catch-up (inventory): completed")
         except Exception as exc:
             logger.error(f"Startup catch-up (inventory) failed: {exc}", exc_info=True)

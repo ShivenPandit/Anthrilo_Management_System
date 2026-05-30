@@ -86,8 +86,10 @@ export const ucCatalog = {
     },
 
     // Inventory totals (independent of pagination)
-    getInventorySummary: () => {
-        return apiClient.get('/uc/catalog/inventory/summary');
+    getInventorySummary: (forceRefresh: boolean = true) => {
+        return apiClient.get('/uc/catalog/inventory/summary', {
+            params: forceRefresh ? { force_refresh: true } : undefined,
+        });
     },
 };
 

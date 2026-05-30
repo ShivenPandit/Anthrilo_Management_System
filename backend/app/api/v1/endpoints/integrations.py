@@ -3286,15 +3286,28 @@ async def get_data_health(db: Session = Depends(get_db)):
         from app.db.export_models import SyncLog
         latest_sync = db.query(SyncLog).order_by(SyncLog.id.desc()).first()
         sync_lag_minutes = 0
+        sync_alert_threshold_minutes = 12 * 60
+        sync_alerts = []
         if latest_sync and latest_sync.completed_at:
             sync_lag_minutes = int((datetime.utcnow() - latest_sync.completed_at).total_seconds() / 60)
-            
-        overall_healthy = parity_results.get("healthy", False) and sync_lag_minutes < 1440
+            if sync_lag_minutes > sync_alert_threshold_minutes:
+                sync_alerts.append(
+                    {
+                        "type": "sync_lag",
+                        "threshold_minutes": sync_alert_threshold_minutes,
+                        "lag_minutes": sync_lag_minutes,
+                        "last_successful_sync": latest_sync.completed_at.isoformat(),
+                    }
+                )
+
+        overall_healthy = parity_results.get("healthy", False) and sync_lag_minutes < sync_alert_threshold_minutes
         
         return {
             "success": True,
             "overall_healthy": overall_healthy,
             "sync_lag_minutes": sync_lag_minutes,
+            "sync_alert_threshold_minutes": sync_alert_threshold_minutes,
+            "sync_alerts": sync_alerts,
             "parity": parity_results,
             "schema_drift": {
                 "status": "monitored",

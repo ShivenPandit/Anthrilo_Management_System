@@ -274,29 +274,59 @@ class SyncStateService:
                 return {
                     "mode": "normal",
                     "last_successful_sync": None,
+                    "sync_gap_hours": None,
                     "sync_gap_days": None,
                     "recovery_progress": 0,
                     "current_chunk": None,
                     "healthy": False,
+                    "alerts": [],
                     "entities": [],
                 }
 
             now_utc = datetime.now(timezone.utc)
             gaps: List[float] = []
+            gap_hours_values: List[float] = []
             total_chunks = 0
             completed_chunks = 0
             current_chunk = None
             recovery_active = False
             unhealthy = False
+            alert_threshold_hours = max(1, int(settings.UNICOMMERCE_RECOVERY_MIN_GAP_HOURS))
+            alerts: List[Dict[str, Any]] = []
 
             entity_payloads = []
             for state in states:
                 self._bootstrap_from_sync_logs(db, state)
                 last_sync = _aware_utc(state.last_successful_sync)
                 gap_days = None
+                gap_hours = None
                 if last_sync:
-                    gap_days = (now_utc - last_sync).total_seconds() / 86400.0
+                    gap_hours = (now_utc - last_sync).total_seconds() / 3600.0
+                    gap_days = gap_hours / 24.0
                     gaps.append(gap_days)
+                    gap_hours_values.append(gap_hours)
+                    if gap_hours > alert_threshold_hours:
+                        alerts.append(
+                            {
+                                "entity": state.entity,
+                                "type": "sync_lag",
+                                "threshold_hours": alert_threshold_hours,
+                                "gap_hours": round(gap_hours, 2),
+                                "last_successful_sync": last_sync.isoformat(),
+                            }
+                        )
+                        unhealthy = True
+                else:
+                    alerts.append(
+                        {
+                            "entity": state.entity,
+                            "type": "never_synced",
+                            "threshold_hours": alert_threshold_hours,
+                            "gap_hours": None,
+                            "last_successful_sync": None,
+                        }
+                    )
+                    unhealthy = True
 
                 total_chunks += int(state.recovery_total_chunks or 0)
                 completed_chunks += int(state.recovery_completed_chunks or 0)
@@ -308,8 +338,13 @@ class SyncStateService:
                     unhealthy = True
 
                 entity_payloads.append(self._state_to_dict(state))
+                entity_payloads[-1]["gap_hours"] = round(gap_hours, 2) if gap_hours is not None else None
+                entity_payloads[-1]["gap_days"] = round(gap_days, 2) if gap_days is not None else None
+                entity_payloads[-1]["alert_threshold_hours"] = alert_threshold_hours
+                entity_payloads[-1]["alerted"] = bool(gap_hours is None or gap_hours > alert_threshold_hours)
 
             gap_days_value = round(max(gaps), 2) if gaps else None
+            gap_hours_value = round(max(gap_hours_values), 2) if gap_hours_values else None
             if gap_days_value is not None:
                 min_gap_hours = max(1, int(settings.UNICOMMERCE_RECOVERY_MIN_GAP_HOURS))
                 if gap_days_value * 24 > min_gap_hours:
@@ -323,10 +358,13 @@ class SyncStateService:
             return {
                 "mode": "recovery" if recovery_active else "normal",
                 "last_successful_sync": latest_sync.isoformat() if latest_sync else None,
+                "sync_gap_hours": gap_hours_value,
                 "sync_gap_days": gap_days_value,
                 "recovery_progress": recovery_progress,
                 "current_chunk": current_chunk,
                 "healthy": not unhealthy,
+                "alerts": alerts,
+                "alert_threshold_hours": alert_threshold_hours,
                 "entities": entity_payloads,
             }
         finally:
