@@ -5,12 +5,6 @@ from app.api.v1.endpoints import unicommerce_data
 from app.api.v1.endpoints import production_planning
 from app.api.v1.endpoints import system
 # Manufacturing Module
-from app.api.v1.endpoints import (
-    suppliers, purchase_orders, gate_entry, mrns,
-    yarn_store, knitting, processing, garment_production,
-)
-from app.api.v1.endpoints import product_master
-from app.api.v1.endpoints import fabric_yarn_master
 from app.api.v1.endpoints import shopify_master_data
 # Unicommerce API modules
 from app.api.v1.endpoints import (
@@ -52,35 +46,12 @@ api_router.include_router(ads.router, prefix="/ads",
 
 # Procurement Module
 api_router.include_router(
-    suppliers.router, prefix="/suppliers", tags=["Supplier Master"])
-api_router.include_router(
-    purchase_orders.router, prefix="/purchase-orders", tags=["Purchase Orders"])
-api_router.include_router(
-    gate_entry.router, prefix="/gate-entries", tags=["Gate Entry"])
-api_router.include_router(
-    mrns.router, prefix="/mrns", tags=["MRN"])
-api_router.include_router(
-    product_master.router, prefix="/products", tags=["Product Master"])
-api_router.include_router(
-    fabric_yarn_master.router,
-    prefix="/procurement/fabric-yarn-master",
-    tags=["Fabric & Yarn Master"],
-)
-api_router.include_router(
     shopify_master_data.router,
     prefix="/shopify-master-data",
     tags=["Shopify Master Data"],
 )
 
 # Manufacturing Module
-api_router.include_router(
-    yarn_store.router, prefix="/yarn-store", tags=["Yarn Store"])
-api_router.include_router(
-    knitting.router, prefix="/knitting", tags=["Knitting"])
-api_router.include_router(
-    processing.router, prefix="/processing", tags=["Processing"])
-api_router.include_router(
-    garment_production.router, prefix="/garment-production", tags=["Garment Production"])
 api_router.include_router(
     production_planning.router, prefix="/production-planning", tags=["Garment Production Planning"])
 

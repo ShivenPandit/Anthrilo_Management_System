@@ -28,7 +28,6 @@ from app.db.export_models import (
     ExportRow,
     SalesOrderRecord,
     SalesReturnRecord,
-    InventorySnapshotRecord,
     SyncLog,
 )
 from app.services.schema_drift_checker import SchemaDriftChecker
@@ -1384,20 +1383,20 @@ class UnicommerceService:
 
         db = SessionLocal()
         try:
-            stmt = pg_insert(InventorySnapshotRecord).values(payloads)
+            stmt = pg_insert().values(payloads)
             upsert_stmt = stmt.on_conflict_do_update(
                 index_elements=["sku", "warehouse"],
                 set_={
                     "available_qty": stmt.excluded.available_qty,
                     "reserved_qty": stmt.excluded.reserved_qty,
                     "blocked_qty": stmt.excluded.blocked_qty,
-                    "facility": func.coalesce(stmt.excluded.facility, InventorySnapshotRecord.facility),
-                    "color": func.coalesce(stmt.excluded.color, InventorySnapshotRecord.color),
-                    "size": func.coalesce(stmt.excluded.size, InventorySnapshotRecord.size),
-                    "brand": func.coalesce(stmt.excluded.brand, InventorySnapshotRecord.brand),
-                    "category": func.coalesce(stmt.excluded.category, InventorySnapshotRecord.category),
-                    "mrp": func.coalesce(stmt.excluded.mrp, InventorySnapshotRecord.mrp),
-                    "cost_price": func.coalesce(stmt.excluded.cost_price, InventorySnapshotRecord.cost_price),
+                    "facility": func.coalesce(stmt.excluded.facility, .facility),
+                    "color": func.coalesce(stmt.excluded.color, .color),
+                    "size": func.coalesce(stmt.excluded.size, .size),
+                    "brand": func.coalesce(stmt.excluded.brand, .brand),
+                    "category": func.coalesce(stmt.excluded.category, .category),
+                    "mrp": func.coalesce(stmt.excluded.mrp, .mrp),
+                    "cost_price": func.coalesce(stmt.excluded.cost_price, .cost_price),
                     "updated_at": datetime.utcnow(),
                 },
             )

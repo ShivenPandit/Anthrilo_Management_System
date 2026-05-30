@@ -177,34 +177,6 @@ class SalesOrderRecord(Base):
     )
 
 
-class InventorySnapshotRecord(Base):
-    __tablename__ = "inventory_snapshots"
-
-    id = Column(Integer, primary_key=True, index=True)
-    sku = Column(String(120), nullable=False, index=True)
-    warehouse = Column(String(120), nullable=False, index=True)
-
-    available_qty = Column(Integer, nullable=False, default=0)
-    reserved_qty = Column(Integer, nullable=False, default=0)
-    blocked_qty = Column(Integer, nullable=False, default=0)
-
-    facility = Column(Text, nullable=True)
-    color = Column(Text, nullable=True)
-    size = Column(Text, nullable=True)
-    brand = Column(Text, nullable=True)
-    category = Column(Text, nullable=True)
-    mrp = Column(Numeric(12, 2), nullable=True)
-    cost_price = Column(Numeric(12, 2), nullable=True)
-
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-
-    __table_args__ = (
-        UniqueConstraint("sku", "warehouse", name="uq_inventory_snapshots_sku_warehouse"),
-        Index("ix_inventory_snapshots_sku", "sku"),
-        Index("ix_inventory_snapshots_warehouse", "warehouse"),
-    )
-
 
 class FacilityInventorySnapshot(Base):
     """

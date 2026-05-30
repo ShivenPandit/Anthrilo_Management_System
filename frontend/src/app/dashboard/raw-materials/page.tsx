@@ -35,12 +35,6 @@ export default function RawMaterialsPage() {
       icon: '📊',
       href: '/dashboard/reports/raw-materials/stock-analysis',
     },
-    {
-      title: 'Yarn Forecasting',
-      description: 'AI-powered demand prediction for yarn',
-      icon: '🔮',
-      href: '/dashboard/reports/raw-materials/yarn-forecasting',
-    },
   ];
 
   return (
