@@ -7,6 +7,7 @@ from app.api.v1.api import api_router
 from app.core.redis import redis_client
 from app.services.unicommerce_sync_orchestrator import get_unicommerce_sync_orchestrator
 from app.services.recovery_service import RecoveryService
+from app.services.sync_state_service import get_sync_state_service
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -102,12 +103,16 @@ async def health_check():
     orchestrator = get_unicommerce_sync_orchestrator()
     scheduler_task = getattr(orchestrator, "_scheduler_task", None)
     scheduler_running = bool(scheduler_task and not scheduler_task.done())
+    sync_status = get_sync_state_service().get_system_status()
 
     return {
         "status": "healthy",
         "environment": settings.ENVIRONMENT,
         "redis": "connected" if redis_ok else "disconnected",
         "scheduler": "running" if scheduler_running else "stopped",
+        "sync_healthy": bool(sync_status.get("healthy", False)),
+        "sync_alerts": sync_status.get("alerts", []),
+        "last_successful_sync": sync_status.get("last_successful_sync"),
     }
 
 

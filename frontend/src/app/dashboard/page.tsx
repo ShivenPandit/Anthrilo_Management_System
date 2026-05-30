@@ -186,6 +186,9 @@ export default function DashboardPage() {
     if (systemSyncStatus?.mode === 'recovery') {
       return { label: 'Recovery in progress', dotClass: 'bg-amber-500 animate-pulse' };
     }
+    if (Array.isArray(systemSyncStatus?.alerts) && systemSyncStatus.alerts.length > 0) {
+      return { label: 'Sync lag', dotClass: 'bg-rose-500 animate-pulse' };
+    }
     if (!kpiData) {
       return { label: 'Healthy', dotClass: 'bg-emerald-500' };
     }
@@ -199,7 +202,7 @@ export default function DashboardPage() {
       const parsed = parseBackendUtcTimestamp(lastSyncedAt);
       if (parsed) {
         const lagMinutes = (Date.now() - parsed.getTime()) / 60000;
-        if (lagMinutes > 120) {
+        if (lagMinutes > 12 * 60) {
           return { label: 'Sync lag', dotClass: 'bg-rose-500 animate-pulse' };
         }
       }

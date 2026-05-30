@@ -646,26 +646,32 @@ async def get_inventory_summary(force_refresh: bool = False):
 
     # ── In-process / Redis cache (fastest path) ──────────────────────────────
     cached = CacheService.get(cache_key)
-    if cached:
+    age = _db_snapshot_age_seconds()
+    if cached and age <= stale_threshold:
         return cached
 
+    if age > stale_threshold:
+        logger.info(
+            f"INV_SUMMARY: snapshot is {age / 3600:.1f}h old — refreshing from Unicommerce"
+        )
+        try:
+            sync_result = await fetch_and_sync_inventory(facility_code="anthrilo")
+            if not sync_result.get("success"):
+                logger.warning(
+                    f"INV_SUMMARY: live refresh reported failure — returning latest DB snapshot: {sync_result.get('error')}"
+                )
+        except Exception as exc:
+            logger.error(f"INV_SUMMARY: live refresh error: {exc}", exc_info=True)
+
     # ── DB-first (< 5 ms) ────────────────────────────────────────────────────
-    age = _db_snapshot_age_seconds()
     db_summary = _build_summary_from_db()
 
     if db_summary:
-        db_summary["stale"] = age > stale_threshold
-        db_summary["snapshot_age_minutes"] = round(age / 60, 1)
+        refreshed_age = _db_snapshot_age_seconds()
+        db_summary["stale"] = refreshed_age > stale_threshold
+        db_summary["snapshot_age_minutes"] = round(refreshed_age / 60, 1)
         # Cache for shorter of stale_threshold or 15 min (avoids serving stale data forever)
         CacheService.set(cache_key, db_summary, min(stale_threshold, 900))
-
-        if age > stale_threshold:
-            logger.info(
-                f"INV_SUMMARY: snapshot is {age / 3600:.1f}h old — "
-                "triggering non-blocking background refresh"
-            )
-            asyncio.create_task(_background_refresh_inventory())
-
         return db_summary
 
     # ── Cold start: DB empty — run synchronous export once ───────────────────

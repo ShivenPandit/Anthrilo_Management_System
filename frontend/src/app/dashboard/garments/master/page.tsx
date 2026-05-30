@@ -36,9 +36,9 @@ export default function GarmentMasterPage() {
       const res = await ucCatalog.getInventorySummary();
       return res.data;
     },
-    staleTime: 15 * 60 * 1000,
+    staleTime: 0,
     gcTime: 30 * 60 * 1000,
-    refetchOnWindowFocus: false,
+    refetchOnWindowFocus: true,
   });
 
   /* 2) Paginated catalog */
