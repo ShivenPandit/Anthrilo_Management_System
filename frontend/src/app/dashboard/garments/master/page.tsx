@@ -9,6 +9,19 @@ const PAGE_SIZE = 25;
 /* tiny helpers */
 const fmt = (n?: number) => (n ?? 0).toLocaleString('en-IN');
 const inr = (n?: number) => `₹${(n ?? 0).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+const toNumber = (value: unknown) => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const pickInventoryQty = (snap: any) => toNumber(
+  snap?.inventory ??
+  snap?.goodInventory ??
+  snap?.availableInventory ??
+  snap?.available_qty ??
+  snap?.availableQty ??
+  0
+);
 
 export default function GarmentMasterPage() {
   const [search, setSearch] = useState('');
@@ -33,7 +46,7 @@ export default function GarmentMasterPage() {
   const { data: summaryData, isLoading: summaryLoading } = useQuery({
     queryKey: ['uc-inventory-summary'],
     queryFn: async () => {
-      const res = await ucCatalog.getInventorySummary();
+      const res = await ucCatalog.getInventorySummary(false);
       return res.data;
     },
     staleTime: 0,
@@ -56,13 +69,13 @@ export default function GarmentMasterPage() {
       return response.data;
     },
     staleTime: 2 * 60 * 1000,
-    placeholderData: (prev: any) => prev,
   });
 
   /* derived data */
   const items = useMemo(() => {
     return (data?.elements || []).map((item: any) => {
       const snap = item.inventorySnapshots?.[0];
+      const stockQty = pickInventoryQty(snap);
       return {
         skuCode: item.skuCode || '-',
         name: item.name || '-',
@@ -77,7 +90,7 @@ export default function GarmentMasterPage() {
         weight: item.weight || 0,
         enabled: item.enabled,
         ean: item.ean || item.scanIdentifier || '-',
-        inventory: snap?.inventory ?? snap?.goodInventory ?? 0,
+        inventory: stockQty,
       };
     });
   }, [data]);
