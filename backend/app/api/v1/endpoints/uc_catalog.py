@@ -166,6 +166,8 @@ async def search_items(payload: Dict[str, Any] = Body(...)):
                 or_(
                     FacilityInventorySnapshot.sku.ilike(kw),
                     FacilityInventorySnapshot.category.ilike(kw),
+                    FacilityInventorySnapshot.brand.ilike(kw),
+                    FacilityInventorySnapshot.color.ilike(kw),
                     cast(FacilityInventorySnapshot.raw_data, String).ilike(kw)
                 )
             )
@@ -181,13 +183,13 @@ async def search_items(payload: Dict[str, Any] = Body(...)):
                 "skuCode": row.sku,
                 "name": raw.get("Item Type Name", ""),
                 "description": "",
-                "categoryName": row.category or raw.get("Category Name", ""),
-                "color": raw.get("Color", ""),
-                "size": raw.get("Size", ""),
-                "brand": raw.get("Brand", ""),
-                "price": float(raw.get("MRP", 0) or raw.get("Cost Price", 0) or 0),
+                "categoryName": row.category or "",
+                "color": row.color or "",
+                "size": row.size or "",
+                "brand": row.brand or "",
+                "price": float(row.mrp or row.cost_price or 0),
                 "weight": float(raw.get("Weight", 0) or 0),
-                "enabled": str(raw.get("Enabled", "")).lower() == "true" or not row.disabled,
+                "enabled": not row.disabled,
                 "inventorySnapshots": [
                     {
                         "inventory": row.inventory or 0,

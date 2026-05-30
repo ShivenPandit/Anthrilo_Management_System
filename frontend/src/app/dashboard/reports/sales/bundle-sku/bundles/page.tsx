@@ -285,7 +285,37 @@ export default function BundleSkuPage() {
           { at: 70, label: 'Resolving components…' },
           { at: 90, label: 'Finalizing…' },
         ]} />
-        {isLoading || isFetching ? null : paginated.length === 0 ? (
+        {isLoading || isFetching ? (
+          <div className="table-scroll-wrap rounded-xl border border-slate-200/80 dark:border-slate-700/80 mt-4">
+            <table className="min-w-full">
+              <thead>
+                <tr className="bg-slate-50/80 dark:bg-slate-800/50">
+                  {columns.map((col) => (
+                    <th key={col.key} className="px-4 py-3 text-left text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider" style={{ width: col.width }}>
+                      {col.header}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-700/50">
+                {[...Array(10)].map((_, i) => (
+                  <tr key={i} className="animate-pulse bg-slate-50/20 dark:bg-slate-800/10">
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-20"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-32"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-16"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-12"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-12"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-12"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-8"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-24"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-6"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded-full w-12"></div></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : paginated.length === 0 ? (
           <div className="text-center py-16">
             <p className="text-sm text-slate-500 dark:text-slate-400">No bundle SKUs match the current filters.</p>
           </div>

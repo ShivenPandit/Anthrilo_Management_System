@@ -20,6 +20,7 @@ from app.db.session import SessionLocal
 from app.db.export_models import (
     ExportJob,
     ExportRow,
+    FacilityInventorySnapshot,
     SalesOrderRecord,
     SalesReturnRecord,
     SyncLog,
@@ -305,7 +306,10 @@ class UnicommerceSyncOrchestrator:
                     ),
                 )
             )
-            inventory_query = db.query()
+            inventory_query = db.query(FacilityInventorySnapshot).filter(
+                FacilityInventorySnapshot.snapshot_date >= start,
+                FacilityInventorySnapshot.snapshot_date <= end,
+            )
 
             deleted_sales = int(sales_query.count()) if truncate_sales else 0
             deleted_returns = int(returns_query.count()) if truncate_returns else 0
@@ -1019,10 +1023,10 @@ class UnicommerceSyncOrchestrator:
                 )
 
             if truncate_inventory:
-                inventory_query = db.query()
+                inventory_query = db.query(FacilityInventorySnapshot)
                 facility = str(inventory_facility_code or "").strip()
                 if facility:
-                    inventory_query = inventory_query.filter(.warehouse == facility)
+                    inventory_query = inventory_query.filter(FacilityInventorySnapshot.facility_code == facility)
                 deleted_inventory = inventory_query.delete(synchronize_session=False)
 
             db.commit()

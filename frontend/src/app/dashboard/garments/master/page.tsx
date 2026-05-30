@@ -297,9 +297,38 @@ export default function GarmentMasterPage() {
         </div>
 
         {isLoading ? (
-          <div className="flex flex-col items-center justify-center py-20">
-            <div className="w-10 h-10 border-[3px] border-slate-200 dark:border-slate-700 border-t-primary-500 rounded-full animate-spin" />
-            <p className="mt-4 text-sm text-slate-400">Fetching product catalog…</p>
+          <div className="overflow-x-auto">
+            <table className="min-w-full">
+              <thead>
+                <tr className="bg-slate-50/70 dark:bg-slate-800/40">
+                  {[...(needsInventory ? ['Stock'] : []), 'SKU Code', 'Product Name', 'Category', 'Color', 'Size', 'Brand', 'IN Stock', 'MRP', 'Weight', 'Status'].map((h) => (
+                    <th key={h} className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100/80 dark:divide-slate-800/60">
+                {[...Array(10)].map((_, i) => (
+                  <tr key={i} className="animate-pulse bg-slate-50/20 dark:bg-slate-800/10">
+                    {needsInventory && <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-8"></div></td>}
+                    <td className="px-4 py-3"><div className="h-5 bg-slate-200 dark:bg-slate-700 rounded w-24"></div></td>
+                    <td className="px-4 py-3">
+                      <div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-48 mb-1"></div>
+                      <div className="h-3 bg-slate-100 dark:bg-slate-800 rounded w-32"></div>
+                    </td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-20"></div></td>
+                    <td className="px-4 py-3 flex items-center gap-2"><div className="h-3 w-3 bg-slate-200 dark:bg-slate-700 rounded-full"></div><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-16"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-10"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-16"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-12"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-16"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-10"></div></td>
+                    <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded-full w-16"></div></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         ) : items.length === 0 ? (
           <div className="text-center py-20">
