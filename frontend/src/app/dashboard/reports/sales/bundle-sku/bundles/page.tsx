@@ -15,39 +15,37 @@ export default function BundleSkuPage() {
   const [showEnabledOnly, setShowEnabledOnly] = useState(false);
   const [expandedSku, setExpandedSku] = useState<string | null>(null);
 
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(search);
+      setPage(0);
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [search]);
+
   const { data, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ['uc-bundle-skus'],
+    queryKey: ['uc-bundle-skus', page, debouncedSearch, category, showEnabledOnly],
     queryFn: async () => {
-      const response = await ucSales.getBundleSkus();
+      const response = await ucSales.getBundleSkus({
+        page: page,
+        limit: PAGE_SIZE,
+        search: debouncedSearch,
+        category: category === 'all' ? undefined : category,
+        enabled_only: showEnabledOnly
+      });
       return response.data;
     },
     staleTime: 300_000,
   });
 
   const summary = useMemo(() => data?.summary ?? {}, [data?.summary]);
-  const allBundles: any[] = useMemo(() => data?.bundles ?? [], [data?.bundles]);
   const categories: Record<string, number> = summary.categories || {};
 
-  const filtered = useMemo(() => {
-    let items = allBundles;
-    if (showEnabledOnly) items = items.filter((b: any) => b.enabled);
-    if (category !== 'all') items = items.filter((b: any) => b.category === category);
-    if (search) {
-      const term = search.toLowerCase();
-      items = items.filter(
-        (b: any) =>
-          b.skuCode?.toLowerCase().includes(term) ||
-          b.itemName?.toLowerCase().includes(term) ||
-          b.category?.toLowerCase().includes(term) ||
-          b.brand?.toLowerCase().includes(term) ||
-          b.components?.some((c: any) => c.sku?.toLowerCase().includes(term))
-      );
-    }
-    return items;
-  }, [allBundles, search, showEnabledOnly, category]);
-
-  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
-  const paginated = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const paginated = useMemo(() => data?.bundles ?? [], [data?.bundles]);
+  const totalPages = data?.total_pages || 1;
+  const filteredLength = data?.total_records || 0;
 
   const handleRefresh = useCallback(() => {
     refetch();
@@ -275,7 +273,7 @@ export default function BundleSkuPage() {
             Bundle SKUs
           </h2>
           <span className="text-sm text-slate-500 dark:text-slate-400">
-            {filtered.length.toLocaleString('en-IN')} bundle{filtered.length !== 1 ? 's' : ''}
+            {filteredLength.toLocaleString('en-IN')} bundle{filteredLength !== 1 ? 's' : ''}
             {category !== 'all' && ` in ${category}`}
             <span className="ml-2 text-xs text-slate-400">(click a row to see components)</span>
           </span>

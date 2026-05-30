@@ -132,106 +132,79 @@ async def get_item_barcode_details(payload: Dict[str, Any] = Body(...)):
 @router.post("/item/search")
 async def search_items(payload: Dict[str, Any] = Body(...)):
     """
-    Search items with filters.
+    Search items with filters (DB-first).
     Payload: {
         keyword?, productCode?, categoryCode?,
-        getInventorySnapshot?, updatedSinceInHour?, skuType?,
+        stockFilter?,
         searchOptions?: { searchKey?, displayLength?, displayStart?, ... },
-        getAggregates?: boolean (to fetch totals across all pages)
+        getAggregates?: boolean
     }
     """
+    from app.db.session import SessionLocal
+    from app.db.export_models import FacilityInventorySnapshot
+    from sqlalchemy import or_, String
+    from sqlalchemy.sql import cast
+
+    db = SessionLocal()
     try:
-        svc = get_uc_api_service()
-        get_aggregates = payload.pop("getAggregates", False)
+        keyword = payload.get("keyword") or ""
+        stock_filter = payload.get("stockFilter") or "all"
+        opts = payload.get("searchOptions") or {}
+        display_start = opts.get("displayStart", 0)
+        display_length = opts.get("displayLength", 25)
 
-        result = await svc.post("/product/itemType/search", payload)
+        query = db.query(FacilityInventorySnapshot)
 
-        # Log sample if inventory snapshot requested
-        if payload.get("getInventorySnapshot") and result.get("successful"):
-            elements = result.get("elements", [])
-            if elements:
-                first_item = elements[0]
-                logger.info(f"Sample item structure: SKU={first_item.get('skuCode')}, "
-                            f"has inventorySnapshots: {bool(first_item.get('inventorySnapshots'))}")
-                if first_item.get("inventorySnapshots"):
-                    snap = first_item["inventorySnapshots"][0]
-                    logger.info(
-                        f"Sample inventory snapshot keys: {list(snap.keys())}")
-                    logger.info(f"Sample inventory values: inventory={snap.get('inventory')}, "
-                                f"goodInventory={snap.get('goodInventory')}, "
-                                f"availableInventory={snap.get('availableInventory')}, "
-                                f"virtualInventory={snap.get('virtualInventory')}")
+        if stock_filter == "in_stock":
+            query = query.filter(FacilityInventorySnapshot.inventory > 0)
+        elif stock_filter == "out_of_stock":
+            query = query.filter(FacilityInventorySnapshot.inventory <= 0)
 
-        # Transform response to ensure consistent field naming
-        if result.get("successful") and payload.get("getInventorySnapshot"):
-            elements = result.get("elements", [])
+        if keyword:
+            kw = f"%{keyword}%"
+            query = query.filter(
+                or_(
+                    FacilityInventorySnapshot.sku.ilike(kw),
+                    FacilityInventorySnapshot.category.ilike(kw),
+                    cast(FacilityInventorySnapshot.raw_data, String).ilike(kw)
+                )
+            )
 
-            # Collect SKU codes for dedicated inventory snapshot lookup
-            sku_codes = [item.get("skuCode")
-                         for item in elements if item.get("skuCode")]
+        total_records = query.count()
+        rows = query.order_by(FacilityInventorySnapshot.sku).offset(display_start).limit(display_length).all()
 
-            # Fetch accurate virtualInventory from dedicated snapshot API
-            vi_map = {}
-            if sku_codes:
-                try:
-                    snap_result = await svc.post(
-                        "/inventory/inventorySnapshot/get",
-                        {"itemTypeSKUs": sku_codes},
-                        facility_code="anthrilo",
-                    )
-                    if snap_result.get("successful"):
-                        for snap in snap_result.get("inventorySnapshots", []):
-                            sku = snap.get("itemTypeSKU", "")
-                            vi_map[sku] = {
-                                "virtualInventory": snap.get("virtualInventory", 0) or 0,
-                                "inventory": snap.get("inventory", 0) or 0,
-                                "openSale": snap.get("openSale", 0) or 0,
-                                "badInventory": snap.get("badInventory", 0) or 0,
-                                "putawayPending": snap.get("putawayPending", 0) or 0,
-                                "inventoryBlocked": snap.get("inventoryBlocked", 0) or 0,
-                            }
-                except Exception as e:
-                    logger.warning(f"Failed to fetch dedicated snapshot: {e}")
+        elements = []
+        for row in rows:
+            raw = row.raw_data or {}
+            
+            elements.append({
+                "skuCode": row.sku,
+                "name": raw.get("Item Type Name", ""),
+                "description": "",
+                "categoryName": row.category or raw.get("Category Name", ""),
+                "color": raw.get("Color", ""),
+                "size": raw.get("Size", ""),
+                "brand": raw.get("Brand", ""),
+                "price": float(raw.get("MRP", 0) or raw.get("Cost Price", 0) or 0),
+                "weight": float(raw.get("Weight", 0) or 0),
+                "enabled": str(raw.get("Enabled", "")).lower() == "true" or not row.disabled,
+                "inventorySnapshots": [
+                    {
+                        "inventory": row.inventory or 0,
+                    }
+                ]
+            })
 
-            for item in elements:
-                snapshots = item.get("inventorySnapshots", [])
-                sku = item.get("skuCode", "")
-
-                # If we have dedicated snapshot data, use it (more accurate)
-                if sku in vi_map:
-                    if snapshots:
-                        snap = snapshots[0]
-                        snap.update(vi_map[sku])
-                    else:
-                        item["inventorySnapshots"] = [vi_map[sku]]
-                        snapshots = item["inventorySnapshots"]
-
-                for snap in snapshots:
-                    # Normalize field names - try multiple possible field names
-                    if "goodInventory" in snap and "inventory" not in snap:
-                        snap["inventory"] = snap["goodInventory"]
-                    if "availableInventory" in snap and "inventory" not in snap:
-                        snap["inventory"] = snap["availableInventory"]
-                    # Ensure numeric values for all inventory fields
-                    snap["inventory"] = snap.get("inventory", 0) or 0
-                    snap["virtualInventory"] = snap.get(
-                        "virtualInventory", 0) or 0
-                    snap["badInventory"] = snap.get("badInventory", 0) or 0
-                    snap["openSale"] = snap.get("openSale", 0) or 0
-                    snap["inventoryBlocked"] = snap.get(
-                        "inventoryBlocked", 0) or 0
-                    snap["putawayPending"] = snap.get("putawayPending", 0) or 0
-
-        # Compute aggregates if requested
-        if get_aggregates and result.get("successful") and payload.get("getInventorySnapshot"):
-            logger.info("Computing aggregates across all pages...")
-            aggregates = await _compute_inventory_aggregates(svc, payload)
-            result["aggregates"] = aggregates
-
-        return result
+        return {
+            "successful": True,
+            "totalRecords": total_records,
+            "elements": elements
+        }
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
+        logger.error(f"Error in search_items: {e}", exc_info=True)
         return {"successful": False, "error": str(e)}
+    finally:
+        db.close()
 
 
 async def _compute_inventory_aggregates(svc, base_payload: Dict[str, Any]) -> Dict[str, int]:
