@@ -417,6 +417,7 @@ class UnicommerceDataService:
                 qty = 1
 
             price = self._safe_decimal(row.get("selling_price"))
+            discount = self._safe_decimal(row.get("discount"))
             sku = self._safe_str(row.get("sku"))
             name = self._safe_str(row.get("product_name")) or sku
 
@@ -429,6 +430,7 @@ class UnicommerceDataService:
                     "bundle_sku_code_number": self._safe_str(row.get("bundle_sku_code_number")),
                     "sellingPrice": self._to_money_float(price),
                     "selling_price": self._to_money_float(price),
+                    "discount": self._to_money_float(discount),
                     "quantity": qty,
                     "size": "",
                 }
@@ -509,7 +511,10 @@ class UnicommerceDataService:
                         ),
                         "quantity": quantity,
                         "sellingPrice": self._to_money_float(selling_price),
-                        "maxRetailPrice": self._to_money_float(selling_price),
+                        "discount": self._safe_float(item.get("discount"), default=0.0),
+                        "maxRetailPrice": self._to_money_float(
+                            selling_price + (self._safe_decimal(item.get("discount")) / Decimal(quantity) if quantity > 0 else Decimal("0"))
+                        ),
                         "size": self._safe_str(item.get("size")),
                     }
                 )
@@ -4493,6 +4498,7 @@ class UnicommerceDataService:
                             SalesOrderRecord.order_date.isnot(None),
                             SalesOrderRecord.order_date >= from_dt,
                             SalesOrderRecord.order_date <= to_dt,
+                            SalesOrderRecord.category.ilike("FABRIC"),
                         )
                     )
                     .all()
@@ -4516,8 +4522,6 @@ class UnicommerceDataService:
                             continue
 
                         raw = dict(record.raw_data or {})
-                        if not self._is_fabric_payload(raw):
-                            continue
 
                         quantity = int(record.qty or 0)
                         if quantity <= 0:
@@ -5489,12 +5493,11 @@ class UnicommerceDataService:
                 warehouse_col = "facility_code" if inv_table == "facility_inventory_snapshot" else "warehouse_code"
 
                 stock_join = f"""
-                    LEFT JOIN (
-                        SELECT sku, SUM({inv_col})::bigint AS inv, SUM({virt_col})::bigint AS virt_inv
+                    LEFT JOIN LATERAL (
+                        SELECT SUM({inv_col})::bigint AS inv, SUM({virt_col})::bigint AS virt_inv
                         FROM {inv_table}
-                        WHERE {warehouse_col} = :warehouse
-                        GROUP BY sku
-                    ) inv ON inv.sku = items.sku
+                        WHERE {warehouse_col} = :warehouse AND sku = items.sku
+                    ) inv ON true
                 """
                 if stock_filter_norm == "in_stock":
                     stock_where = " AND COALESCE(inv.inv, 0) > 0 "

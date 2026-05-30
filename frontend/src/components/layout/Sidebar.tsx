@@ -113,31 +113,7 @@ export const NAVIGATION_ITEMS: NavItem[] = [
       { name: 'ROI Analysis', href: '/dashboard/financial/roi', icon: Target },
     ],
   },
-  {
-    name: 'Procurement',
-    icon: Truck,
-    children: [
-      { name: 'Product Master', href: '/dashboard/procurement/product-master', icon: BookOpen },
-      { name: 'Fabric & Yarn Master', href: '/dashboard/procurement/fabric-yarn-master', icon: Layers },
-      { name: 'Suppliers', href: '/dashboard/procurement/suppliers', icon: Building2 },
-      { name: 'Purchase Orders', href: '/dashboard/procurement/purchase-orders', icon: ClipboardList },
-      { name: 'Gate Entry', href: '/dashboard/procurement/gate-entry', icon: PackageCheck },
-      { name: 'MRN', href: '/dashboard/procurement/mrn', icon: FileText },
-    ],
-  },
-  {
-    name: 'Manufacturing',
-    icon: Factory,
-    children: [
-      { name: 'Yarn Store', href: '/dashboard/manufacturing/yarn-store', icon: Package },
-      { name: 'Knit Orders', href: '/dashboard/manufacturing/knit-orders', icon: Layers },
-      { name: 'Processing', href: '/dashboard/manufacturing/processing', icon: Boxes },
-      { name: 'Cutting', href: '/dashboard/manufacturing/cutting', icon: Scissors },
-      { name: 'Stitching', href: '/dashboard/manufacturing/stitching', icon: Shirt },
-      { name: 'Finishing', href: '/dashboard/manufacturing/finishing', icon: CheckCircle },
-      { name: 'Barcoding', href: '/dashboard/manufacturing/barcoding', icon: QrCode },
-    ],
-  },
+
 ];
 
 const MODULE_BY_ITEM_NAME: Record<string, string> = {
@@ -146,8 +122,6 @@ const MODULE_BY_ITEM_NAME: Record<string, string> = {
   Garments: 'garments',
   Sales: 'sales',
   Financial: 'financial',
-  Procurement: 'procurement',
-  Manufacturing: 'manufacturing',
 };
 
 interface SidebarProps {
