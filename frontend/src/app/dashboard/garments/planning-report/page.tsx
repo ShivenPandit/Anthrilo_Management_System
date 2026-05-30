@@ -21,6 +21,8 @@ interface PlanningReportItem {
     type: string;
     lifecycle?: string | null;
     size: string;
+    gross_sale_qty: number;
+    return_qty: number;
     /** Sum of sales_orders.qty for order_date in the selected range (same rules as backend). */
     net_sale_qty: number;
     good_inventory: number;
@@ -467,6 +469,8 @@ export default function GarmentPlanningReportPage() {
                                             'TYPE',
                                             'LIFECYCLE',
                                             'Size',
+                                            'Gross sale (qty)',
+                                            'Return (qty)',
                                             'Net sale (qty)',
                                             'good inventory',
                                             'AVERAGE DAILY SALES',
@@ -501,6 +505,12 @@ export default function GarmentPlanningReportPage() {
                                             <td className="px-4 py-3 whitespace-nowrap">{item.type || '-'}</td>
                                             <td className="px-4 py-3 whitespace-nowrap">{item.lifecycle || '-'}</td>
                                             <td className="px-4 py-3 whitespace-nowrap">{item.size || '-'}</td>
+                                            <td className="px-4 py-3 text-right whitespace-nowrap">
+                                                {formatNumber(item.gross_sale_qty)}
+                                            </td>
+                                            <td className="px-4 py-3 text-right whitespace-nowrap">
+                                                {formatNumber(item.return_qty)}
+                                            </td>
                                             <td className="px-4 py-3 text-right whitespace-nowrap">
                                                 {formatNumber(item.net_sale_qty)}
                                             </td>
@@ -545,7 +555,7 @@ export default function GarmentPlanningReportPage() {
                                     ))}
                                     {!items.length && (
                                         <tr>
-                                            <td colSpan={18} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
+                                            <td colSpan={20} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
                                                 No planning rows on this page for the selected filters.
                                             </td>
                                         </tr>
