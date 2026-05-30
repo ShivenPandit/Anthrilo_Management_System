@@ -9,7 +9,7 @@ from app.db.models import (
     Fabric, Yarn, Garment, Inventory, Sale,
     ProductionPlan, ProductionActivity, Panel, ProductionPlanningReport
 )
-from app.db.export_models import InventorySnapshotRecord, SalesOrderRecord, ShopifyMasterData, SalesReturnRecord
+from app.db.export_models import SalesOrderRecord, ShopifyMasterData, SalesReturnRecord
 
 
 EXCLUDED_ORDER_STATUSES = {

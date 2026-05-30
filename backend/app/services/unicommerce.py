@@ -1322,93 +1322,9 @@ class UnicommerceService:
             db.close()
 
     def _upsert_inventory_snapshot_rows(self, snapshots: List[Dict[str, Any]], facility_code: str) -> int:
-        if not snapshots:
-            return 0
-
-        payloads: List[Dict[str, Any]] = []
-        normalized_warehouse = self._safe_str(facility_code or "anthrilo")
-
-        for snap in snapshots:
-            sku = self._safe_str(snap.get("itemTypeSKU") or snap.get("sku"))
-            if not sku:
-                continue
-
-            payloads.append(
-                {
-                    "sku": sku,
-                    "warehouse": normalized_warehouse,
-                    "available_qty": self._safe_int(snap.get("inventory"), default=0),
-                    "reserved_qty": self._safe_int(
-                        snap.get("openSale")
-                        or snap.get("virtualInventory")
-                        or snap.get("reservedInventory")
-                        or 0,
-                        default=0,
-                    ),
-                    "blocked_qty": self._safe_int(
-                        snap.get("inventoryBlocked")
-                        or snap.get("blockedInventory")
-                        or snap.get("badInventory")
-                        or 0,
-                        default=0,
-                    ),
-                    "facility": self._safe_str(snap.get("Facility") or snap.get("facility") or facility_code),
-                    "color": self._safe_str(snap.get("Color") or snap.get("color")),
-                    "size": self._safe_str(snap.get("Size") or snap.get("size")),
-                    "brand": self._safe_str(snap.get("Brand") or snap.get("brand")),
-                    "category": self._safe_str(
-                        snap.get("Category Name")
-                        or snap.get("categoryName")
-                        or snap.get("Category")
-                    ),
-                    "mrp": self._safe_float(
-                        snap.get("MRP")
-                        or snap.get("mrp")
-                        or snap.get("maxRetailPrice")
-                        or 0.0,
-                        default=0.0,
-                    ),
-                    "cost_price": self._safe_float(
-                        snap.get("Cost Price")
-                        or snap.get("costPrice")
-                        or 0.0,
-                        default=0.0,
-                    ),
-                    "updated_at": datetime.utcnow(),
-                }
-            )
-
-        if not payloads:
-            return 0
-
-        db = SessionLocal()
-        try:
-            stmt = pg_insert().values(payloads)
-            upsert_stmt = stmt.on_conflict_do_update(
-                index_elements=["sku", "warehouse"],
-                set_={
-                    "available_qty": stmt.excluded.available_qty,
-                    "reserved_qty": stmt.excluded.reserved_qty,
-                    "blocked_qty": stmt.excluded.blocked_qty,
-                    "facility": func.coalesce(stmt.excluded.facility, .facility),
-                    "color": func.coalesce(stmt.excluded.color, .color),
-                    "size": func.coalesce(stmt.excluded.size, .size),
-                    "brand": func.coalesce(stmt.excluded.brand, .brand),
-                    "category": func.coalesce(stmt.excluded.category, .category),
-                    "mrp": func.coalesce(stmt.excluded.mrp, .mrp),
-                    "cost_price": func.coalesce(stmt.excluded.cost_price, .cost_price),
-                    "updated_at": datetime.utcnow(),
-                },
-            )
-            db.execute(upsert_stmt)
-            db.commit()
-            return len(payloads)
-        except Exception as exc:
-            db.rollback()
-            logger.warning(f"Export archival: failed to upsert inventory snapshots: {exc}")
-            return 0
-        finally:
-            db.close()
+        # Deprecated: Inventory snapshots are now synced directly into FacilityInventorySnapshot via sync_inventory_snapshot.py
+        # The legacy InventorySnapshotRecord model has been removed.
+        return 0
 
 
     async def _create_export_job(

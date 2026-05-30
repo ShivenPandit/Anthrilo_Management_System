@@ -189,7 +189,11 @@ class FacilityInventorySnapshot(Base):
     sku = Column(String(120), nullable=False, index=True)
     facility_code = Column(String(120), nullable=False, index=True)
     
-    category = Column(Text, nullable=True)
+    category = Column(String(120), nullable=True, index=True)
+    color = Column(String(120), nullable=True, index=True)
+    size = Column(String(120), nullable=True, index=True)
+    brand = Column(String(120), nullable=True, index=True)
+    
     inventory = Column(Integer, nullable=False, default=0)
     available_inventory = Column(Integer, nullable=False, default=0)
     reserved_inventory = Column(Integer, nullable=False, default=0)
@@ -198,6 +202,7 @@ class FacilityInventorySnapshot(Base):
     archived = Column(Boolean, nullable=False, default=False)
     
     cost_price = Column(Numeric(12, 2), nullable=True)
+    mrp = Column(Numeric(12, 2), nullable=True)
     
     snapshot_date = Column(DateTime, nullable=False, index=True)
     raw_data = Column(JSONB, nullable=True)

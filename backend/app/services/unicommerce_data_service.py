@@ -17,11 +17,11 @@ from app.db.session import SessionLocal
 from app.db.export_models import (
     ExportJob,
     ExportRow,
+    FacilityInventorySnapshot,
     ShopifyMasterData,
     SalesOrderRecord,
     SalesReturnRecord,
 )
-from app.db.models import 
 from app.services.cache_service import CacheService
 from app.services.unicommerce import get_unicommerce_service
 from app.utils.timezone_utils import IST, normalize_date_range_ist
@@ -5018,27 +5018,27 @@ class UnicommerceDataService:
     ) -> Dict[str, Any]:
         db = self._get_db()
         try:
-            query = db.query()
+            query = db.query(FacilityInventorySnapshot)
 
             warehouse_norm = self._safe_str(warehouse)
             if warehouse_norm:
-                query = query.filter(.warehouse == warehouse_norm)
+                query = query.filter(FacilityInventorySnapshot.facility_code == warehouse_norm)
 
             clean_skus = [self._safe_str(sku) for sku in (skus or []) if self._safe_str(sku)]
             if clean_skus:
-                query = query.filter(.sku.in_(clean_skus))
+                query = query.filter(FacilityInventorySnapshot.sku.in_(clean_skus))
 
             records = query.all()
             if records:
-                last_synced = max((r.updated_at for r in records if r.updated_at), default=None)
+                last_synced = max((r.synced_at for r in records if r.synced_at), default=None)
                 items = [
                     {
                         "sku": r.sku,
-                        "warehouse": r.warehouse,
-                        "available_qty": int(r.available_qty or 0),
-                        "reserved_qty": int(r.reserved_qty or 0),
-                        "blocked_qty": int(r.blocked_qty or 0),
-                        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                        "warehouse": r.facility_code,
+                        "available_qty": int(r.available_inventory or r.inventory or 0),
+                        "reserved_qty": int(r.reserved_inventory or 0),
+                        "blocked_qty": 0,
+                        "updated_at": r.synced_at.isoformat() if r.synced_at else None,
                     }
                     for r in records
                 ]
@@ -5295,31 +5295,28 @@ class UnicommerceDataService:
             return {}
 
         try:
-            rows = (
-                db.query(
-                    .sku,
-                    .name,
-                    .size,
-                    .type,
-                    .net_weight,
-                )
-                .filter(.sku.in_(clean_skus))
-                .all()
-            )
+            stmt = text(
+                """
+                SELECT sku, name, size, type, net_weight
+                FROM product_master
+                WHERE sku IN :skus
+                """
+            ).bindparams(bindparam("skus", expanding=True))
+            rows = db.execute(stmt, {"skus": clean_skus}).mappings().all()
         except Exception as exc:
             logger.warning("Catalog metadata: product_master lookup skipped: %s", exc)
             return {}
 
         result: Dict[str, Dict[str, Any]] = {}
         for row in rows:
-            sku = self._safe_str(row.sku)
+            sku = self._safe_str(row.get("sku"))
             if not sku:
                 continue
             result[sku] = {
-                "name": self._safe_str(row.name),
-                "size": self._safe_str(row.size),
-                "categoryName": self._safe_str(row.type),
-                "weight": self._safe_float(row.net_weight, default=0.0),
+                "name": self._safe_str(row.get("name")),
+                "size": self._safe_str(row.get("size")),
+                "categoryName": self._safe_str(row.get("type")),
+                "weight": self._safe_float(row.get("net_weight"), default=0.0),
             }
         return result
 
@@ -5371,7 +5368,7 @@ class UnicommerceDataService:
 
     def _inventory_record_to_catalog_element(
         self,
-        record: ,
+        record: Any,
         item_master_meta: Optional[Dict[str, Any]] = None,
         product_master_meta: Optional[Dict[str, Any]] = None,
         sales_order_meta: Optional[Dict[str, Any]] = None,
