@@ -170,29 +170,116 @@ async def _download_parse_inventory_csv(download_url: str) -> List[Dict[str, Any
 
         reader = csv.DictReader(io.StringIO(csv_text))
         rows: List[Dict[str, Any]] = []
-        # Fetch name-to-sku mapping from latest item_master export to resolve missing SKUs in Inventory Snapshot CSV
-        name_to_sku_map = {}
+        # Fetch item_master attributes to resolve missing SKUs in Inventory Snapshot CSV
+        name_to_sku_map: Dict[str, Optional[str]] = {}
+        name_size_brand_map: Dict[str, Optional[str]] = {}
+        name_size_color_brand_map: Dict[str, Optional[str]] = {}
+        ean_to_sku_map: Dict[str, Optional[str]] = {}
+        upc_to_sku_map: Dict[str, Optional[str]] = {}
+        isbn_to_sku_map: Dict[str, Optional[str]] = {}
+
+        def _record_unique(target: Dict[str, Optional[str]], key: str, sku: str) -> None:
+            if not key or not sku:
+                return
+            if key not in target:
+                target[key] = sku
+            elif target[key] != sku:
+                target[key] = ""
+
+        def _norm_key(value: Any) -> str:
+            return str(value or "").strip().lower()
         try:
             with SessionLocal() as db:
                 res = db.execute(text("""
-                    SELECT er.payload->>'Name', er.payload->>'Product Code'
+                    SELECT
+                        er.payload->>'Name' AS name,
+                        er.payload->>'Product Code' AS sku,
+                        er.payload->>'Size' AS size,
+                        er.payload->>'Color' AS color,
+                        er.payload->>'Brand' AS brand,
+                        er.payload->>'EAN' AS ean,
+                        er.payload->>'UPC' AS upc,
+                        er.payload->>'ISBN' AS isbn
                     FROM export_rows er
                     JOIN export_jobs ej ON er.export_job_id = ej.id
                     WHERE ej.export_type = 'item_master' AND ej.status = 'completed'
                     ORDER BY ej.id DESC
                 """))
-                for r_name, r_sku in res:
-                    if r_name and r_sku:
-                        name_to_sku_map[r_name.strip().lower()] = r_sku.strip()
-            logger.info(f"Loaded {len(name_to_sku_map)} name-to-sku mappings from item_master")
+                for row in res.mappings():
+                    sku = str(row.get("sku") or "").strip()
+                    if not sku:
+                        continue
+                    name = _norm_key(row.get("name"))
+                    size = _norm_key(row.get("size"))
+                    color = _norm_key(row.get("color"))
+                    brand = _norm_key(row.get("brand"))
+                    ean = _norm_key(row.get("ean"))
+                    upc = _norm_key(row.get("upc"))
+                    isbn = _norm_key(row.get("isbn"))
+
+                    _record_unique(name_to_sku_map, name, sku)
+                    _record_unique(name_size_brand_map, f"{name}|{size}|{brand}", sku)
+                    _record_unique(name_size_color_brand_map, f"{name}|{size}|{color}|{brand}", sku)
+                    _record_unique(ean_to_sku_map, ean, sku)
+                    _record_unique(upc_to_sku_map, upc, sku)
+                    _record_unique(isbn_to_sku_map, isbn, sku)
+            logger.info(
+                "Loaded item_master mappings: "
+                f"name={len(name_to_sku_map)}, "
+                f"name_size_brand={len(name_size_brand_map)}, "
+                f"name_size_color_brand={len(name_size_color_brand_map)}, "
+                f"ean={len(ean_to_sku_map)}, upc={len(upc_to_sku_map)}, isbn={len(isbn_to_sku_map)}"
+            )
         except Exception as e:
             logger.error(f"Failed to load name-to-sku map: {e}")
 
         for row in reader:
-            item_name = (row.get("Item Type Name") or row.get("itemTypeName") or "").strip().lower()
-            mapped_sku = name_to_sku_map.get(item_name)
-            if mapped_sku:
-                row["Item Type SKU"] = mapped_sku
+            has_sku = any(
+                [
+                    (row.get("Item SkuCode") or "").strip(),
+                    (row.get("itemSkuCode") or "").strip(),
+                    (row.get("Item Type SKU") or "").strip(),
+                    (row.get("itemTypeSKU") or "").strip(),
+                ]
+            )
+
+            if not has_sku:
+                item_name = _norm_key(row.get("Item Type Name") or row.get("itemTypeName"))
+                size = _norm_key(row.get("Size") or row.get("size"))
+                color = _norm_key(row.get("Color") or row.get("color"))
+                brand = _norm_key(row.get("Brand") or row.get("brand"))
+                ean = _norm_key(row.get("EAN"))
+                upc = _norm_key(row.get("UPC"))
+                isbn = _norm_key(row.get("ISBN"))
+
+                mapped_sku = None
+                for key, source in (
+                    (ean, ean_to_sku_map),
+                    (upc, upc_to_sku_map),
+                    (isbn, isbn_to_sku_map),
+                    (f"{item_name}|{size}|{color}|{brand}", name_size_color_brand_map),
+                    (f"{item_name}|{size}|{brand}", name_size_brand_map),
+                    (item_name, name_to_sku_map),
+                ):
+                    if not key:
+                        continue
+                    candidate = source.get(key)
+                    if candidate:
+                        mapped_sku = candidate
+                        break
+
+                if mapped_sku:
+                    row["Item SkuCode"] = mapped_sku
+
+            # Normalize all SKU fields to uppercase to prevent case-variant
+            # duplicates in the DB. The CSV exports "Item Type SKU" in uppercase
+            # but "Item SkuCode" (from item_master mapping) in lowercase,
+            # which creates duplicate rows since the DB constraint is case-sensitive.
+            for sku_field in ("Item SkuCode", "itemSkuCode", "Item Type SKU", "itemTypeSKU", "SKU Code", "skuCode"):
+                val = (row.get(sku_field) or "").strip()
+                if val:
+                    row[sku_field] = val.upper()
+
             rows.append(row)
 
         logger.info(f"Inventory export: Parsed {len(rows)} inventory rows from CSV")
@@ -211,12 +298,13 @@ def _aggregate_inventory_rows(rows: List[Dict[str, Any]], facility_code: str) ->
     for row in rows:
         sku_base = (
             row.get("Item SkuCode")
+            or row.get("itemSkuCode")
             or row.get("Item Type SKU")
             or row.get("itemTypeSKU")
             or row.get("SKU Code")
             or row.get("skuCode")
             or ""
-        ).strip()
+        ).strip().upper()  # Normalize to uppercase — prevents case-variant duplicates
         if not sku_base:
             missing_sku_rows += 1
             continue
