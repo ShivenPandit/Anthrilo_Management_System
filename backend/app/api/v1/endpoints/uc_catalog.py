@@ -472,6 +472,13 @@ async def _download_parse_inventory_csv(download_url: str) -> List[Dict[str, Any
 
         rows: List[Dict[str, Any]] = []
         for row in reader:
+            # Normalize all SKU fields to uppercase to prevent case-variant
+            # duplicates. The CSV has "Item Type SKU" (uppercase) and
+            # "Item SkuCode" (lowercase) which must be treated as the same SKU.
+            for sku_field in ("Item SkuCode", "itemSkuCode", "Item Type SKU", "itemTypeSKU", "SKU Code", "skuCode"):
+                val = (row.get(sku_field) or "").strip()
+                if val:
+                    row[sku_field] = val.upper()
             rows.append(row)
 
         logger.info(f"Inventory export: Parsed {len(rows)} inventory rows from CSV")
