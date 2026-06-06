@@ -16,6 +16,12 @@ interface FabricPlanningReportItem {
   qty_required: number;
 }
 
+interface FabricSummaryItem {
+  fabric: string;
+  print: string;
+  total_qty_required: number;
+}
+
 interface FabricPlanningReportResponse {
   report_type: string;
   generated_at: string;
@@ -35,6 +41,7 @@ interface FabricPlanningReportResponse {
     total_skus: number;
     total_pages: number;
   };
+  fabric_summary: FabricSummaryItem[];
   items: FabricPlanningReportItem[];
 }
 
@@ -101,6 +108,14 @@ export default function FabricPlanningPage() {
   );
 
   const fabricSummaryRows = useMemo(() => {
+    // Prefer backend summary if available
+    if (report?.fabric_summary && report.fabric_summary.length > 0) {
+      return report.fabric_summary;
+    }
+
+    // Fallback: calculate from paginated items (limited but better than empty)
+    // or from all items if they happened to be fetched.
+    // NOTE: Since the backend now provides this, this is just a safety catch.
     const grouped = new Map<string, { fabric: string; print: string; total_qty_required: number }>();
     for (const item of report?.items ?? []) {
       const fabric = item.fabric || '-';
@@ -113,55 +128,47 @@ export default function FabricPlanningPage() {
     return Array.from(grouped.values()).sort((a, b) => b.total_qty_required - a.total_qty_required);
   }, [report]);
 
-  const downloadDetailCsv = useCallback(() => {
-    const headers = [
-      'STYLE CODE',
-      'SKU',
-      'NAME',
-      'Size',
-      'Required QTY',
-      'FABRIC',
-      'PRINT',
-      'NET WEIGHT',
-      'QTY REQUIRED',
-    ];
-    const rows = (report?.items ?? []).map((item) => [
-      item.style_code || '-',
-      item.sku || '-',
-      item.name || '-',
-      item.size || '-',
-      Number(item.required_qty || 0).toFixed(2),
-      item.fabric || '-',
-      item.print || '-',
-      Number(item.net_weight || 0).toFixed(4),
-      Number(item.qty_required || 0).toFixed(2),
-    ]);
-    const csv = [headers, ...rows].map((row) => row.map(escapeCsvCell).join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `fabric-planning_${asOfDate}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [report, asOfDate]);
+  const downloadDetailCsv = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await apiClient.get('/reports/garments/fabric-planning-report/export-csv', {
+        params: { as_of_date: asOfDate },
+        responseType: 'blob',
+      });
+      const url = URL.createObjectURL(new Blob([response.data], { type: 'text/csv' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `fabric-planning_${asOfDate}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Download failed:', error);
+      alert('Failed to download CSV.');
+    } finally {
+      setLoading(false);
+    }
+  }, [asOfDate]);
 
-  const downloadSummaryCsv = useCallback(() => {
-    const headers = ['FABRIC', 'PRINT', 'TOTAL QTY REQUIRED'];
-    const rows = fabricSummaryRows.map((row) => [
-      row.fabric,
-      row.print,
-      Number(row.total_qty_required || 0).toFixed(2),
-    ]);
-    const csv = [headers, ...rows].map((row) => row.map(escapeCsvCell).join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `fabric-planning-summary_${asOfDate}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [fabricSummaryRows, asOfDate]);
+  const downloadSummaryCsv = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await apiClient.get('/reports/garments/fabric-planning-report/summary-csv', {
+        params: { as_of_date: asOfDate },
+        responseType: 'blob',
+      });
+      const url = URL.createObjectURL(new Blob([response.data], { type: 'text/csv' }));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `fabric-planning-summary_${asOfDate}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Download failed:', error);
+      alert('Failed to download summary CSV.');
+    } finally {
+      setLoading(false);
+    }
+  }, [asOfDate]);
 
   return (
     <div className="space-y-6">
@@ -273,7 +280,7 @@ export default function FabricPlanningPage() {
               {!(report?.items?.length ?? 0) && (
                 <tr>
                   <td colSpan={9} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
-                    Click Generate to load fabric planning rows.
+                    {report ? 'No planning data found for the selected date.' : 'Click Generate to load fabric planning rows.'}
                   </td>
                 </tr>
               )}
@@ -341,7 +348,7 @@ export default function FabricPlanningPage() {
                 {!fabricSummaryRows.length && (
                   <tr>
                     <td colSpan={3} className="px-4 py-8 text-center text-slate-500 dark:text-slate-400">
-                      No summary rows available.
+                      {report ? 'No summary data found for the selected date.' : 'Click Generate to load fabric planning summary.'}
                     </td>
                   </tr>
                 )}
