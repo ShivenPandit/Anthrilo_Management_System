@@ -10,24 +10,38 @@ from app.services.sales_service import get_daily_sales
 router = APIRouter()
 
 
-@router.get("/raw-materials/stock-analysis")
-def get_stock_analysis(
-    category: Optional[str] = Query(
-        None, description="Filter by category: Yarn, Fabric"),
-    db: Session = Depends(get_db)
+@router.get("/garments/fabric-planning-report/export-csv")
+def export_fabric_planning_report_csv(
+    as_of_date: Optional[date] = Query(
+        None, description="Anchor date for rolling last 30 days (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
 ):
-    """Get raw materials stock analysis combining yarn and fabric data"""
+    """Download full fabric planning report as CSV."""
     service = ReportsService(db)
-    return service.raw_materials_stock_analysis(category)
+    body = service.fabric_planning_report_csv(as_of_date=as_of_date)
+    fname = f"fabric-planning_{as_of_date.isoformat() if as_of_date else 'latest'}.csv"
+    return Response(
+        content=body,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
-@router.get("/raw-materials/yarn-forecasting")
-def get_yarn_forecasting(
-    forecast_days: int = Query(30, description="Forecast period in days"),
-    db: Session = Depends(get_db)
+@router.get("/garments/fabric-planning-report/summary-csv")
+def export_fabric_planning_summary_csv(
+    as_of_date: Optional[date] = Query(
+        None, description="Anchor date for rolling last 30 days (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
 ):
-    """Get yarn demand forecasting based on production plans and consumption"""
+    """Download fabric planning summary as CSV."""
     service = ReportsService(db)
+    body = service.fabric_planning_summary_csv(as_of_date=as_of_date)
+    fname = f"fabric-planning-summary_{as_of_date.isoformat() if as_of_date else 'latest'}.csv"
+    return Response(
+        content=body,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
     return service.yarn_forecasting_report(forecast_days)
 
 
@@ -153,8 +167,10 @@ def get_daily_production_variance_report(
 def get_garment_planning_report(
     start_date: date = Query(..., description="Start date (YYYY-MM-DD)"),
     end_date: date = Query(..., description="End date (YYYY-MM-DD)"),
-    season: str = Query("both", description="Season filter: summer, winter, or both"),
-    type: Optional[str] = Query(None, description="Type filter (comma-separated for multiple)"),
+    season: str = Query(
+        "both", description="Season filter: summer, winter, or both"),
+    type: Optional[str] = Query(
+        None, description="Type filter (comma-separated for multiple)"),
     page: int = Query(1, ge=1, description="Page number (20 SKUs per page)"),
     page_size: int = Query(20, ge=1, le=500, description="Rows per page"),
     db: Session = Depends(get_db)
@@ -168,13 +184,16 @@ def get_garment_planning_report(
 def export_garment_planning_report_csv(
     start_date: date = Query(..., description="Start date (YYYY-MM-DD)"),
     end_date: date = Query(..., description="End date (YYYY-MM-DD)"),
-    season: str = Query("both", description="Season filter: summer, winter, or both"),
-    type: Optional[str] = Query(None, description="Type filter (comma-separated for multiple)"),
+    season: str = Query(
+        "both", description="Season filter: summer, winter, or both"),
+    type: Optional[str] = Query(
+        None, description="Type filter (comma-separated for multiple)"),
     db: Session = Depends(get_db),
 ):
     """Download full garment planning report as CSV (same filters as the table)."""
     service = ReportsService(db)
-    body = service.garment_planning_report_csv(start_date, end_date, season, type_filter=type)
+    body = service.garment_planning_report_csv(
+        start_date, end_date, season, type_filter=type)
     fname = f"garment-planning_{start_date.isoformat()}_{end_date.isoformat()}.csv"
     return Response(
         content=body,
@@ -185,7 +204,8 @@ def export_garment_planning_report_csv(
 
 @router.get("/garments/fabric-planning-report")
 def get_fabric_planning_report(
-    as_of_date: Optional[date] = Query(None, description="Anchor date for rolling last 30 days (YYYY-MM-DD)"),
+    as_of_date: Optional[date] = Query(
+        None, description="Anchor date for rolling last 30 days (YYYY-MM-DD)"),
     page: int = Query(1, ge=1, description="Page number (20 SKUs per page)"),
     page_size: int = Query(20, ge=1, le=500, description="Rows per page"),
     db: Session = Depends(get_db),
@@ -199,7 +219,8 @@ def get_fabric_planning_report(
 def get_production_planning_status_report(
     start_date: date = Query(..., description="Start date (YYYY-MM-DD)"),
     end_date: date = Query(..., description="End date (YYYY-MM-DD)"),
-    type: Optional[str] = Query(None, description="Type filter (comma-separated for multiple)"),
+    type: Optional[str] = Query(
+        None, description="Type filter (comma-separated for multiple)"),
     db: Session = Depends(get_db),
 ):
     """Get production planning & status report."""
@@ -211,12 +232,14 @@ def get_production_planning_status_report(
 def export_production_planning_status_report_csv(
     start_date: date = Query(..., description="Start date (YYYY-MM-DD)"),
     end_date: date = Query(..., description="End date (YYYY-MM-DD)"),
-    type: Optional[str] = Query(None, description="Type filter (comma-separated for multiple)"),
+    type: Optional[str] = Query(
+        None, description="Type filter (comma-separated for multiple)"),
     db: Session = Depends(get_db),
 ):
     """Download production planning & status report as CSV."""
     service = ReportsService(db)
-    body = service.production_planning_status_report_csv(start_date=start_date, end_date=end_date, type_filter=type)
+    body = service.production_planning_status_report_csv(
+        start_date=start_date, end_date=end_date, type_filter=type)
     fname = f"production-planning-status_{start_date.isoformat()}_{end_date.isoformat()}.csv"
     return Response(
         content=body,

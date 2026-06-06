@@ -20,17 +20,18 @@ from app.db.export_models import ShopifyMasterData
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 CSV_CANDIDATES = ["ShopifyMasterData.csv", "Shopify Master Data .csv"]
-CSV_PATH = next((os.path.join(ROOT, name) for name in CSV_CANDIDATES if os.path.exists(os.path.join(ROOT, name))), os.path.join(ROOT, CSV_CANDIDATES[0]))
+CSV_PATH = next((os.path.join(ROOT, name) for name in CSV_CANDIDATES if os.path.exists(
+    os.path.join(ROOT, name))), os.path.join(ROOT, CSV_CANDIDATES[0]))
 BACKUP_PATH = os.path.join(ROOT, "shopify_master_data_backup.csv")
 
 
-def _clean(value):
+def _clean(value, upper=False):
     if value is None:
         return None
     text = str(value).strip()
     if not text or text.upper() in {"N/A", "#N/A", "NA", "NULL", "NONE", "-"}:
         return None
-    return text
+    return text.upper() if upper else text
 
 
 def _to_decimal(value):
@@ -97,8 +98,8 @@ def bulk_insert(db, rows: list[Dict[str, str]]):
                 "collection": _clean(r.get("COLLECTION")),
                 "subtype": _clean(r.get("SUBTYPE")),
                 "season": _clean(r.get("SEASON")),
-                "fabric_type": _clean(r.get("FABRIC TYPE")),
-                "print_name": _clean(r.get("PRINT")),
+                "fabric_type": _clean(r.get("FABRIC TYPE"), upper=True),
+                "print_name": _clean(r.get("PRINT"), upper=True),
                 "net_weight": _clean(r.get("NET WEIGHT")),
                 "buffer": _clean(r.get("BUFFER")),
                 "production_time": _clean(r.get("BUFFER")),

@@ -47,6 +47,11 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _single_sku_filter(column):
+    """Match the single-SKU class used by Shopify master data."""
+    return func.upper(func.trim(func.coalesce(column, ""))).in_(("SINGLE", "SIMPLE"))
+
+
 class ReportsService:
     """Service for generating all business reports"""
 
@@ -280,7 +285,7 @@ class ReportsService:
             total_value = stock_qty * cost_per_unit
 
             cost_data.append({
-                "fabric_type": f.fabric_type,
+                "fabric_type": (f.fabric_type or "").strip().upper() if f.fabric_type else "UNKNOWN",
                 "subtype": f.subtype,
                 "gsm": f.gsm,
                 "stock_quantity": stock_qty,
@@ -318,7 +323,7 @@ class ReportsService:
         season: str = "both",
         type_filter: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Collect full garment planning rows for ALL Shopify SKUs from master data."""
+        """Collect full garment planning rows for eligible single-SKU master data."""
 
         if end_date < start_date:
             start_date, end_date = end_date, start_date
@@ -329,17 +334,14 @@ class ReportsService:
             end_date + timedelta(days=1), datetime.min.time())
         days_count = max((end_date - start_date).days + 1, 1)
 
-        # Query ALL SKUs from master data WITHOUT filtering by season or bundle type
-        # This ensures every SKU in the master catalog is included in the report
+        # Query only the single-SKU class from master data.
         masters_query = self.db.query(ShopifyMasterData).order_by(
             ShopifyMasterData.variant_sku.asc(),
         )
 
-        # Include only SIMPLE SKUs; skip BUNDLE or other values.
+        # Accept both live source values: SIMPLE (current data) and SINGLE (requested label).
         masters_query = masters_query.filter(
-            func.upper(func.coalesce(
-                ShopifyMasterData.simple_bundle, "")) == "SIMPLE"
-        )
+            _single_sku_filter(ShopifyMasterData.simple_bundle))
 
         # Apply type filter if provided (comma-separated list of types)
         if type_filter:
@@ -392,11 +394,13 @@ class ReportsService:
             returns_rows = (
                 self.db.query(
                     SalesReturnRecord.sku.label("sku"),
-                    func.coalesce(func.sum(SalesReturnRecord.return_qty), 0).label("return_qty"),
+                    func.coalesce(func.sum(SalesReturnRecord.return_qty), 0).label(
+                        "return_qty"),
                 )
                 .join(
                     SalesOrderRecord,
-                    (SalesReturnRecord.order_id == SalesOrderRecord.order_id) & (SalesReturnRecord.sku == SalesOrderRecord.sku)
+                    (SalesReturnRecord.order_id == SalesOrderRecord.order_id) & (
+                        SalesReturnRecord.sku == SalesOrderRecord.sku)
                 )
                 .filter(
                     SalesReturnRecord.sku.isnot(None),
@@ -469,6 +473,9 @@ class ReportsService:
                 status = "YELLOW"
             else:
                 status = "GREEN"
+
+            if net_sales <= 0 and good_inventory <= 0:
+                continue
 
             item = {
                 "style_code": master.style_code,
@@ -629,9 +636,12 @@ class ReportsService:
             if str(row.get("sku", "")).strip()
         }
 
-        masters = self.db.query(ShopifyMasterData).order_by(
-            ShopifyMasterData.variant_sku.asc(),
-        ).all()
+        masters = (
+            self.db.query(ShopifyMasterData)
+            .filter(_single_sku_filter(ShopifyMasterData.simple_bundle))
+            .order_by(ShopifyMasterData.variant_sku.asc())
+            .all()
+        )
 
         items: List[Dict[str, Any]] = []
         total_required_qty = 0.0
@@ -644,6 +654,7 @@ class ReportsService:
 
             sku_key = sku.upper()
             required_qty = float(required_qty_map.get(sku_key, 0.0) or 0.0)
+
             net_weight = _safe_float(master.net_weight, default=0.0)
             base_qty = net_weight * required_qty
             qty_required = base_qty + (0.25 * base_qty)
@@ -658,12 +669,26 @@ class ReportsService:
                     "name": master.title,
                     "size": (master.size or "-").strip() or "-",
                     "required_qty": round(required_qty, 2),
-                    "fabric": (master.fabric_type or "-").strip() or "-",
-                    "print": (master.print_name or "-").strip() or "-",
+                    "fabric": (master.fabric_type or "-").strip().upper() or "-",
+                    "print": (master.print_name or "-").strip().upper() or "-",
                     "net_weight": round(net_weight, 4),
                     "qty_required": round(qty_required, 2),
                 }
             )
+
+        fabric_map: Dict[tuple, float] = {}
+        for item in items:
+            f = item["fabric"]
+            p = item["print"]
+            fabric_map[(f, p)] = fabric_map.get(
+                (f, p), 0.0) + item["qty_required"]
+
+        fabric_summary = [
+            {"fabric": k[0], "print": k[1], "total_qty_required": round(v, 2)}
+            for k, v in fabric_map.items()
+        ]
+        fabric_summary.sort(
+            key=lambda x: x["total_qty_required"], reverse=True)
 
         total_skus = len(items)
         safe_page_size = max(1, min(int(page_size), 500))
@@ -693,8 +718,53 @@ class ReportsService:
                 "total_skus": total_skus,
                 "total_pages": total_pages,
             },
+            "fabric_summary": fabric_summary,
             "items": page_items,
         }
+
+    def fabric_planning_report_csv(
+        self,
+        as_of_date: Optional[date] = None,
+    ) -> bytes:
+        """Download full detailed fabric planning report as CSV."""
+        data = self.fabric_planning_report(
+            as_of_date=as_of_date, page=1, page_size=1000000)
+        items = data.get("items", [])
+
+        headers = [
+            "style_code",
+            "sku",
+            "name",
+            "size",
+            "required_qty",
+            "fabric",
+            "print",
+            "net_weight",
+            "qty_required",
+        ]
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([h.upper().replace("_", " ") for h in headers])
+        for row in items:
+            writer.writerow([row.get(h, "") for h in headers])
+        return buf.getvalue().encode("utf-8-sig")
+
+    def fabric_planning_summary_csv(
+        self,
+        as_of_date: Optional[date] = None,
+    ) -> bytes:
+        """Download fabric planning summary (grouped) as CSV."""
+        data = self.fabric_planning_report(
+            as_of_date=as_of_date, page=1, page_size=1000000)
+        summary = data.get("fabric_summary", [])
+
+        headers = ["fabric", "print", "total_qty_required"]
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([h.upper().replace("_", " ") for h in headers])
+        for row in summary:
+            writer.writerow([row.get(h, "") for h in headers])
+        return buf.getvalue().encode("utf-8-sig")
 
     def production_planning_status_report(
         self,
