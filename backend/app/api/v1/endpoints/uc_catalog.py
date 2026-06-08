@@ -316,14 +316,9 @@ async def _compute_inventory_aggregates(svc, base_payload: Dict[str, Any]) -> Di
 
 # Inventory summary via export job
 
-# Export columns matching the working curl — every field we need
-INVENTORY_EXPORT_COLUMNS = [
-    "facility", "itemTypeName", "ean", "upc", "isbn",
-    "color", "size", "brand", "categoryName",
-    "openSale", "inventory", "inventoryBlocked", "badInventory",
-    "putawayPending", "pendingInventoryAssessment", "openPurchase",
-    "enabled", "updated", "costPrice",
-]
+# Full export is required because Unicommerce exposes "Item SkuCode" in the
+# generated CSV but rejects it as an explicit export column.
+INVENTORY_EXPORT_COLUMNS = ["All"]
 
 EXPORT_MAX_POLL_SECONDS = 300
 EXPORT_INITIAL_POLL_INTERVAL = 2
@@ -509,6 +504,7 @@ def _build_summary_from_db() -> dict:
         skus_with_stock = 0
         skus_out_of_stock = 0
         total_real_inventory = 0
+        total_virtual_inventory = 0
         total_stock_value = 0.0
         category_totals: Dict[str, Dict] = {}
 
@@ -528,6 +524,7 @@ def _build_summary_from_db() -> dict:
             if any(x != 0 for x in [inv, open_sale, inv_blocked, bad_inv, putaway, open_purchase, pending_assess]):
                 facility_skus += 1
             total_real_inventory += inv
+            total_virtual_inventory += inv_blocked
             total_stock_value += inv * float(row.cost_price or 0.0)
             cat = row.category or "Uncategorized"
             if cat not in category_totals:
@@ -558,7 +555,7 @@ def _build_summary_from_db() -> dict:
             "skusOutOfStock": skus_out_of_stock,
             "outOfStockPercent": oos_pct,
             "totalRealInventory": total_real_inventory,
-            "totalVirtualInventory": 0,
+            "totalVirtualInventory": total_virtual_inventory,
             "totalStockValue": round(total_stock_value, 2),
             "categories": categories_list,
         }

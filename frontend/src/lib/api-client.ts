@@ -26,8 +26,9 @@ apiClient.interceptors.request.use(
       // Let browser/axios set multipart boundary automatically.
       delete config.headers['Content-Type'];
     }
+    const hasAuthorization = Boolean(config.headers.Authorization || config.headers.authorization);
     const token = localStorage.getItem('access_token');
-    if (token) {
+    if (token && !hasAuthorization) {
       config.headers.Authorization = `Bearer ${token}`;
     }
     return config;
