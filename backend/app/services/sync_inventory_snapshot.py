@@ -17,19 +17,16 @@ from app.services.parity_validator import ParityValidator
 
 logger = logging.getLogger(__name__)
 
-# Export columns matching the working curl — every field we need
-INVENTORY_EXPORT_COLUMNS = [
-    "facility", "itemTypeName", "ean", "upc", "isbn",
-    "color", "size", "brand", "categoryName",
-    "openSale", "inventory", "inventoryBlocked", "badInventory",
-    "putawayPending", "pendingInventoryAssessment", "openPurchase",
-    "enabled", "updated", "costPrice", "MRP",
-]
+# Full export is required because Unicommerce exposes "Item SkuCode" in the
+# generated CSV but rejects it as an explicit export column.
+INVENTORY_EXPORT_COLUMNS = ["All"]
 
 EXPORT_MAX_POLL_SECONDS = 300
 EXPORT_INITIAL_POLL_INTERVAL = 2
 EXPORT_MAX_POLL_INTERVAL = 10
 EXPORT_POLL_BACKOFF = 1.5
+MIN_FULL_SNAPSHOT_ROWS = 1000
+MIN_ROW_RETENTION_RATIO = 0.98
 
 
 async def _create_inventory_export_job(facility_code: str) -> Optional[str]:
@@ -340,8 +337,9 @@ def _aggregate_inventory_rows(rows: List[Dict[str, Any]], facility_code: str) ->
         inv_val = _safe_int(row.get("Inventory") or row.get("inventory"))
         aggregated_rows[sku_base]["inventory"] += inv_val
         aggregated_rows[sku_base]["available_inventory"] += inv_val
-        aggregated_rows[sku_base]["reserved_inventory"] += _safe_int(
-            row.get("Open Sale") or row.get("openSale") or row.get("Inventory Blocked") or row.get("inventoryBlocked")
+        aggregated_rows[sku_base]["reserved_inventory"] += (
+            _safe_int(row.get("Open Sale") or row.get("openSale"))
+            + _safe_int(row.get("Inventory Blocked") or row.get("inventoryBlocked"))
         )
 
     unique_rows = list(aggregated_rows.values())
@@ -354,6 +352,29 @@ def _aggregate_inventory_rows(rows: List[Dict[str, Any]], facility_code: str) ->
         "total_real_inventory": int(sum(item["inventory"] for item in unique_rows)),
         "total_virtual_inventory": int(sum(item["reserved_inventory"] for item in unique_rows)),
     }
+
+
+def _validate_inventory_snapshot_for_sync(preview: Dict[str, Any], existing_total_rows: int) -> Optional[str]:
+    """Return an error string when a full inventory export is unsafe to apply."""
+    rows_fetched = int(preview.get("rows_fetched", 0) or 0)
+    unique_rows = int(preview.get("unique_rows", 0) or 0)
+    missing_sku_rows = int(preview.get("missing_sku_rows", 0) or 0)
+
+    if INVENTORY_EXPORT_COLUMNS != ["All"]:
+        return "Inventory sync requires full export columns ['All']"
+    if rows_fetched <= 0 or unique_rows <= 0:
+        return f"Inventory export is empty: rows_fetched={rows_fetched}, unique_rows={unique_rows}"
+    if missing_sku_rows > 0:
+        return f"Inventory export has {missing_sku_rows} rows without SKU; refusing to overwrite snapshot"
+    if unique_rows < MIN_FULL_SNAPSHOT_ROWS:
+        return f"Inventory export has too few SKU rows: unique_rows={unique_rows}"
+    if existing_total_rows > 0 and unique_rows < int(existing_total_rows * MIN_ROW_RETENTION_RATIO):
+        return (
+            "Inventory export row count dropped unexpectedly: "
+            f"existing={existing_total_rows}, export={unique_rows}, "
+            f"minimum_allowed={int(existing_total_rows * MIN_ROW_RETENTION_RATIO)}"
+        )
+    return None
 
 
 async def fetch_inventory_export_preview(facility_code: str = "anthrilo") -> Dict[str, Any]:
@@ -428,9 +449,41 @@ async def fetch_and_sync_inventory(facility_code: str = "anthrilo") -> Dict[str,
     db = SessionLocal()
     inserted_count = 0
     updated_count = 0
+    deleted_stale_count = 0
     now = datetime.utcnow()
     
     try:
+        existing_total_count = (
+            db.query(func.count(FacilityInventorySnapshot.id))
+            .filter(FacilityInventorySnapshot.facility_code == facility_code)
+            .scalar()
+            or 0
+        )
+        validation_error = _validate_inventory_snapshot_for_sync(preview, int(existing_total_count))
+        if validation_error:
+            duration = float(preview.get("duration") or (time_module.time() - start_time))
+            ParityValidator.record_sync_audit(
+                db=db,
+                entity="inventory_snapshot",
+                rows_fetched=int(preview.get("rows_fetched", 0) or 0),
+                rows_inserted=0,
+                rows_updated=0,
+                duplicates_detected=int(preview.get("duplicate_rows", 0) or 0),
+                missing_rows=int(preview.get("missing_sku_rows", 0) or 0),
+                duration=duration,
+                error_count=1,
+            )
+            logger.error("Inventory sync rejected unsafe export: %s", validation_error)
+            return {
+                "success": False,
+                "error": validation_error,
+                "fetched": int(preview.get("rows_fetched", 0) or 0),
+                "unique_rows": int(preview.get("unique_rows", 0) or 0),
+                "missing_rows": int(preview.get("missing_sku_rows", 0) or 0),
+                "existing_rows": int(existing_total_count),
+                "duration": duration,
+            }
+
         if unique_skus:
             sku_values = [str(item.get("sku") or "").strip() for item in unique_skus if str(item.get("sku") or "").strip()]
             existing_count = 0
@@ -489,6 +542,15 @@ async def fetch_and_sync_inventory(facility_code: str = "anthrilo") -> Dict[str,
             )
             
             db.execute(upsert_stmt)
+
+            deleted_stale_count = (
+                db.query(FacilityInventorySnapshot)
+                .filter(
+                    FacilityInventorySnapshot.facility_code == facility_code,
+                    ~FacilityInventorySnapshot.sku.in_(sku_values),
+                )
+                .delete(synchronize_session=False)
+            )
             db.commit()
             updated_count = int(existing_count)
             inserted_count = max(0, len(unique_skus) - updated_count)
@@ -513,6 +575,7 @@ async def fetch_and_sync_inventory(facility_code: str = "anthrilo") -> Dict[str,
             "updated": updated_count,
             "duplicates_removed": int(preview.get("duplicate_rows", 0) or 0),
             "missing_rows": int(preview.get("missing_sku_rows", 0) or 0),
+            "deleted_stale": int(deleted_stale_count),
             "duration": duration,
         }
     except Exception as e:

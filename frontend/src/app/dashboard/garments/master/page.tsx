@@ -42,6 +42,8 @@ export default function GarmentMasterPage() {
   useEffect(() => { setPage(0); }, [selectedCategory]);
   useEffect(() => { setPage(0); }, [stockFilter]);
 
+  const showStockColumn = stockFilter !== 'all';
+
   /* 1a) Accurate inventory summary from dedicated API (all SKUs) */
   const { data: summaryData, isLoading: summaryLoading } = useQuery({
     queryKey: ['uc-inventory-summary'],
@@ -55,14 +57,13 @@ export default function GarmentMasterPage() {
   });
 
   /* 2) Paginated catalog */
-  const needsInventory = stockFilter !== 'all';
   const { data, isLoading, error, isFetching } = useQuery({
     queryKey: ['uc-catalog', page, debouncedSearch, selectedCategory, stockFilter],
     queryFn: async () => {
       const response = await ucCatalog.searchItems({
         displayStart: page * PAGE_SIZE,
         displayLength: PAGE_SIZE,
-        getInventorySnapshot: needsInventory,
+        getInventorySnapshot: true,
         keyword: (debouncedSearch || selectedCategory) || undefined,
         stockFilter: stockFilter,
       });
@@ -314,7 +315,7 @@ export default function GarmentMasterPage() {
             <table className="min-w-full">
               <thead>
                 <tr className="bg-slate-50/70 dark:bg-slate-800/40">
-                  {[...(needsInventory ? ['Stock'] : []), 'SKU Code', 'Product Name', 'Category', 'Color', 'Size', 'Brand', 'IN Stock', 'MRP', 'Weight', 'Status'].map((h) => (
+                  {[...(showStockColumn ? ['Stock'] : []), 'SKU Code', 'Product Name', 'Category', 'Color', 'Size', 'Brand', 'IN Stock', 'MRP', 'Weight', 'Status'].map((h) => (
                     <th key={h} className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">
                       {h}
                     </th>
@@ -324,7 +325,7 @@ export default function GarmentMasterPage() {
               <tbody className="divide-y divide-slate-100/80 dark:divide-slate-800/60">
                 {[...Array(10)].map((_, i) => (
                   <tr key={i} className="animate-pulse bg-slate-50/20 dark:bg-slate-800/10">
-                    {needsInventory && <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-8"></div></td>}
+                    {showStockColumn && <td className="px-4 py-3"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-8"></div></td>}
                     <td className="px-4 py-3"><div className="h-5 bg-slate-200 dark:bg-slate-700 rounded w-24"></div></td>
                     <td className="px-4 py-3">
                       <div className="h-4 bg-slate-200 dark:bg-slate-700 rounded w-48 mb-1"></div>
@@ -353,7 +354,7 @@ export default function GarmentMasterPage() {
             <table className="min-w-full">
               <thead>
                 <tr className="bg-slate-50/70 dark:bg-slate-800/40">
-                  {[...(needsInventory ? ['Stock'] : []), 'SKU Code', 'Product Name', 'Category', 'Color', 'Size', 'Brand', 'IN Stock', 'MRP', 'Weight', 'Status'].map((h) => (
+                  {[...(showStockColumn ? ['Stock'] : []), 'SKU Code', 'Product Name', 'Category', 'Color', 'Size', 'Brand', 'IN Stock', 'MRP', 'Weight', 'Status'].map((h) => (
                     <th key={h} className="px-4 py-3 text-left text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">
                       {h}
                     </th>
@@ -365,7 +366,7 @@ export default function GarmentMasterPage() {
                   <tr key={item.skuCode + i}
                     className="hover:bg-slate-50/60 dark:hover:bg-slate-800/40 transition-colors duration-100">
                     {/* Stock (shown when filter active) */}
-                    {needsInventory && (
+                    {showStockColumn && (
                       <td className="px-4 py-3">
                         <span className={`font-bold text-sm tabular-nums ${item.inventory > 0 ? 'text-emerald-600 dark:text-emerald-400' :
                           'text-rose-600 dark:text-rose-400'
