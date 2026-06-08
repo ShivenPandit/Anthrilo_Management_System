@@ -421,22 +421,8 @@ export default function DashboardPage() {
             ) : null}
 
           </div>
-          <button
-            onClick={handleSyncNow}
-            className="btn btn-secondary w-auto self-start sm:self-auto !px-3.5 !py-2 !text-sm"
-            disabled={syncingNow}
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${syncingNow ? 'animate-spin' : ''}`} />
-            {syncingNow ? 'Syncing DB...' : 'Sync Now'}
-          </button>
-          <button
-            onClick={handleRefresh}
-            className="btn btn-secondary w-auto self-start sm:self-auto !px-3.5 !py-2 !text-sm"
-            disabled={fetchingKpi || syncingNow}
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${fetchingKpi ? 'animate-spin' : ''}`} />
-            {fetchingKpi ? 'Refreshing...' : 'Refresh'}
-          </button>
+
+
         </div>
       </div>
 
