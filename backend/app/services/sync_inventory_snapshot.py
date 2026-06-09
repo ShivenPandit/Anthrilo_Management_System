@@ -147,8 +147,174 @@ def _safe_float(val) -> float:
         return 0.0
 
 
+# ---------------------------------------------------------------------------
+# Sync helpers — these run blocking I/O in a thread pool via asyncio.to_thread
+# so they never block the FastAPI event loop.
+# ---------------------------------------------------------------------------
+
+def _load_item_master_mappings() -> Dict[str, Any]:
+    """
+    Blocking sync function: load item_master SKU lookup maps from the DB.
+    Always run via asyncio.to_thread — never call directly from async code.
+
+    Uses a sub-query to read only the single most-recent completed item_master
+    export job, capping the scan to O(SKUs) instead of O(all export_rows).
+    """
+    name_to_sku_map: Dict[str, Optional[str]] = {}
+    name_size_brand_map: Dict[str, Optional[str]] = {}
+    name_size_color_brand_map: Dict[str, Optional[str]] = {}
+    ean_to_sku_map: Dict[str, Optional[str]] = {}
+    upc_to_sku_map: Dict[str, Optional[str]] = {}
+    isbn_to_sku_map: Dict[str, Optional[str]] = {}
+
+    def _record_unique(target: Dict[str, Optional[str]], key: str, sku: str) -> None:
+        if not key or not sku:
+            return
+        if key not in target:
+            target[key] = sku
+        elif target[key] != sku:
+            target[key] = ""
+
+    def _norm_key(value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    try:
+        with SessionLocal() as db:
+            # Limit to the single most-recent completed item_master job to
+            # avoid scanning historical export_rows (can be 100k+ rows).
+            res = db.execute(text("""
+                SELECT
+                    er.payload->>'Name' AS name,
+                    er.payload->>'Product Code' AS sku,
+                    er.payload->>'Size' AS size,
+                    er.payload->>'Color' AS color,
+                    er.payload->>'Brand' AS brand,
+                    er.payload->>'EAN' AS ean,
+                    er.payload->>'UPC' AS upc,
+                    er.payload->>'ISBN' AS isbn
+                FROM export_rows er
+                JOIN (
+                    SELECT id FROM export_jobs
+                    WHERE export_type = 'item_master' AND status = 'completed'
+                    ORDER BY id DESC
+                    LIMIT 1
+                ) latest_job ON er.export_job_id = latest_job.id
+            """))
+            for row in res.mappings():
+                sku = str(row.get("sku") or "").strip()
+                if not sku:
+                    continue
+                name = _norm_key(row.get("name"))
+                size = _norm_key(row.get("size"))
+                color = _norm_key(row.get("color"))
+                brand = _norm_key(row.get("brand"))
+                ean = _norm_key(row.get("ean"))
+                upc = _norm_key(row.get("upc"))
+                isbn = _norm_key(row.get("isbn"))
+
+                _record_unique(name_to_sku_map, name, sku)
+                _record_unique(name_size_brand_map, f"{name}|{size}|{brand}", sku)
+                _record_unique(name_size_color_brand_map, f"{name}|{size}|{color}|{brand}", sku)
+                _record_unique(ean_to_sku_map, ean, sku)
+                _record_unique(upc_to_sku_map, upc, sku)
+                _record_unique(isbn_to_sku_map, isbn, sku)
+        logger.info(
+            "Loaded item_master mappings: "
+            f"name={len(name_to_sku_map)}, "
+            f"name_size_brand={len(name_size_brand_map)}, "
+            f"name_size_color_brand={len(name_size_color_brand_map)}, "
+            f"ean={len(ean_to_sku_map)}, upc={len(upc_to_sku_map)}, isbn={len(isbn_to_sku_map)}"
+        )
+    except Exception as e:
+        logger.error(f"Failed to load name-to-sku map: {e}")
+
+    return {
+        "name_to_sku_map": name_to_sku_map,
+        "name_size_brand_map": name_size_brand_map,
+        "name_size_color_brand_map": name_size_color_brand_map,
+        "ean_to_sku_map": ean_to_sku_map,
+        "upc_to_sku_map": upc_to_sku_map,
+        "isbn_to_sku_map": isbn_to_sku_map,
+    }
+
+
+def _parse_csv_rows(csv_text: str, mappings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Blocking sync function: parse the inventory CSV and resolve missing SKUs.
+    Always run via asyncio.to_thread — never call directly from async code.
+    """
+    name_to_sku_map = mappings["name_to_sku_map"]
+    name_size_brand_map = mappings["name_size_brand_map"]
+    name_size_color_brand_map = mappings["name_size_color_brand_map"]
+    ean_to_sku_map = mappings["ean_to_sku_map"]
+    upc_to_sku_map = mappings["upc_to_sku_map"]
+    isbn_to_sku_map = mappings["isbn_to_sku_map"]
+
+    def _norm_key(value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    reader = csv.DictReader(io.StringIO(csv_text))
+    rows: List[Dict[str, Any]] = []
+
+    for row in reader:
+        has_sku = any(
+            [
+                (row.get("Item SkuCode") or "").strip(),
+                (row.get("itemSkuCode") or "").strip(),
+                (row.get("Item Type SKU") or "").strip(),
+                (row.get("itemTypeSKU") or "").strip(),
+            ]
+        )
+
+        if not has_sku:
+            item_name = _norm_key(row.get("Item Type Name") or row.get("itemTypeName"))
+            size = _norm_key(row.get("Size") or row.get("size"))
+            color = _norm_key(row.get("Color") or row.get("color"))
+            brand = _norm_key(row.get("Brand") or row.get("brand"))
+            ean = _norm_key(row.get("EAN"))
+            upc = _norm_key(row.get("UPC"))
+            isbn = _norm_key(row.get("ISBN"))
+
+            mapped_sku = None
+            for key, source in (
+                (ean, ean_to_sku_map),
+                (upc, upc_to_sku_map),
+                (isbn, isbn_to_sku_map),
+                (f"{item_name}|{size}|{color}|{brand}", name_size_color_brand_map),
+                (f"{item_name}|{size}|{brand}", name_size_brand_map),
+                (item_name, name_to_sku_map),
+            ):
+                if not key:
+                    continue
+                candidate = source.get(key)
+                if candidate:
+                    mapped_sku = candidate
+                    break
+
+            if mapped_sku:
+                row["Item SkuCode"] = mapped_sku
+
+        # Normalize all SKU fields to uppercase to prevent case-variant
+        # duplicates in the DB. The CSV exports "Item Type SKU" in uppercase
+        # but "Item SkuCode" (from item_master mapping) in lowercase,
+        # which creates duplicate rows since the DB constraint is case-sensitive.
+        for sku_field in ("Item SkuCode", "itemSkuCode", "Item Type SKU", "itemTypeSKU", "SKU Code", "skuCode"):
+            val = (row.get(sku_field) or "").strip()
+            if val:
+                row[sku_field] = val.upper()
+
+        rows.append(row)
+
+    logger.info(f"Inventory export: Parsed {len(rows)} inventory rows from CSV")
+    return rows
+
+
 async def _download_parse_inventory_csv(download_url: str) -> List[Dict[str, Any]]:
-    """Download the Inventory Snapshot CSV and return a list of row dicts."""
+    """Download the Inventory Snapshot CSV and return a list of row dicts.
+
+    The blocking DB query and CPU-heavy CSV parsing are offloaded to a thread
+    pool via asyncio.to_thread so the FastAPI event loop stays responsive.
+    """
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
             resp = await client.get(download_url)
@@ -165,126 +331,19 @@ async def _download_parse_inventory_csv(download_url: str) -> List[Dict[str, Any
             logger.warning("Inventory export: Downloaded CSV is empty")
             return []
 
-        reader = csv.DictReader(io.StringIO(csv_text))
-        rows: List[Dict[str, Any]] = []
-        # Fetch item_master attributes to resolve missing SKUs in Inventory Snapshot CSV
-        name_to_sku_map: Dict[str, Optional[str]] = {}
-        name_size_brand_map: Dict[str, Optional[str]] = {}
-        name_size_color_brand_map: Dict[str, Optional[str]] = {}
-        ean_to_sku_map: Dict[str, Optional[str]] = {}
-        upc_to_sku_map: Dict[str, Optional[str]] = {}
-        isbn_to_sku_map: Dict[str, Optional[str]] = {}
+        # --- offload both blocking operations to thread pool ---
+        # 1. Blocking DB read of item_master mappings (65k+ rows without LIMIT previously)
+        mappings = await asyncio.to_thread(_load_item_master_mappings)
 
-        def _record_unique(target: Dict[str, Optional[str]], key: str, sku: str) -> None:
-            if not key or not sku:
-                return
-            if key not in target:
-                target[key] = sku
-            elif target[key] != sku:
-                target[key] = ""
-
-        def _norm_key(value: Any) -> str:
-            return str(value or "").strip().lower()
-        try:
-            with SessionLocal() as db:
-                res = db.execute(text("""
-                    SELECT
-                        er.payload->>'Name' AS name,
-                        er.payload->>'Product Code' AS sku,
-                        er.payload->>'Size' AS size,
-                        er.payload->>'Color' AS color,
-                        er.payload->>'Brand' AS brand,
-                        er.payload->>'EAN' AS ean,
-                        er.payload->>'UPC' AS upc,
-                        er.payload->>'ISBN' AS isbn
-                    FROM export_rows er
-                    JOIN export_jobs ej ON er.export_job_id = ej.id
-                    WHERE ej.export_type = 'item_master' AND ej.status = 'completed'
-                    ORDER BY ej.id DESC
-                """))
-                for row in res.mappings():
-                    sku = str(row.get("sku") or "").strip()
-                    if not sku:
-                        continue
-                    name = _norm_key(row.get("name"))
-                    size = _norm_key(row.get("size"))
-                    color = _norm_key(row.get("color"))
-                    brand = _norm_key(row.get("brand"))
-                    ean = _norm_key(row.get("ean"))
-                    upc = _norm_key(row.get("upc"))
-                    isbn = _norm_key(row.get("isbn"))
-
-                    _record_unique(name_to_sku_map, name, sku)
-                    _record_unique(name_size_brand_map, f"{name}|{size}|{brand}", sku)
-                    _record_unique(name_size_color_brand_map, f"{name}|{size}|{color}|{brand}", sku)
-                    _record_unique(ean_to_sku_map, ean, sku)
-                    _record_unique(upc_to_sku_map, upc, sku)
-                    _record_unique(isbn_to_sku_map, isbn, sku)
-            logger.info(
-                "Loaded item_master mappings: "
-                f"name={len(name_to_sku_map)}, "
-                f"name_size_brand={len(name_size_brand_map)}, "
-                f"name_size_color_brand={len(name_size_color_brand_map)}, "
-                f"ean={len(ean_to_sku_map)}, upc={len(upc_to_sku_map)}, isbn={len(isbn_to_sku_map)}"
-            )
-        except Exception as e:
-            logger.error(f"Failed to load name-to-sku map: {e}")
-
-        for row in reader:
-            has_sku = any(
-                [
-                    (row.get("Item SkuCode") or "").strip(),
-                    (row.get("itemSkuCode") or "").strip(),
-                    (row.get("Item Type SKU") or "").strip(),
-                    (row.get("itemTypeSKU") or "").strip(),
-                ]
-            )
-
-            if not has_sku:
-                item_name = _norm_key(row.get("Item Type Name") or row.get("itemTypeName"))
-                size = _norm_key(row.get("Size") or row.get("size"))
-                color = _norm_key(row.get("Color") or row.get("color"))
-                brand = _norm_key(row.get("Brand") or row.get("brand"))
-                ean = _norm_key(row.get("EAN"))
-                upc = _norm_key(row.get("UPC"))
-                isbn = _norm_key(row.get("ISBN"))
-
-                mapped_sku = None
-                for key, source in (
-                    (ean, ean_to_sku_map),
-                    (upc, upc_to_sku_map),
-                    (isbn, isbn_to_sku_map),
-                    (f"{item_name}|{size}|{color}|{brand}", name_size_color_brand_map),
-                    (f"{item_name}|{size}|{brand}", name_size_brand_map),
-                    (item_name, name_to_sku_map),
-                ):
-                    if not key:
-                        continue
-                    candidate = source.get(key)
-                    if candidate:
-                        mapped_sku = candidate
-                        break
-
-                if mapped_sku:
-                    row["Item SkuCode"] = mapped_sku
-
-            # Normalize all SKU fields to uppercase to prevent case-variant
-            # duplicates in the DB. The CSV exports "Item Type SKU" in uppercase
-            # but "Item SkuCode" (from item_master mapping) in lowercase,
-            # which creates duplicate rows since the DB constraint is case-sensitive.
-            for sku_field in ("Item SkuCode", "itemSkuCode", "Item Type SKU", "itemTypeSKU", "SKU Code", "skuCode"):
-                val = (row.get(sku_field) or "").strip()
-                if val:
-                    row[sku_field] = val.upper()
-
-            rows.append(row)
-
-        logger.info(f"Inventory export: Parsed {len(rows)} inventory rows from CSV")
+        # 2. CPU-heavy CSV parse + SKU resolution
+        rows = await asyncio.to_thread(_parse_csv_rows, csv_text, mappings)
         return rows
 
     except Exception as e:
         logger.error(f"Inventory export: CSV download/parse error: {e}", exc_info=True)
         return []
+
+
 
 
 def _aggregate_inventory_rows(rows: List[Dict[str, Any]], facility_code: str) -> Dict[str, Any]:
@@ -446,12 +505,34 @@ async def fetch_and_sync_inventory(facility_code: str = "anthrilo") -> Dict[str,
 
     unique_skus = list(preview.get("rows") or [])
 
-    db = SessionLocal()
+    # Offload the entire DB upsert to a thread so the event loop stays free.
+    # The upsert of 28k+ rows is a long-running synchronous operation.
+    result = await asyncio.to_thread(_upsert_inventory_to_db, unique_skus, preview, facility_code, start_time)
+    return result
+
+
+def _upsert_inventory_to_db(
+    unique_skus: List[Dict[str, Any]],
+    preview: Dict[str, Any],
+    facility_code: str,
+    start_time: float,
+) -> Dict[str, Any]:
+    """
+    Blocking sync function: validate and upsert inventory rows to the DB.
+    Always run via asyncio.to_thread — never call directly from async code.
+
+    Performs:
+    - Row count validation
+    - 28k+ row bulk upsert (INSERT ... ON CONFLICT DO UPDATE)
+    - Stale row deletion
+    - Audit log write
+    """
     inserted_count = 0
     updated_count = 0
     deleted_stale_count = 0
     now = datetime.utcnow()
-    
+    db = SessionLocal()
+
     try:
         existing_total_count = (
             db.query(func.count(FacilityInventorySnapshot.id))
@@ -519,7 +600,7 @@ async def fetch_and_sync_inventory(facility_code: str = "anthrilo") -> Dict[str,
                 }
                 for item in unique_skus
             ])
-            
+
             # Upsert logic
             upsert_stmt = insert_stmt.on_conflict_do_update(
                 index_elements=["sku", "facility_code"],
@@ -540,7 +621,7 @@ async def fetch_and_sync_inventory(facility_code: str = "anthrilo") -> Dict[str,
                     "synced_at": insert_stmt.excluded.synced_at,
                 }
             )
-            
+
             db.execute(upsert_stmt)
 
             deleted_stale_count = (
@@ -604,3 +685,4 @@ async def fetch_and_sync_inventory(facility_code: str = "anthrilo") -> Dict[str,
         }
     finally:
         db.close()
+

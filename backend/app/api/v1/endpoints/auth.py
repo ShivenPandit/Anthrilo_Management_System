@@ -340,6 +340,12 @@ def _serialize_user(db: Session, user: User, include_permissions: bool = False) 
     return payload
 
 
+# Process-level flag: RBAC seeding only needs to run once per process.
+# Running it on every /login and /me request caused a 2-3s schema introspection
+# (inspect().get_table_names() against the remote DB) on every single call.
+_rbac_seeded: bool = False
+
+
 def _ensure_rbac_schema(db: Session) -> None:
     """Create RBAC tables on-demand when migration chain is not available."""
     try:
@@ -374,7 +380,14 @@ def _ensure_rbac_schema(db: Session) -> None:
 
 
 def _ensure_rbac_seeded(db: Session) -> None:
-    """Idempotent role and permission bootstrap for production RBAC."""
+    """Idempotent role and permission bootstrap for production RBAC.
+
+    Uses a process-level flag so the expensive schema introspection and full
+    DB scan only run once per process lifetime, not on every request.
+    """
+    global _rbac_seeded
+    if _rbac_seeded:
+        return
     _ensure_rbac_schema(db)
     try:
         modules = [*ERP_MODULES, *EXTRA_PERMISSION_MODULES]
@@ -483,6 +496,7 @@ def _ensure_rbac_seeded(db: Session) -> None:
                     user.is_superuser = True
 
         db.commit()
+        _rbac_seeded = True
     except SQLAlchemyError as exc:
         db.rollback()
         logger.warning("RBAC bootstrap skipped: %s", exc)
