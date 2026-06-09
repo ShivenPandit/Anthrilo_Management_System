@@ -317,12 +317,18 @@ class SyncStateService:
                         )
                         unhealthy = True
                 else:
+                    default_lookback_days = float(getattr(settings, "UNICOMMERCE_RECOVERY_DEFAULT_LOOKBACK_DAYS", 30))
+                    gap_days = default_lookback_days
+                    gap_hours = default_lookback_days * 24.0
+                    gaps.append(gap_days)
+                    gap_hours_values.append(gap_hours)
+
                     alerts.append(
                         {
                             "entity": state.entity,
                             "type": "never_synced",
                             "threshold_hours": alert_threshold_hours,
-                            "gap_hours": None,
+                            "gap_hours": round(gap_hours, 2),
                             "last_successful_sync": None,
                         }
                     )
