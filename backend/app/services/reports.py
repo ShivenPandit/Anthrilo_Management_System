@@ -42,18 +42,6 @@ from app.db.export_models import (
 )
 
 
-EXCLUDED_ORDER_STATUSES = {
-    "CANCELLED",
-    "CANCELED",
-    "RETURNED",
-    "REFUNDED",
-    "FAILED",
-    "UNFULFILLABLE",
-    "ERROR",
-    "PENDING_VERIFICATION",
-}
-
-
 def _safe_float(value: Any, default: float = 0.0) -> float:
     try:
         if value is None or value == "":

@@ -17,6 +17,8 @@ type PlanningRow = {
   cutting: number;
   stitching: number;
   finishing: number;
+  tags?: string;
+  scanning?: number;
   updated_at: string;
   created_at: string;
 };
@@ -295,14 +297,16 @@ export default function ProductionPlanningReportPage() {
             <thead className="bg-slate-50 dark:bg-slate-800/60">
               <tr>
                 {[
-                  { label: 'SKU', className: 'text-left' },
-                  { label: 'Style Code Name', className: 'text-left' },
-                  { label: 'Size', className: 'text-left' },
-                  { label: 'Type', className: 'text-left' },
-                  { label: 'Cutting Pcs', className: 'text-right' },
+                  { label: 'sku code', className: 'text-left' },
+                  { label: 'name', className: 'text-left' },
+                  { label: 'type', className: 'text-left' },
+                  { label: 'tags', className: 'text-left' },
+                  { label: 'size', className: 'text-left' },
+                  { label: 'Cutting Plan', className: 'text-right' },
                   { label: 'Cutting', className: 'text-right' },
                   { label: 'Stitching', className: 'text-right' },
                   { label: 'Finishing', className: 'text-right' },
+                  { label: 'scanning', className: 'text-right' },
                   { label: 'Last Updated', className: 'text-left' },
                   { label: 'Actions', className: 'text-left' },
                 ].map((h) => (
@@ -318,7 +322,7 @@ export default function ProductionPlanningReportPage() {
             <tbody>
               {listQuery.isLoading ? (
                 <tr>
-                  <td colSpan={10} className="px-4 py-10 text-center text-slate-500">
+                  <td colSpan={12} className="px-4 py-10 text-center text-slate-500">
                     <Loader2 className="h-5 w-5 animate-spin inline mr-2" />
                     Loading rows...
                   </td>
@@ -328,12 +332,14 @@ export default function ProductionPlanningReportPage() {
                   <tr key={row.sku} className="border-t border-slate-200 dark:border-slate-800">
                     <td className="px-4 py-3 font-mono text-xs">{row.sku}</td>
                     <td className="px-4 py-3">{row.name || row.style_code || '-'}</td>
-                    <td className="px-4 py-3">{row.size || '-'}</td>
                     <td className="px-4 py-3">{row.type || '-'}</td>
+                    <td className="px-4 py-3">{row.tags || ''}</td>
+                    <td className="px-4 py-3">{row.size || '-'}</td>
                     <td className="px-4 py-3 text-right">{row.cutting_plan}</td>
                     <td className="px-4 py-3 text-right">{row.cutting}</td>
                     <td className="px-4 py-3 text-right">{row.stitching}</td>
                     <td className="px-4 py-3 text-right">{row.finishing}</td>
+                    <td className="px-4 py-3 text-right">{row.scanning ?? 0}</td>
                     <td className="px-4 py-3 whitespace-nowrap">{new Date(row.updated_at).toLocaleString()}</td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1.5">
@@ -387,7 +393,7 @@ export default function ProductionPlanningReportPage() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={10} className="px-4 py-10 text-center text-slate-500">
+                  <td colSpan={12} className="px-4 py-10 text-center text-slate-500">
                     No rows found.
                   </td>
                 </tr>
@@ -438,12 +444,6 @@ export default function ProductionPlanningReportPage() {
                 placeholder="SKU *"
                 value={manualForm.sku}
                 onChange={(e) => setManualForm((s) => ({ ...s, sku: e.target.value }))}
-                className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
-              />
-              <input
-                placeholder="Style Code (optional)"
-                value={manualForm.style_code}
-                onChange={(e) => setManualForm((s) => ({ ...s, style_code: e.target.value }))}
                 className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
               />
               <input
@@ -511,12 +511,6 @@ export default function ProductionPlanningReportPage() {
                 value={editingSku}
                 disabled
                 className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-500"
-              />
-              <input
-                placeholder="Style Code (optional)"
-                value={editForm.style_code}
-                onChange={(e) => setEditForm((s) => ({ ...s, style_code: e.target.value }))}
-                className="px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
               />
               <input
                 placeholder="Name (optional)"
