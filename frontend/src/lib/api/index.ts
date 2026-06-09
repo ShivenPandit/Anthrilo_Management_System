@@ -346,7 +346,7 @@ export const productMasterApi = {
 
 export const shopifyMasterDataApi = {
   getAll: (params?: { skip?: number; limit?: number; search?: string }) =>
-    apiClient.get('/shopify-master-data', { params }),
+    apiClient.get('/shopify-master-data/', { params }),
   import: (file: File) => {
     const formData = new FormData();
     formData.append('file', file);
