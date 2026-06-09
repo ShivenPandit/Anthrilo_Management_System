@@ -1,6 +1,31 @@
 import csv
 import io
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+
+EXCLUDED_ORDER_STATUSES = {
+    "CANCELLED",
+    "CANCELED",
+    "RETURNED",
+    "REFUNDED",
+    "FAILED",
+    "UNFULFILLABLE",
+    "ERROR",
+    "PENDING_VERIFICATION",
+}
+
+CANCELLED_ORDER_STATUSES = {"CANCELLED", "CANCELED"}
+
+UNICOMMERCE_BUSINESS_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
+
+def _unicommerce_business_day_start_utc(value: date) -> datetime:
+    """Convert a Unicommerce local business date boundary to stored UTC."""
+    return (
+        datetime.combine(value, datetime.min.time(), tzinfo=UNICOMMERCE_BUSINESS_TIMEZONE)
+        .astimezone(timezone.utc)
+        .replace(tzinfo=None)
+    )
+
+
 from typing import Optional, Dict, Any, List
 from collections import defaultdict
 from sqlalchemy.orm import Session
@@ -329,9 +354,9 @@ class ReportsService:
             start_date, end_date = end_date, start_date
 
         season_filter = (season or "both").strip().lower()
-        start_dt = datetime.combine(start_date, datetime.min.time())
-        end_dt = datetime.combine(
-            end_date + timedelta(days=1), datetime.min.time())
+        start_dt = _unicommerce_business_day_start_utc(start_date)
+        end_dt = _unicommerce_business_day_start_utc(
+            end_date + timedelta(days=1))
         days_count = max((end_date - start_date).days + 1, 1)
 
         # Query only the single-SKU class from master data.
@@ -365,13 +390,49 @@ class ReportsService:
             sales_rows = (
                 self.db.query(
                     SalesOrderRecord.sku.label("sku"),
-                    func.sum(SalesOrderRecord.qty).label("net_sales"),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    and_(
+                                        ~func.upper(func.coalesce(SalesOrderRecord.status, "")).in_(
+                                            CANCELLED_ORDER_STATUSES
+                                        ),
+                                        ~func.upper(func.coalesce(SalesOrderRecord.sale_order_item_status, "")).in_(
+                                            CANCELLED_ORDER_STATUSES
+                                        ),
+                                    ),
+                                    SalesOrderRecord.qty,
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("gross_sales"),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    and_(
+                                        ~func.upper(func.coalesce(SalesOrderRecord.status, "")).in_(
+                                            CANCELLED_ORDER_STATUSES
+                                        ),
+                                        ~func.upper(func.coalesce(SalesOrderRecord.sale_order_item_status, "")).in_(
+                                            CANCELLED_ORDER_STATUSES
+                                        ),
+                                    ),
+                                    SalesOrderRecord.qty,
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("net_sales"),
                     func.max(SalesOrderRecord.item_type_size).label("size"),
                 )
                 .filter(
                     SalesOrderRecord.sku.isnot(None),
                     SalesOrderRecord.sku != "",
-                    SalesOrderRecord.status == "COMPLETE",
                     SalesOrderRecord.order_date >= start_dt,
                     SalesOrderRecord.order_date < end_dt,
                     SalesOrderRecord.sku.in_(unique_sku_values),
@@ -381,6 +442,7 @@ class ReportsService:
             )
             sales_map = {
                 (row.sku or "").strip().upper(): {
+                    "gross_sales": int(row.gross_sales or 0),
                     "net_sales": int(row.net_sales or 0),
                     "size": row.size,
                 }
@@ -405,7 +467,6 @@ class ReportsService:
                 .filter(
                     SalesReturnRecord.sku.isnot(None),
                     SalesReturnRecord.sku != "",
-                    SalesOrderRecord.status == "COMPLETE",
                     SalesOrderRecord.order_date >= start_dt,
                     SalesOrderRecord.order_date < end_dt,
                     SalesReturnRecord.sku.in_(unique_sku_values),
@@ -447,9 +508,10 @@ class ReportsService:
 
             sku_key = sku.upper()
             sales_row = sales_map.get(sku_key, {})
-            gross_sales = int(sales_row.get("net_sales") or 0)
+            gross_sales = int(sales_row.get("gross_sales") or 0)
             return_qty = int(returns_map.get(sku_key, 0) or 0)
-            net_sales = gross_sales - return_qty
+            completed_sales = int(sales_row.get("net_sales") or 0)
+            net_sales = completed_sales - return_qty
             if net_sales < 0:
                 net_sales = 0
             good_inventory = int(inventory_map.get(sku_key, 0) or 0)
@@ -464,8 +526,7 @@ class ReportsService:
             adjusted_ads = average_daily_sales * season_factor * style_factor
             required_qty = adjusted_ads * (lead_time + buffer_days)
             plan_qty = required_qty - good_inventory
-            percent_available = (good_inventory / required_qty) * \
-                100 if required_qty > 0 else 0.0
+            percent_available = (good_inventory / required_qty) *                 100 if required_qty > 0 else 0.0
 
             if percent_available < 33:
                 status = "RED"
@@ -473,9 +534,6 @@ class ReportsService:
                 status = "YELLOW"
             else:
                 status = "GREEN"
-
-            if net_sales <= 0 and good_inventory <= 0:
-                continue
 
             item = {
                 "style_code": master.style_code,
