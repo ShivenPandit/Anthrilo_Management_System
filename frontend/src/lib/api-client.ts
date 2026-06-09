@@ -43,9 +43,20 @@ apiClient.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      // Kick the user back to login on 401
-      localStorage.removeItem('access_token');
-      window.location.href = '/login';
+      const url: string = error.config?.url || '';
+      // /auth/me is called on page load to refresh session state.
+      // A 401 there means the stored token has expired — let AuthContext
+      // handle it gracefully (it keeps the last-known user and the
+      // interceptor on /login + /refresh will handle reauthentication).
+      // Forcing a hard redirect here causes a redirect loop when the user
+      // already has an expired token in localStorage and tries to login.
+      const isSessionCheck = url.includes('/auth/me') || url.includes('/auth/refresh');
+      if (!isSessionCheck) {
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('refresh_token');
+        localStorage.removeItem('auth_user');
+        window.location.href = '/login';
+      }
     } else if (error.code === 'ECONNABORTED') {
       // Make timeout errors more readable
       error.message = 'Request timed out. The server is taking too long to respond. Please try again.';
