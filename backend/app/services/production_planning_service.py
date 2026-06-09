@@ -56,6 +56,8 @@ class ProductionPlanningService:
         col = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
         while "__" in col:
             col = col.replace("__", "_")
+        if col == "sku_code":
+            return "sku"
         return col
 
     def _cleanup_old_history(self) -> None:
@@ -333,30 +335,87 @@ class ProductionPlanningService:
         processed = 0
 
         self._cleanup_old_history()
+        
+        # 1. Parse and validate all rows, collect valid SKUs
+        parsed_rows = []
+        all_skus = set()
+        for idx, raw in enumerate(rows, start=2):
+            try:
+                normalized_raw = {
+                    normalized_key: value
+                    for raw_key, value in (raw or {}).items()
+                    for normalized_key in [column_key_map.get(str(raw_key or ""))]
+                    if normalized_key
+                }
+
+                sku = self._normalize_sku(normalized_raw.get("sku"))
+                if not sku:
+                    raise ValueError("SKU is required")
+
+                style_code = self._normalize_style_code(normalized_raw.get("style_code"))
+                name = self._normalize_string(normalized_raw.get("name"))
+                size = self._normalize_string(normalized_raw.get("size"))
+                type_val = self._normalize_string(normalized_raw.get("type"))
+                cutting_plan = self._parse_non_negative_int(normalized_raw.get("cutting_plan"), "cutting_plan")
+                cutting = self._parse_non_negative_int(normalized_raw.get("cutting"), "cutting")
+                stitching = self._parse_non_negative_int(normalized_raw.get("stitching"), "stitching")
+                finishing = self._parse_non_negative_int(normalized_raw.get("finishing"), "finishing")
+
+                parsed_rows.append({
+                    "sku": sku,
+                    "style_code": style_code,
+                    "name": name,
+                    "size": size,
+                    "type": type_val,
+                    "cutting_plan": cutting_plan,
+                    "cutting": cutting,
+                    "stitching": stitching,
+                    "finishing": finishing,
+                })
+                all_skus.add(sku)
+            except Exception as exc:
+                failed_rows.append({
+                    "row_number": idx,
+                    "sku": str(raw.get("sku") or "").strip(),
+                    "error": str(exc),
+                })
+                
+        if not parsed_rows:
+            return {
+                "success": True,
+                "total_rows_processed": processed,
+                "new_skus_created": new_count,
+                "existing_skus_updated": updated_count,
+                "failed_rows_count": len(failed_rows),
+                "failed_rows": failed_rows,
+                "duplicate_skus_in_file": [],
+            }
+
         try:
-            for idx, raw in enumerate(rows, start=2):
-                try:
-                    normalized_raw = {
-                        normalized_key: value
-                        for raw_key, value in (raw or {}).items()
-                        for normalized_key in [column_key_map.get(str(raw_key or ""))]
-                        if normalized_key
-                    }
-
-                    sku = self._normalize_sku(normalized_raw.get("sku"))
-                    if not sku:
-                        raise ValueError("SKU is required")
-
-                    style_code = self._normalize_style_code(normalized_raw.get("style_code"))
-                    name = self._normalize_string(normalized_raw.get("name"))
-                    size = self._normalize_string(normalized_raw.get("size"))
-                    type_val = self._normalize_string(normalized_raw.get("type"))
-                    cutting_plan = self._parse_non_negative_int(normalized_raw.get("cutting_plan"), "cutting_plan")
-                    cutting = self._parse_non_negative_int(normalized_raw.get("cutting"), "cutting")
-                    stitching = self._parse_non_negative_int(normalized_raw.get("stitching"), "stitching")
-                    finishing = self._parse_non_negative_int(normalized_raw.get("finishing"), "finishing")
-
-                    op_type = self._upsert_additive(
+            # Delete all old data
+            self.db.query(ProductionPlanningHistory).delete()
+            self.db.query(ProductionPlanningReport).delete()
+            
+            new_records = []
+            history_records = []
+            existing_map = {}
+            
+            # 3. Process all parsed rows
+            for pr in parsed_rows:
+                sku = pr["sku"]
+                style_code = pr["style_code"]
+                name = pr["name"]
+                size = pr["size"]
+                type_val = pr["type"]
+                cutting_plan = pr["cutting_plan"]
+                cutting = pr["cutting"]
+                stitching = pr["stitching"]
+                finishing = pr["finishing"]
+                
+                old = existing_map.get(sku)
+                
+                if old is None:
+                    row = ProductionPlanningReport(
                         sku=sku,
                         style_code=style_code,
                         name=name,
@@ -366,21 +425,50 @@ class ProductionPlanningService:
                         cutting=cutting,
                         stitching=stitching,
                         finishing=finishing,
-                        source="CSV",
                     )
-                    processed += 1
-                    if op_type == "created":
-                        new_count += 1
-                    else:
-                        updated_count += 1
-                except Exception as exc:
-                    failed_rows.append(
-                        {
-                            "row_number": idx,
-                            "sku": str(raw.get("sku") or "").strip(),
-                            "error": str(exc),
-                        }
+                    existing_map[sku] = row # So duplicates in same CSV update the new row
+                    new_records.append(row)
+                    
+                    new_count += 1
+                else:
+                    # Accumulate duplicates from the SAME CSV
+                    old_cutting_plan = int(old.cutting_plan or 0)
+                    old_cutting = int(old.cutting or 0)
+                    old_stitching = int(old.stitching or 0)
+                    old_finishing = int(old.finishing or 0)
+
+                    old.cutting_plan = old_cutting_plan + cutting_plan
+                    old.cutting = old_cutting + cutting
+                    old.stitching = old_stitching + stitching
+                    old.finishing = old_finishing + finishing
+                    
+                    if style_code: old.style_code = style_code
+                    if name: old.name = name
+                    if size: old.size = size
+                    if type_val: old.type = type_val
+                
+                history_records.append(
+                    ProductionPlanningHistory(
+                        sku=sku,
+                        old_cutting_plan=0,
+                        new_cutting_plan=cutting_plan,
+                        old_cutting=0,
+                        new_cutting=cutting,
+                        old_stitching=0,
+                        new_stitching=stitching,
+                        old_finishing=0,
+                        new_finishing=finishing,
+                        updated_quantity_difference=(cutting_plan + cutting + stitching + finishing),
+                        update_source="CSV_REPLACE",
                     )
+                )
+                processed += 1
+
+            if new_records:
+                self.db.add_all(new_records)
+            if history_records:
+                self.db.add_all(history_records)
+                
             self.db.commit()
         except Exception:
             self.db.rollback()
@@ -431,8 +519,50 @@ class ProductionPlanningService:
             .limit(safe_page_size)
             .all()
         )
+
+        skus = [row.sku for row in items if row.sku]
+        tags_map = {}
+        inventory_map = {}
+
+        if skus:
+            from app.db.export_models import ShopifyMasterData, FacilityInventorySnapshot
+            
+            masters = self.db.query(ShopifyMasterData.variant_sku, ShopifyMasterData.tags).filter(ShopifyMasterData.variant_sku.in_(skus)).all()
+            for m in masters:
+                tags_map[m.variant_sku] = m.tags or ""
+                
+            invs = (
+                self.db.query(
+                    FacilityInventorySnapshot.sku,
+                    func.sum(FacilityInventorySnapshot.available_inventory).label("good_inventory")
+                )
+                .filter(FacilityInventorySnapshot.sku.in_(skus))
+                .group_by(FacilityInventorySnapshot.sku)
+                .all()
+            )
+            for inv in invs:
+                inventory_map[inv.sku] = int(inv.good_inventory or 0)
+
+        enriched_items = []
+        for row in items:
+            enriched_items.append({
+                "sku": row.sku,
+                "style_code": row.style_code,
+                "name": row.name,
+                "size": row.size,
+                "type": row.type,
+                "cutting_plan": row.cutting_plan,
+                "cutting": row.cutting,
+                "stitching": row.stitching,
+                "finishing": row.finishing,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "tags": tags_map.get(row.sku, ""),
+                "scanning": inventory_map.get(row.sku, 0),
+            })
+
         return {
-            "items": items,
+            "items": enriched_items,
             "page": safe_page,
             "page_size": safe_page_size,
             "total": total,
@@ -476,6 +606,28 @@ class ProductionPlanningService:
             q = q.filter(ProductionPlanningReport.updated_at < to_dt)
 
         rows = q.order_by(ProductionPlanningReport.updated_at.desc(), ProductionPlanningReport.id.desc()).all()
+
+        skus = [row.sku for row in rows if row.sku]
+        tags_map = {}
+        inventory_map = {}
+        if skus:
+            from app.db.export_models import ShopifyMasterData, FacilityInventorySnapshot
+            masters = self.db.query(ShopifyMasterData.variant_sku, ShopifyMasterData.tags).filter(ShopifyMasterData.variant_sku.in_(skus)).all()
+            for m in masters:
+                tags_map[m.variant_sku] = m.tags or ""
+                
+            invs = (
+                self.db.query(
+                    FacilityInventorySnapshot.sku,
+                    func.sum(FacilityInventorySnapshot.available_inventory).label("good_inventory")
+                )
+                .filter(FacilityInventorySnapshot.sku.in_(skus))
+                .group_by(FacilityInventorySnapshot.sku)
+                .all()
+            )
+            for inv in invs:
+                inventory_map[inv.sku] = int(inv.good_inventory or 0)
+
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(
@@ -483,12 +635,14 @@ class ProductionPlanningService:
                 "sku",
                 "style_code",
                 "name",
-                "size",
                 "type",
+                "tags",
+                "size",
                 "cutting_plan",
                 "cutting",
                 "stitching",
                 "finishing",
+                "scanning",
                 "updated_at",
                 "created_at",
             ]
@@ -499,12 +653,14 @@ class ProductionPlanningService:
                     row.sku,
                     row.style_code or "",
                     row.name or "",
-                    row.size or "",
                     row.type or "",
+                    tags_map.get(row.sku, ""),
+                    row.size or "",
                     int(row.cutting_plan or 0),
                     int(row.cutting or 0),
                     int(row.stitching or 0),
                     int(row.finishing or 0),
+                    inventory_map.get(row.sku, 0),
                     row.updated_at.isoformat() if row.updated_at else "",
                     row.created_at.isoformat() if row.created_at else "",
                 ]
