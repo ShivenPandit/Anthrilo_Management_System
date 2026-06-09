@@ -66,7 +66,7 @@ export const NAVIGATION_ITEMS: NavItem[] = [
     children: [
       { name: 'All Reports', href: '/dashboard/reports/reports-index', icon: FileText },
       { name: 'Sales Report', href: '/dashboard/sales/reports/daily', icon: BarChart3 },
-      { name: 'Sales + Inventory + return combined report', href: '/dashboard/sales/reports/demo', icon: FileText },
+      { name: 'Sales + Inventory + return combined report', href: '/dashboard/sales/reports/combined-report', icon: FileText },
       { name: 'Return Report', href: '/dashboard/sales/reports/returns', icon: BarChart3 },
       { name: 'Cancellation Report', href: '/dashboard/reports/sales/cancellations', icon: Undo2 },
       { name: 'SKU Sales', href: '/dashboard/reports/sales/bundle-sku', icon: BarChart3 },

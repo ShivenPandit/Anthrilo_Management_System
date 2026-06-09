@@ -140,7 +140,7 @@ const REPORTS: ReportDef[] = [
     id: 'demo-report',
     title: 'Sales + Inventory + return combined report',
     description: 'Combined sales, returns and inventory report with channel and bundle SKU details',
-    href: '/dashboard/sales/reports/demo',
+    href: '/dashboard/sales/reports/combined-report',
     icon: FileText,
     category: 'Sales',
     frequency: 'Daily',

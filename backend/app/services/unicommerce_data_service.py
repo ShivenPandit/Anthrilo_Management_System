@@ -2483,15 +2483,13 @@ class UnicommerceDataService:
                     if not self._safe_str(row.get("tags")) and tags_val:
                         row["tags"] = tags_val
 
+                    # Always add to gross sales
+                    row["total_sale_qty"] += qty
+                    row["sale_amount"] += line_amount
+
                     if status in {"CANCELLED", "CANCELED"}:
                         row["cancel_qty"] += qty
                         row["cancel_amount"] += line_amount
-                    elif status in {"RETURNED", "REFUNDED"}:
-                        row["return_qty"] += qty
-                        row["return_amount"] += line_amount
-                    else:
-                        row["total_sale_qty"] += qty
-                        row["sale_amount"] += line_amount
 
             norm_key_to_detail_keys: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = defaultdict(list)
             order_sku_to_detail_keys: Dict[Tuple[str, str], List[Tuple[str, str, str]]] = defaultdict(list)
@@ -2554,39 +2552,17 @@ class UnicommerceDataService:
             sku_global_channel_pref: Dict[str, str] = {}
             default_return_channel = "UNKNOWN"
             try:
-                return_records = (
-                    db.query(
-                        SalesReturnRecord.order_id,
-                        SalesReturnRecord.sku,
-                        SalesReturnRecord.return_qty,
-                        SalesReturnRecord.refund_amount,
-                        SalesReturnRecord.channel_entry,
-                        SalesReturnRecord.created_at,
-                        SalesReturnRecord.updated_at,
-                    )
-                    .filter(
-                        or_(
-                            and_(
-                                SalesReturnRecord.updated_at >= from_dt,
-                                SalesReturnRecord.updated_at <= to_dt,
-                            ),
-                            and_(
-                                SalesReturnRecord.created_at >= from_dt,
-                                SalesReturnRecord.created_at <= to_dt,
-                            ),
-                        )
-                    )
-                    .all()
-                )
+                returns_res = self.get_returns_data(from_date=from_dt, to_date=to_dt)
+                return_records = returns_res.get("items", [])
 
                 unknown_return_order_ids = set()
                 unknown_return_skus = set()
                 for row in return_records:
-                    row_order_code = self._safe_str(row.order_id).upper()
-                    row_sku = _norm_sku(self._safe_str(row.sku))
-                    row_channel = _norm_channel(self._safe_str(row.channel_entry))
-                    row_qty = int(row.return_qty or 0) or 1
-                    row_amount = self._safe_decimal(row.refund_amount, default=Decimal("0"))
+                    row_order_code = self._safe_str(row.get("saleOrderCode")).upper()
+                    row_sku = _norm_sku(self._safe_str(row.get("sku")))
+                    row_channel = _norm_channel(self._safe_str(row.get("channel")))
+                    row_qty = int(row.get("quantity") or 0) or 1
+                    row_amount = self._safe_decimal(row.get("refundAmount"), default=Decimal("0"))
 
                     if not row_sku:
                         continue
