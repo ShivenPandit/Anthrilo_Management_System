@@ -318,11 +318,9 @@ export default function GarmentPlanningReportPage() {
             <div>
                 <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Garment Planning Report</h1>
                 <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                    Simple SKUs with net positive{' '}
+                    All Simple SKUs. Sales are calculated using{' '}
                     <span className="font-medium text-slate-600 dark:text-slate-300">sales_orders.qty</span> in the
-                    selected dates (rows counted only when{' '}
-                    <span className="font-medium text-slate-600 dark:text-slate-300">order_date</span> is set and falls
-                    in range). Inventory from snapshots; planning fields derive from that sale window.
+                    selected dates. Inventory from snapshots; planning fields derive from that sale window.
                 </p>
             </div>
 

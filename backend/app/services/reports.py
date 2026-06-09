@@ -371,7 +371,7 @@ class ReportsService:
                 .filter(
                     SalesOrderRecord.sku.isnot(None),
                     SalesOrderRecord.sku != "",
-                    SalesOrderRecord.status == "COMPLETE",
+                    ~SalesOrderRecord.status.in_(EXCLUDED_ORDER_STATUSES),
                     SalesOrderRecord.order_date >= start_dt,
                     SalesOrderRecord.order_date < end_dt,
                     SalesOrderRecord.sku.in_(unique_sku_values),
@@ -405,7 +405,7 @@ class ReportsService:
                 .filter(
                     SalesReturnRecord.sku.isnot(None),
                     SalesReturnRecord.sku != "",
-                    SalesOrderRecord.status == "COMPLETE",
+                    ~SalesOrderRecord.status.in_(EXCLUDED_ORDER_STATUSES),
                     SalesOrderRecord.order_date >= start_dt,
                     SalesOrderRecord.order_date < end_dt,
                     SalesReturnRecord.sku.in_(unique_sku_values),
@@ -473,9 +473,6 @@ class ReportsService:
                 status = "YELLOW"
             else:
                 status = "GREEN"
-
-            if net_sales <= 0 and good_inventory <= 0:
-                continue
 
             item = {
                 "style_code": master.style_code,
