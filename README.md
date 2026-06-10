@@ -225,7 +225,7 @@ Activate:
 pip install -r requirements.txt
 
 RUN BACKEND
-python -m uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reloadnot
 
 
 
