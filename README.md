@@ -102,7 +102,7 @@ npm run dev
 
 Frontend will run on: **http://localhost:3000**
 
-### 🚀 Quick Access
+### Quick Access
 
 - **Frontend Application**: http://localhost:3000
 - **Backend API**: http://127.0.0.1:8000
